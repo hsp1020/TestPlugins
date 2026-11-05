@@ -1,6 +1,5 @@
 package com.ohli24
 
-import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -10,13 +9,13 @@ import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAnimeLoadResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
@@ -35,7 +34,7 @@ class OHLI24 : MainAPI() {
     override var lang = "ko"
     override val hasChromecastSupport = true
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     override val mainPage = mainPageOf(
         "__popular__" to "인기 작품 TOP 10",
@@ -88,7 +87,7 @@ class OHLI24 : MainAPI() {
             .map { it.text().trim() }
             .firstOrNull { it.toDoubleOrNull() != null }
 
-        return newAnimeSearchResponse(title, href) {
+        return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             posterUrl = poster
             rating?.toDoubleOrNull()?.let { score = Score.from10(it.toString()) }
         }
@@ -112,7 +111,7 @@ class OHLI24 : MainAPI() {
         val card = cardRoot(this)
         val poster = imageUrl(card.selectFirst("img"))
         val rating = card.selectFirst(".rating, [class*=rating]")?.text()?.trim().orEmpty()
-        return newAnimeSearchResponse(title, href) {
+        return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             posterUrl = poster
             if (rating.toDoubleOrNull() != null) score = Score.from10(rating)
         }
@@ -160,8 +159,16 @@ class OHLI24 : MainAPI() {
             }
         }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
-            addEpisodes(DubStatus.Subbed, episodes)
+        val props = parseInertiaPage(doc)?.props
+        val isMovieCatalog = props?.comic?.category == "극장판" ||
+            doc.select("nav[aria-label=breadcrumb] a").any { it.text().trim() == "극장판" }
+        val isMovie = isMovieCatalog && episodes.size == 1 && (props?.episodes?.total ?: episodes.size) == 1
+        val result: LoadResponse = if (isMovie) {
+            newMovieLoadResponse(title, url, TvType.Movie, episodes.single().data)
+        } else {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes)
+        }
+        return result.apply {
             this.year = year
             tags = genres
             contentRating = ageRating
@@ -177,7 +184,12 @@ class OHLI24 : MainAPI() {
     )
 
     private data class InertiaProps(
+        val comic: ComicInfo? = null,
         val episodes: EpisodePage? = null
+    )
+
+    private data class ComicInfo(
+        val category: String? = null
     )
 
     private data class EpisodePage(

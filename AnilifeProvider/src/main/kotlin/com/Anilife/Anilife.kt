@@ -27,7 +27,7 @@ class Anilife : MainAPI() {
     override var name = "Anilife"
     override val hasMainPage = true
     override var lang = "ko"
-    override val supportedTypes = setOf(TvType.Anime)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val tag = "[Anilife DBG]"
     private val userAgent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
@@ -133,7 +133,15 @@ class Anilife : MainAPI() {
                 meta.toString().toByteArray(Charsets.UTF_8),
                 Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
             )
-            newAnimeSearchResponse(title, "$mainUrl/content/$id/1?al=$encoded", TvType.Anime) {
+            val itemUrl = "$mainUrl/content/$id/1?al=$encoded"
+            val count = anime.optInt("playableEpisode", 0).takeIf { it > 0 }
+                ?: maxOf(anime.optInt("episodeCount", 0), anime.optInt("episode", 0))
+            val result: SearchResponse = if (anime.optString("format").equals("Movie", true) && count == 1) {
+                newMovieSearchResponse(title, itemUrl, TvType.Movie)
+            } else {
+                newTvSeriesSearchResponse(title, itemUrl, TvType.TvSeries)
+            }
+            result.apply {
                 this.posterUrl = image?.let(::absolute)
                 this.posterHeaders = headers
             }
@@ -199,13 +207,8 @@ class Anilife : MainAPI() {
                 ?: throw IllegalArgumentException("Invalid AniLife content URL: $cleanUrl")
             println("$tag detail START series=$seriesId url=$cleanUrl")
 
-            val payload = url.substringAfter("?al=", "").substringBefore("&")
-            val meta = if (payload.isNotEmpty()) try {
-                JSONObject(String(Base64.decode(payload, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
-            } catch (e: Exception) {
-                println("$tag detail invalid metadata series=$seriesId exception=${e.message}")
-                null
-            } else null
+            val response = app.get("$mainUrl/api/anime/$seriesId?v=playback-url-v1", headers = headers, timeout = 10L)
+            val meta = JSONObject(response.text).optJSONObject("item")
 
             if (meta != null) {
                 val title = meta.optString("title").takeIf { it.isNotBlank() && it != "null" }
@@ -217,28 +220,34 @@ class Anilife : MainAPI() {
                     it.optString(index).takeIf(String::isNotBlank)
                 } } ?: emptyList()
                 val year = meta.optInt("year", 0).takeIf { it in 1900..2100 }
-                val playable = meta.optInt("playableEpisode", 0)
-                val count = if (playable > 0) playable else maxOf(
-                    meta.optInt("episodeCount", 0), meta.optInt("episode", 0)
-                )
-                val episodes = (1..count.coerceIn(0, 2000)).map { n ->
-                    newEpisode("$mainUrl/content/$seriesId/$n") {
-                        this.episode = n
-                        this.name = n.toString() + "화"
+                val videos = meta.optJSONArray("episodes")
+                val episodes = (0 until (videos?.length() ?: 0)).mapNotNull { index ->
+                    val video = videos?.optJSONObject(index) ?: return@mapNotNull null
+                    if (!video.optBoolean("playable", true)) return@mapNotNull null
+                    val key = video.optString("key").takeIf { it.isNotBlank() && it != "null" }
+                        ?: return@mapNotNull null
+                    newEpisode("$mainUrl/content/$seriesId/$key") {
+                        this.episode = video.optInt("number", 0).takeIf { it > 0 }
+                        this.name = video.optString("title").takeIf { it.isNotBlank() && it != "null" }
                     }
+                }.distinctBy { it.data }
+                val isMovie = meta.optString("format").equals("Movie", true) && episodes.size == 1
+                println("$tag detail API RESULT series=$seriesId title=$title format=${meta.optString("format")} episodes=${episodes.size} movie=$isMovie plot=${plot?.length ?: 0} tags=${tags.size}")
+                val result: LoadResponse = if (isMovie) {
+                    newMovieLoadResponse(title, url, TvType.Movie, episodes.single().data)
+                } else {
+                    newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes)
                 }
-                println("$tag detail API RESULT series=$seriesId title=$title playable=$playable episodes=${episodes.size} plot=${plot?.length ?: 0} tags=${tags.size}")
-                return newAnimeLoadResponse(title, url, TvType.Anime) {
+                return result.apply {
                     this.posterUrl = image?.let(::absolute)
                     this.posterHeaders = headers
                     this.plot = plot
                     this.tags = tags
                     this.year = year
-                    addEpisodes(DubStatus.Subbed, episodes)
                 }
             }
 
-            throw IllegalStateException("AniLife catalog metadata missing for $seriesId; reopen the catalog item")
+            throw IllegalStateException("AniLife detail metadata missing for $seriesId")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("$tag detail FAILED url=$url exception=${e.stackTraceToString()}")

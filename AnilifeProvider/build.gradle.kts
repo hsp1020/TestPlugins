@@ -5,6 +5,6 @@ cloudstream {
     authors = listOf("hsp1020")
     language = "ko"
     status = 1
-    tvTypes = listOf("Anime")
+    tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://anilife01.tv/favicon-32x32.png"
 }

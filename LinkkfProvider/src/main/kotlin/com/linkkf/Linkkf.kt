@@ -13,7 +13,7 @@ class Linkkf : MainAPI() {
     override var name = "Linkkf"
     override val hasMainPage = true
     override var lang = "ko"
-    override val supportedTypes = setOf(TvType.Anime, TvType.OVA)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val commonHeaders
         get() = mapOf(
@@ -39,7 +39,7 @@ class Linkkf : MainAPI() {
             val list = app.get(url, headers = commonHeaders)
                 .document
                 .select(".vod-item")
-                .mapNotNull { it.toSearchResponse() }
+                .mapNotNull { it.toSearchResponse(path.contains("/lang/Movie", true)) }
 
             newHomePageResponse(
                 HomePageList(request.name, list, isHorizontalImages = false),
@@ -167,13 +167,29 @@ class Linkkf : MainAPI() {
             subEpisodes += parseEpisodes(".episodelist a")
         }
 
-        return newAnimeLoadResponse(title, fullUrl, TvType.Anime) {
+        val isMovieCatalog = doc.select(".detail-info-desc li").any { row ->
+            row.selectFirst("span")?.text()?.contains("분류") == true &&
+                row.select("a").any { it.text().trim().equals("Movie", true) }
+        }
+        val hasBoth = subEpisodes.isNotEmpty() && dubEpisodes.isNotEmpty()
+        val episodes = (subEpisodes.onEach { ep ->
+            if (hasBoth) ep.season = 1
+        } + dubEpisodes.onEach { ep ->
+            if (hasBoth) ep.season = 2
+        }).distinctBy { it.data }
+        val isMovie = isMovieCatalog && episodes.size == 1
+        val result: LoadResponse = if (isMovie) {
+            newMovieLoadResponse(title, fullUrl, TvType.Movie, episodes.single().data)
+        } else {
+            newTvSeriesLoadResponse(title, fullUrl, TvType.TvSeries, episodes) {
+                if (hasBoth) seasonNames = listOf(SeasonData(1, "자막"), SeasonData(2, "더빙"))
+            }
+        }
+        return result.apply {
             posterUrl = poster
             this.plot = detailPlot
             this.tags = tags
             this.year = year
-            if (subEpisodes.isNotEmpty()) addEpisodes(DubStatus.Subbed, subEpisodes)
-            if (dubEpisodes.isNotEmpty()) addEpisodes(DubStatus.Dubbed, dubEpisodes)
         }
     }
 
@@ -232,7 +248,7 @@ class Linkkf : MainAPI() {
         }
     }
 
-    private fun Element.toSearchResponse(): SearchResponse? {
+    private fun Element.toSearchResponse(movieCatalog: Boolean = false): SearchResponse? {
         val link = selectFirst("a.vod-item-img") ?: return null
         val title = selectFirst(".vod-item-title a")?.text()?.trim() ?: return null
         val href = absoluteUrl(link.attr("href")) ?: return null
@@ -241,7 +257,11 @@ class Linkkf : MainAPI() {
                 ?.ifBlank { selectFirst("img")?.attr("src").orEmpty() }
         )
 
-        return newTvSeriesSearchResponse(title, href, TvType.Anime) {
+        val isMovie = movieCatalog && Regex("""\b1\s*/\s*1\b""")
+            .containsMatchIn(select(".vod-item-desc").text())
+        val result: SearchResponse = if (isMovie) newMovieSearchResponse(title, href, TvType.Movie)
+            else newTvSeriesSearchResponse(title, href, TvType.TvSeries)
+        return result.apply {
             posterUrl = poster
         }
     }

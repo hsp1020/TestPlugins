@@ -7,7 +7,7 @@ cloudstream {
     
     status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
     tvTypes = listOf(
-        "Anime"
+        "Movie", "TvSeries"
     )
     
     iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/LinkkfProvider/linktv.png"
