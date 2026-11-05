@@ -85,7 +85,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val id: Int, val url: String, val api: String,
         val movie: Boolean, val season: Int?, val episode: Int?,
         val anime: Boolean, val stremioProvider: Any?, val stremioData: String?,
-        val ids: Map<String, String>, val urlId: String?,
+        val ids: Map<String, String>, val cineKitsu: Pair<Int?, Int?>?, val urlId: String?,
         val expectedDurationMs: Long?
     ) { val key: String get() = url + "#" + id }
 
@@ -136,14 +136,23 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
         val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
             ?: episode.runTime else episode.runTime
+        // CineStream Kitsu titles use season 1 locally, but carry IMDb season mapping.
+        val cineKitsu = if (!movie && response.apiName.equals("CineStream", true))
+            runCatching {
+                JSONObject(episode.data).takeIf { it.optBoolean("isKitsu") }?.let { data ->
+                    data.optInt("imdbSeason").takeIf { it > 0 } to
+                        data.optInt("imdbEpisode").takeIf { it > 0 }
+                }
+            }.getOrNull() else null
         lastSkipReason = null
         trace("SNAPSHOT", "provider=" + response.apiName + " movie=" + movie +
             " ids=" + ids.keys + " stremio=" + (stremio != null) +
-            " episode=" + episode.episode + " season=" + episode.season)
+            " episode=" + episode.episode + " season=" + episode.season +
+            " cineKitsu=" + (cineKitsu != null))
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
             episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
-            stremio, if (stremio != null) episode.data else null, ids, urlId,
+            stremio, if (stremio != null) episode.data else null, ids, cineKitsu, urlId,
             expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L))
     }
 
@@ -663,6 +672,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val anime = item.anime || overrides["_anime"] == "true"
         val base = when {
             item.stremioProvider != null && anime && kitsu != null -> "kitsu:" + kitsu
+            item.cineKitsu != null && kitsu != null -> "kitsu:" + kitsu
             imdb != null -> imdb
             tmdb != null -> "tmdb:" + tmdb
             kitsu != null -> "kitsu:" + kitsu
@@ -675,9 +685,11 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             }
         }
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
-            else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 } ?: item.season
+            else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 }
+                ?: item.cineKitsu?.first ?: item.season
         val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:")) item.episode
-            else overrides["_episode"]?.toIntOrNull()?.takeIf { it > 0 } ?: item.episode
+            else overrides["_episode"]?.toIntOrNull()?.takeIf { it > 0 }
+                ?: item.cineKitsu?.second ?: item.episode
         val videoId = if (item.movie) base else {
             if (episode == null || episode <= 0 || season == null || season <= 0) return
             if (base.startsWith("kitsu:") || base.startsWith("mal:")) base + ":" + episode
