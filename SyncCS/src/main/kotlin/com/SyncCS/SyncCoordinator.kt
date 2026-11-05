@@ -685,6 +685,31 @@ internal object SyncCoordinator {
                 for ((key, raw) in conflicts) retained.put(key, raw)
                 check(config.preferences.edit().putString("pending_conflicts",
                     LocalVault.encrypt(retained.toString().toByteArray(Charsets.UTF_8))).commit())
+                // Log every real conflict, not only the Elevate/Ultima Evo sample.
+                // Never expose preference values or unsafe key text in logcat.
+                for (key in conflicts.keys) {
+                    val safeKey = key.takeIf { path ->
+                        path.length <= 160 && path.all { ch ->
+                            ch.isLetterOrDigit() || ch == '/' || ch == '_' ||
+                                ch == '-' || ch == '.'
+                        }
+                    } ?: "<redacted>"
+                    val namespace = if (key.startsWith("p/"))
+                        key.substringAfter("p/").substringBefore('/') else key.substringBefore('/')
+                    SyncTrace.log("SYNC_CONFLICT",
+                        "namespace=" + namespace +
+                        " key=" + safeKey +
+                        " keyId=" + SyncBackend.digest(key).take(16) +
+                        " reason=both_changed_different_values" +
+                        " baselineSha=" + (base[key]?.take(16) ?: "-") +
+                        " localSha=" + (local[key]?.let {
+                            SyncBackend.digest(it).take(16)
+                        } ?: "<deleted>") +
+                        " remoteSha=" + (remoteValues[key]?.let {
+                            SyncBackend.digest(it).take(16)
+                        } ?: "<deleted>") +
+                        " resolution=remote_wins localPreserved=true")
+                }
             }
 
             stageTo("checking plugin installation and deletions")
