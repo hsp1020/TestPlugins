@@ -670,6 +670,45 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     }
 
 
+    /**
+     * Offline StremioC headers store the unified metadata URL, not the catalog
+     * that originally enabled metadata sync. Restore a catalog only when its
+     * history permission is unambiguous; never override an explicit OFF.
+     */
+    private fun restoreDownloadedStremioCatalog(episodeJson: String, metaUrl: String): String {
+        if (!metaUrl.contains("/meta/")) return episodeJson
+        fun base(url: String): String = url.substringBefore('?')
+            .removeSuffix("/manifest.json").trimEnd('/').lowercase()
+        val prefs = application.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val syncBase = base(prefs.getString("history_sync_url", "").orEmpty())
+        if (syncBase.isBlank() || base(metaUrl.substringBefore("/meta/")) != syncBase)
+            return episodeJson
+        val data = runCatching { JSONObject(episodeJson) }.getOrNull() ?: return episodeJson
+        val declared = base(data.optString("addonUrl").takeUnless {
+            it.equals("null", ignoreCase = true)
+        }.orEmpty())
+        if (declared.isNotBlank() && declared != syncBase) return episodeJson
+
+        val links = runCatching {
+            org.json.JSONArray(prefs.getString("stremio_saved_links", "[]"))
+        }.getOrNull() ?: return episodeJson
+        val candidates = linkedMapOf<String, Pair<String, Boolean>>()
+        for (i in 0 until links.length()) {
+            val entry = links.optJSONObject(i) ?: continue
+            if (!entry.optBoolean("enabled", true) ||
+                !entry.optBoolean("isSyncEnabled", true)) continue
+            val url = entry.optString("link").trim().takeIf { it.isNotEmpty() } ?: continue
+            candidates[base(url)] = url to entry.optBoolean("isHistorySyncEnabled", true)
+        }
+        if (candidates.isEmpty() || candidates.values.any { !it.second }) {
+            trace("OFFLINE_CATALOG", "resolved=false candidates=" + candidates.size +
+                " historyEnabled=" + candidates.values.count { it.second })
+            return episodeJson
+        }
+        trace("OFFLINE_CATALOG", "resolved=true candidates=" + candidates.size)
+        return data.put("addonUrl", candidates.values.first().first).toString()
+    }
+
     /** Resolve offline metadata on the sender thread; never block playback callbacks. */
     private suspend fun resolveDownloaded(item: Item): Item? {
         val file = item.offline ?: return item
@@ -760,7 +799,9 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             season = if (movie) null else file.season,
             episode = if (movie) null else file.episode,
             anime = anime, stremioProvider = stremioProvider,
-            stremioData = if (stremio) episodeData else null,
+            stremioData = if (stremio) episodeData?.let {
+                restoreDownloadedStremioCatalog(it, header.url)
+            } else null,
             ids = ids, cineKitsu = cineKitsu, urlId = urlId
         )
         trace("DOWNLOADED_IDS", "provider=" + header.apiName +
