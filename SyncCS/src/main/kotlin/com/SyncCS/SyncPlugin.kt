@@ -116,6 +116,9 @@ class SyncPlugin : Plugin() {
             return@OnSharedPreferenceChangeListener
         }
         val path = type + key
+        if (SyncTrace.relevant(path)) SyncTrace.log("PREF_EVENT",
+            "id=" + SyncBackend.digest(path).take(16) + " tracked=" +
+                SyncData.isTracked(path) + " applying=" + SyncCoordinator.applying)
         if (!SyncData.isTracked(path)) return@OnSharedPreferenceChangeListener
         SyncCoordinator.markChanged(context, path)
         if (SyncPlaybackThrottle.isProgressPath(path)) {
@@ -157,6 +160,10 @@ class SyncPlugin : Plugin() {
         observe("core", prefs)
         observe("default", PreferenceManager.getDefaultSharedPreferences(context))
         val directory = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+        SyncTrace.log("WATCH_SWEEP", "evoExists=" +
+            java.io.File(directory, "ultima_evo_settings.xml").isFile +
+            " elevateExists=" + java.io.File(directory, "ElevateFeatures.xml").isFile +
+            " observed=" + observed.size)
         directory.listFiles()?.forEach { file ->
             if (file.extension != "xml") return@forEach
             val name = file.nameWithoutExtension
@@ -171,6 +178,8 @@ class SyncPlugin : Plugin() {
         if (observed.containsKey(name)) return
         observed[name] = pref
         pref.registerOnSharedPreferenceChangeListener(observedListener)
+        if (name == "ultima_evo_settings" || name == "ElevateFeatures")
+            SyncTrace.log("WATCH_ATTACHED", "file=" + name + " keys=" + pref.all.size)
     }
     private fun foregroundActivity(): Activity? {
         if (!foreground) return null
@@ -377,6 +386,7 @@ class SyncPlugin : Plugin() {
         MainActivity.mainPluginsLoadedEvent += loaded
         MainActivity.reloadAccountEvent += accountRoster
         watchPreferences()
+        SyncTrace.current(context, "SYNC_PLUGIN_LOAD")
         start(context)
         openSettings = { selected ->
             (selected as? AppCompatActivity)?.let { activity ->

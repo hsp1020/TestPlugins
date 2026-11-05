@@ -706,7 +706,10 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                         }
                     }
 
-                    editor.commit()
+                    val committed = editor.commit()
+                    EvoSyncTrace.log("INSTANCE_SAVE_COMMIT",
+                        "ok=" + committed + " count=" + newCount)
+                    EvoSyncTrace.snapshot(ctx, "INSTANCE_SAVE_PREFS")
 
                     val ultimaEvoJson = prefsToJson(prefs).toString()
                     val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
@@ -715,12 +718,17 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                     mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
                     mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
                     mirrorEditor.putLong("evo_last_sync_time", 0L)
-                    mirrorEditor.commit()
+                    val mirrorCommitted = mirrorEditor.commit()
+                    EvoSyncTrace.log("INSTANCE_MIRROR_COMMIT", "ok=" + mirrorCommitted)
 
                     try {
                         CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
-                    } catch (t: Throwable) { t.printStackTrace() }
-                    
+                    } catch (t: Throwable) {
+                        EvoSyncTrace.log("INSTANCE_NATIVE_WRITE_FAILED", "class=" + t.javaClass.simpleName)
+                        t.printStackTrace()
+                    }
+                    EvoSyncTrace.backup(ctx, "INSTANCE_NATIVE_WRITTEN")
+
                     withContext(Dispatchers.Main) {
                         getSafeAllProviders().forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
@@ -1220,7 +1228,11 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                 
                 val jsonStr = activeCatsConfig.toJson()
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
-                editor.commit()
+                val committed = editor.commit()
+                EvoSyncTrace.log("CATALOG_SAVE_COMMIT", "instance=" + instanceId +
+                    " ok=" + committed + " selected=" + activeCatsConfig.size +
+                    " all=" + allCatalogList.size)
+                EvoSyncTrace.snapshot(ctx, "CATALOG_SAVE_PREFS")
 
                 val ultimaEvoJson = prefsToJson(prefs).toString()
                 val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
@@ -1229,13 +1241,18 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                 mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
                 mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
                 mirrorEditor.putLong("evo_last_sync_time", 0L)
-                mirrorEditor.commit()
+                val mirrorCommitted = mirrorEditor.commit()
+                EvoSyncTrace.log("CATALOG_MIRROR_COMMIT", "ok=" + mirrorCommitted)
 
                 try {
                     CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
-                } catch (t: Throwable) { t.printStackTrace() }
+                } catch (t: Throwable) {
+                    EvoSyncTrace.log("CATALOG_NATIVE_WRITE_FAILED", "class=" + t.javaClass.simpleName)
+                    t.printStackTrace()
+                }
+                EvoSyncTrace.backup(ctx, "CATALOG_NATIVE_WRITTEN")
 
-                withContext(Dispatchers.Main) { 
+                withContext(Dispatchers.Main) {
                     getSafeAllProviders().forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
                     dialog.dismiss() 

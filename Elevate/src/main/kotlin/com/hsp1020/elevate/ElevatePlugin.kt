@@ -118,6 +118,8 @@ class ElevatePlugin : Plugin() {
                 featurePrefs = preferences
                 featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
                     if (ElevateFeature.entries.any { it.name == key }) {
+                        android.util.Log.i("ElevateSyncTrace", "event=PREF_CHANGED feature=" +
+                            key + " value=" + preferences.getBoolean(key, false))
                         main.post {
                             if (generation.get() == token) {
                                 try {
@@ -129,6 +131,9 @@ class ElevatePlugin : Plugin() {
                         }
                     }
                 }.also(preferences::registerOnSharedPreferenceChangeListener)
+                android.util.Log.i("ElevateSyncTrace", "event=PLUGIN_LOADED active=" +
+                    ElevateFeature.entries.count { preferences.getBoolean(it.name, false) } +
+                    " total=" + ElevateFeature.entries.size)
                 syncFeatures()
             } catch (failure: Exception) {
                 stopAll()
@@ -145,6 +150,8 @@ class ElevatePlugin : Plugin() {
         val application = app ?: run {
             return
         }
+        android.util.Log.i("ElevateSyncTrace", "event=FEATURE_SYNC active=" +
+            ElevateFeature.entries.count { enabled(it) })
         if (enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (externalDownloaderLifecycle == null) {
                 externalDownloaderLifecycle = ExternalDownloaderLifecycle(application).also { it.start() }

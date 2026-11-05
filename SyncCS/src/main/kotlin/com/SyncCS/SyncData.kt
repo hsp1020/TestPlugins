@@ -279,16 +279,33 @@ internal object SyncData {
             if (name !in defaultShared && !pluginScoped(name)) continue
             valueJson(value)?.let { result["s/" + name] = it }
         }
-        for (file in pluginFiles(context)) {
+        val files = pluginFiles(context)
+        SyncTrace.log("SNAPSHOT_SCAN", "evoFound=" +
+            ("ultima_evo_settings" in files) + " elevateFound=" +
+            ("ElevateFeatures" in files) + " files=" + files.size)
+        for (file in files) {
             val pref = context.getSharedPreferences(file, Context.MODE_PRIVATE)
             for ((key, value) in pref.all) {
+                val tracked = file == "ultima_evo_settings" || file == "ElevateFeatures"
                 if (key.length > 300 || !pluginPreferenceAllowed(file, key) ||
-                    key.contains("cache", true) || key.contains("logcat", true)) continue
-                valueJson(value)?.let {
-                    if (it.length <= 524288) result["p/" + file + "/" + key] = it
+                    key.contains("cache", true) || key.contains("logcat", true)) {
+                    if (tracked) SyncTrace.log("SNAPSHOT_KEY_SKIPPED",
+                        "id=" + SyncBackend.digest("p/" + file + "/" + key).take(16) +
+                        " keyLength=" + key.length)
+                    continue
+                }
+                val encoded = valueJson(value)
+                if (encoded != null && encoded.length <= 524288) {
+                    result["p/" + file + "/" + key] = encoded
+                } else if (tracked) {
+                    SyncTrace.log("SNAPSHOT_VALUE_SKIPPED",
+                        "id=" + SyncBackend.digest("p/" + file + "/" + key).take(16) +
+                        " unsupported=" + (encoded == null) +
+                        " encodedLength=" + (encoded?.length ?: 0))
                 }
             }
         }
+        SyncTrace.summary("SNAPSHOT_FULL", result)
         return result
     }
 
@@ -511,6 +528,7 @@ internal object SyncData {
     fun apply(context: Context, changes: Map<String, String?>,
               refreshNativeSnapshots: Boolean = true) {
         if (changes.isEmpty()) return
+        SyncTrace.summary("APPLY_INCOMING", changes)
         val data = with(DataStore) { context.getSharedPrefs() }
         val defaults = PreferenceManager.getDefaultSharedPreferences(context)
         val dataEdit = data.edit()
@@ -544,7 +562,11 @@ internal object SyncData {
                         forbiddenFileParts.any { name.contains(it, true) } ||
                         name in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
                             "android.app.ActivityThread.IDS") ||
-                        prefKey.isBlank() || !pluginPreferenceAllowed(name, prefKey)) continue
+                        prefKey.isBlank() || !pluginPreferenceAllowed(name, prefKey)) {
+                        if (SyncTrace.relevant(key)) SyncTrace.log("APPLY_REJECTED",
+                            "id=" + SyncBackend.digest(key).take(16))
+                        continue
+                    }
                     val editor = pluginEditors.getOrPut(name) {
                         context.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
                     }
@@ -555,6 +577,8 @@ internal object SyncData {
         check(dataEdit.commit()) { "CloudStream settings restore failed" }
         check(defaultEdit.commit()) { "Default settings restore failed" }
         pluginEditors.values.forEach { check(it.commit()) { "Plugin settings restore failed" } }
+        if (changes.keys.any { SyncTrace.relevant(it) })
+            SyncTrace.current(context, "APPLY_PERSISTED")
         // Keep native import snapshots consistent with restored plugin settings.
         if (refreshNativeSnapshots && changes.keys.any { it.startsWith("p/StremioC/") }) {
             refreshNativeBackup(context, "StremioC", "native_backup_stremioc",

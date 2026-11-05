@@ -313,6 +313,8 @@ class ElevateSettingsFragment : DialogFragment() {
                     externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
+                        android.util.Log.i("ElevateSyncTrace", "event=UI_TOGGLE feature=" +
+                            feature.name + " value=" + checked)
                         posterControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         skipControls?.visibility =

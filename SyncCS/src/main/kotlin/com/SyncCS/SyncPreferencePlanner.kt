@@ -153,6 +153,20 @@ internal object SyncPreferencePlanner {
                 }
             }
 
+        for (key in all.filter { SyncTrace.relevant(it) }) {
+            val outcome = when {
+                key in apply && key in upload -> "merge"
+                key in apply -> "apply"
+                key in upload -> "upload"
+                else -> "no_change"
+            }
+            SyncTrace.log("RECONCILE_DECISION",
+                "id=" + SyncBackend.digest(key).take(16) +
+                " local=" + (key in local) + " remote=" + (key in remoteValues) +
+                " remoteDeleted=" + (key in remoteValues && remoteValues[key] == null) +
+                " baseline=" + (key in base) + " dirty=" + (key in modifiedKeys) +
+                " conflict=" + (key in conflicts) + " decision=" + outcome)
+        }
         return Plan(apply, upload, next, conflicts)
     }
 }

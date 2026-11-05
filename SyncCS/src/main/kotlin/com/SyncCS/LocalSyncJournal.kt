@@ -129,6 +129,7 @@ internal object LocalSyncJournal {
     }
 
     fun capture(context: Context) {
+        SyncTrace.log("JOURNAL_CAPTURE_BEGIN", "alreadyPending=" + pending(context))
         if (pending(context)) return
         val root = directory(context)
         val temp = File(root, "staging")
@@ -195,6 +196,8 @@ internal object LocalSyncJournal {
      * mismatch: it is never safe to declare recovery successful prematurely.
      */
     suspend fun recover(context: Context, activity: Activity?, storage: SyncStorage) {
+        SyncTrace.log("JOURNAL_RECOVERY_ENTER", "foreground=" +
+            (activity != null && !activity.isFinishing && !activity.isDestroyed))
         val dir = live(context)
         if (!dir.exists()) return
         val metadata = manifest(dir)
@@ -264,6 +267,7 @@ internal object LocalSyncJournal {
         for (key in now.keys - backup.keys) {
             if (key !in postJournalEdits) restore[key] = null
         }
+        SyncTrace.summary("JOURNAL_RESTORE_PLAN", restore)
         SyncData.apply(context, restore, refreshNativeSnapshots = false)
 
         if (needsBinaryRestore) {
@@ -285,7 +289,8 @@ internal object LocalSyncJournal {
         // A plugin reload may have touched user settings. Reapply every edit
         // made after the checkpoint, including explicit user deletions.
         if (postJournalEdits.isNotEmpty()) {
-            SyncData.apply(context, postJournalEdits, refreshNativeSnapshots = false)
+            SyncTrace.summary("JOURNAL_PRESERVED_EDITS", postJournalEdits)
+        SyncData.apply(context, postJournalEdits, refreshNativeSnapshots = false)
         }
         restoreNativeBackups(context,
             recentNativeBackups ?: metadata.getJSONObject("nativeAddonBackups"))
@@ -321,6 +326,7 @@ internal object LocalSyncJournal {
     }
 
     fun finish(context: Context) {
+        SyncTrace.log("JOURNAL_FINISH", "pending=" + pending(context))
         val dir = live(context)
         if (!dir.exists()) return
         val complete = File(directory(context), "completed")

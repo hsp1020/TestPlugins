@@ -150,6 +150,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     private var cachedMainPageList: List<MainPageData> = emptyList()
 
     fun invalidateCache() {
+        EvoSyncTrace.log("CACHE_INVALIDATE", "instance=" + instanceId +
+            " oldSize=" + cachedMainPageList.size)
         cachedMainPageList = emptyList()
     }
 
@@ -201,11 +203,17 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
-            if (!isVisible) return emptyList()
+            if (!isVisible) {
+                EvoSyncTrace.log("MAINPAGE_HIDDEN", "instance=" + instanceId)
+                return emptyList()
+            }
 
             if (cachedMainPageList.isNotEmpty()) {
+                EvoSyncTrace.log("MAINPAGE_CACHE_HIT", "instance=" + instanceId +
+                    " pages=" + cachedMainPageList.size)
                 return cachedMainPageList
             }
+            EvoSyncTrace.log("MAINPAGE_REBUILD", "instance=" + instanceId)
 
             val pages = mutableListOf<Pair<MainPageData, Int>>()
 
@@ -249,6 +257,9 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             }
 
             cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
+            EvoSyncTrace.log("MAINPAGE_READY", "instance=" + instanceId +
+                " saved=" + savedConfigs.size + " pages=" + cachedMainPageList.size +
+                " providers=" + targetProviders.size)
             return cachedMainPageList
         }
 
