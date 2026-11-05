@@ -2567,6 +2567,37 @@ internal class RatingPlotImageHook(
         private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
+        private var tvPopupActive = false
+        private var tvPopupInstalled = false
+        private val tvPlotClick = View.OnClickListener {
+            val data = (ViewModelProvider(fragment)[ResultViewModel2::class.java]
+                .page.value as? Resource.Success<ResultData>)?.value ?: return@OnClickListener
+            val context = view.context
+            val raw = data.plotText.asString(context).html()
+            val message = if (prefs.getBoolean("mdblist_enabled", false)) {
+                val current = view.text ?: raw
+                decoratedRatings(current, view.textSize) ?: current
+            } else raw
+            AlertDialog.Builder(context, R.style.AlertDialogCustom)
+                .setMessage(message)
+                .setTitle(data.plotHeaderText.asString(context))
+                .show()
+        }
+        // Native TV binds its click listener after setting the description text.
+        // Rebind once after that update, without polling for dialogs or layouts.
+        private val bindTvPlotPopup = Runnable {
+            if (tvPopupActive && fragment.view === root &&
+                prefs.getBoolean("mdblist_enabled", false)) {
+                view.setOnClickListener(tvPlotClick)
+                tvPopupInstalled = true
+            }
+        }
+        private fun scheduleTvPlotPopup() {
+            if (!tvPopupActive || !isLayout(TV) ||
+                !prefs.getBoolean("mdblist_enabled", false)) return
+            view.removeCallbacks(bindTvPlotPopup)
+            view.post(bindTvPlotPopup)
+        }
 
         fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
 
@@ -2594,6 +2625,7 @@ internal class RatingPlotImageHook(
             changing = true
             try { view.setText(decorated, TextView.BufferType.SPANNABLE) }
             finally { changing = false }
+            scheduleTvPlotPopup()
             return true
         }
 
@@ -2811,6 +2843,7 @@ internal class RatingPlotImageHook(
             }
         }
         fun start() {
+            tvPopupActive = true
             actorInformation.start()
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
@@ -2821,6 +2854,21 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            tvPopupActive = false
+            view.removeCallbacks(bindTvPlotPopup)
+            if (tvPopupInstalled && fragment.view === root) {
+                // Restore CloudStream's default TV dialog when the plugin detaches.
+                val data = (ViewModelProvider(fragment)[ResultViewModel2::class.java]
+                    .page.value as? Resource.Success<ResultData>)?.value
+                view.setOnClickListener(if (data == null) null else View.OnClickListener {
+                    val context = view.context
+                    AlertDialog.Builder(context, R.style.AlertDialogCustom)
+                        .setMessage(data.plotText.asString(context).html())
+                        .setTitle(data.plotHeaderText.asString(context))
+                        .show()
+                })
+            }
+            tvPopupInstalled = false
             castLongPressHandled = false
             cancelPendingActorOpen()
             seasonSyncProbe.stop()
@@ -2855,9 +2903,15 @@ internal class RatingPlotImageHook(
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-        override fun afterTextChanged(s: Editable?) { if (!changing) { runCatching { trailers.refresh() }; runCatching { render() } } }
+        override fun afterTextChanged(s: Editable?) {
+            if (!changing) {
+                runCatching { trailers.refresh() }
+                runCatching { render() }
+            }
+        }
 
         fun render() {
+            scheduleTvPlotPopup()
             if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }
             if (injectCachedRatings("render")) return
             val result = decoratedRatings(view.text ?: return, view.textSize) ?: return
