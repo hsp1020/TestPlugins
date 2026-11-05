@@ -8,6 +8,9 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.EditText
+import android.text.TextWatcher
+import android.text.Editable
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
@@ -37,6 +40,8 @@ internal enum class ElevateFeature(
         "Repair stale Home cards when switching providers."),
     ORIGINAL_THUMBNAIL_RATIOS("Home & Library", "Original Thumbnail Ratios",
         "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
+    HISTORY_SYNC("Home & Library", "History Sync",
+        "Report playback progress and watched history to the configured AIOMetadata addon."),
     EXTERNAL_DOWNLOADS("Home & Library", "External Downloads",
         "Send native download requests directly to the selected app and recognize files in CloudStream's download folder."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
@@ -240,6 +245,32 @@ class ElevateSettingsFragment : DialogFragment() {
                         }
                     }
                 } else null
+                val historyControls = if (feature == ElevateFeature.HISTORY_SYNC) {
+                    LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(8), 0, 0, dp(12))
+                        addView(EditText(ctx).apply {
+                            hint = "AIOMetadata Addon URL"
+                            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                                android.text.InputType.TYPE_TEXT_VARIATION_URI
+                            isSingleLine = true
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            applyElevateNativeFont()
+                            val previous = ctx.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                                .getString("history_sync_url", "").orEmpty()
+                            setText(preferences.getString("HISTORY_SYNC_URL", null) ?: previous)
+                            addTextChangedListener(object : TextWatcher {
+                                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                                    preferences.edit().putString("HISTORY_SYNC_URL", s.toString().trim()).apply()
+                                }
+                                override fun afterTextChanged(s: Editable?) = Unit
+                            })
+                        }, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        ))
+                    }
+                } else null
                 val externalControls = if (feature == ElevateFeature.EXTERNAL_DOWNLOADS) {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
@@ -311,6 +342,7 @@ class ElevateSettingsFragment : DialogFragment() {
                     posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     skipControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+                    historyControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
                         android.util.Log.i("ElevateSyncTrace", "event=UI_TOGGLE feature=" +
@@ -321,10 +353,13 @@ class ElevateSettingsFragment : DialogFragment() {
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         externalControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
+                        historyControls?.visibility =
+                            if (checked) android.view.View.VISIBLE else android.view.View.GONE
                     }
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
+                historyControls?.let { content.addView(it) }
                 externalControls?.let { content.addView(it) }
                 skipControls?.let { content.addView(it) }
                 posterControls?.let { container ->

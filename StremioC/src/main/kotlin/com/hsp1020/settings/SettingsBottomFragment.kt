@@ -1145,6 +1145,12 @@ class SettingsBottomFragment(
         }
     }
 
+    private fun isElevateHistoryEnabled(): Boolean =
+        com.lagradost.cloudstream3.plugins.PluginManager.plugins.values.any {
+            it.javaClass.name == "com.hsp1020.elevate.ElevatePlugin"
+        } && hostContext.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+            .getBoolean("HISTORY_SYNC", false)
+
     private fun isCineStreamInstalled(): Boolean {
         return getSafeAllProviders().any { it.name.equals("CineStream", true) } ||
                StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
@@ -2050,7 +2056,10 @@ class SettingsBottomFragment(
         streamsAddon.isChecked = itemToEdit?.isStreamsAddonEnabled ?: false
         subtitlesAddon.isChecked = itemToEdit?.isSubtitlesAddonEnabled ?: false
         metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
-        historySync.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
+        val historyAvailable = isElevateHistoryEnabled()
+        historySync.isEnabled = historyAvailable
+        historySync.isChecked = historyAvailable && (itemToEdit?.isHistorySyncEnabled ?: false)
+        if (!historyAvailable) historySync.text = "History Sync (Requires Elevate History Sync)"
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
         if (!sources) {
             setupToggle(dialogView, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
@@ -2081,7 +2090,7 @@ class SettingsBottomFragment(
                 name = "", link = "", type = "StremioC"
             )).copy(name = name.text.toString().trim().ifBlank { if (sources) "" else raw },
                 link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
-                isHistorySyncEnabled = historySync.isChecked,
+                isHistorySyncEnabled = historyAvailable && historySync.isChecked,
                 isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked)
             val values = sourceDraft ?: catalogLinks()
             val index = values.indexOfFirst { it.id == changed.id }

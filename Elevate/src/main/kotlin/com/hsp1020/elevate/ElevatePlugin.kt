@@ -72,6 +72,7 @@ class ElevatePlugin : Plugin() {
     private var pipLibrary: PipLibraryNavigation? = null
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
+    private var historyReporter: ElevateHistoryReporter? = null
     private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
@@ -152,6 +153,14 @@ class ElevatePlugin : Plugin() {
         }
         android.util.Log.i("ElevateSyncTrace", "event=FEATURE_SYNC active=" +
             ElevateFeature.entries.count { enabled(it) })
+        if (enabled(ElevateFeature.HISTORY_SYNC)) {
+            if (historyReporter == null) {
+                historyReporter = ElevateHistoryReporter(application).also { it.start() }
+            }
+        } else {
+            historyReporter?.stop()
+            historyReporter = null
+        }
         if (enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (externalDownloaderLifecycle == null) {
                 externalDownloaderLifecycle = ExternalDownloaderLifecycle(application).also { it.start() }
@@ -370,6 +379,8 @@ class ElevatePlugin : Plugin() {
         downloadPickerPresentation = null
         externalQueueBridge?.stop()
         externalQueueBridge = null
+        historyReporter?.stop()
+        historyReporter = null
         externalDownloaderLifecycle?.stop()
         externalDownloaderLifecycle = null
         pipSubtitles?.stop()

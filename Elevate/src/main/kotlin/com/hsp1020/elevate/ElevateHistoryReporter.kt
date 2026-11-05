@@ -1,6 +1,24 @@
-package com.hsp1020
+package com.hsp1020.elevate
 
 import android.content.Context
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
+import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
+import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
+import com.lagradost.cloudstream3.SimklSyncServices
+import com.lagradost.cloudstream3.syncproviders.AccountManager
+import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.function.Consumer
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -31,15 +49,19 @@ import java.net.URI
 import java.util.UUID
 
 @OptIn(UnstableApi::class)
-internal class StremioScrobble(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+internal class ElevateHistoryReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
+    private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+    private val legacyPrefs = application.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+    private var host: FragmentActivity? = null
+    private val stremioMappings = LinkedHashMap<String, Map<String, String>>()
+    private var stremioCatalogSettings: String? = null
+    private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queue = Channel<Report>(64)
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var tree: ViewTreeObserver? = null
     private val main = Handler(Looper.getMainLooper())
-    private val trackerMappings = linkedMapOf<String, SeasonTrackerIds?>()
     private var player: Media3Player? = null
     private var active: Item? = null
     private var lastEvent: String? = null
@@ -54,7 +76,7 @@ internal class StremioScrobble(context: Context) {
     private data class Item(
         val id: Int, val url: String, val api: String,
         val movie: Boolean, val season: Int?, val episode: Int?,
-        val anime: Boolean, val source: StremioC.LoadData?,
+        val anime: Boolean, val stremioProvider: Any?, val stremioData: String?,
         val ids: Map<String, String>, val urlId: String?,
         val expectedDurationMs: Long?
     ) { val key: String get() = url + "#" + id }
@@ -76,37 +98,42 @@ internal class StremioScrobble(context: Context) {
     private fun snapshot(): Item? {
         val state = model?.state?.generatorState ?: return null
         val response = state.response ?: return null
-        if (response.apiName != "StremioC" && APIHolder.allProviders.none {
-                it is StremioC && it.name.equals(response.apiName, true)
-            }) return null
         val episode = state.meta as? ResultEpisode ?: return null
-        val data = runCatching {
-            com.lagradost.cloudstream3.utils.AppUtils.parseJson<StremioC.LoadData>(episode.data)
-        }.getOrNull()
         val ids = linkedMapOf<String, String>()
-        response.syncData.forEach { (name, value) ->
-            if (name in setOf("imdb", "tmdb", "kitsu", "mal", "anilist") && value.isNotBlank())
-                ids[name] = value
+        val saved = readIdFromString(response.syncData["simkl"])
+        saved[SimklSyncServices.Imdb]?.let { ids["imdb"] = it }
+        saved[SimklSyncServices.Tmdb]?.let { ids["tmdb"] = it }
+        saved[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
+        response.getImdbId()?.let { ids["imdb"] = it }
+        response.getTMDbId()?.let { ids["tmdb"] = it }
+        response.getKitsuId()?.let { ids["kitsu"] = it }
+        response.getMalId()?.let { ids["mal"] = it }
+        response.getAniListId()?.let { ids["anilist"] = it }
+        for (key in listOf("imdb", "tmdb", "kitsu", "mal", "anilist")) {
+            response.syncData[key]?.takeIf { it.isNotBlank() }?.let { ids.putIfAbsent(key, it) }
         }
-        data?.imdbId?.let { ids["imdb"] = it }
-        data?.tmdbId?.let { ids["tmdb"] = it.toString() }
-        data?.kitsuId?.removePrefix("kitsu:")?.let { ids["kitsu"] = it }
-        data?.malId?.let { ids["mal"] = it.toString() }
-        data?.anilistId?.let { ids["anilist"] = it.toString() }
+        response.syncData["simkl"]?.takeIf { it.all(Char::isDigit) }?.let { ids["simkl"] = it }
+        val stremio = APIHolder.allProviders.firstOrNull {
+            it.name.equals(response.apiName, true) &&
+                it.javaClass.name == "com.hsp1020.StremioC"
+        }
+        if (response.apiName == "StremioC" && stremio == null) return null
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
         val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
             ?: episode.runTime else episode.runTime
-        val expectedDurationMs = expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L)
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
-            data?.isAnime == true || episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie),
-            data, ids, urlId, expectedDurationMs)
+            episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
+            stremio, if (stremio != null) episode.data else null, ids, urlId,
+            expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L))
     }
 
     private fun playbackBase(): String? {
-        val url = prefs.getString("history_sync_url", null)?.trim()
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return null
+        val url = (prefs.getString("HISTORY_SYNC_URL", null)
+            ?: legacyPrefs.getString("history_sync_url", null))?.trim()
             ?.replace("stremio://", "https://") ?: return null
         return runCatching {
             val uri = URI(url)
@@ -377,10 +404,61 @@ internal class StremioScrobble(context: Context) {
             }
             "equals" -> proxy === args?.getOrNull(0)
             "hashCode" -> System.identityHashCode(proxy)
-            "toString" -> "StremioScrobbleListener"
+            "toString" -> "ElevateHistoryReporterListener"
             else -> null
         }
     } as Media3Player.Listener
+
+    private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, f: Fragment, v: android.view.View, savedInstanceState: Bundle?
+        ) = watch(f)
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = watch(f)
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) = detach(f)
+    }
+
+    fun start() {
+        application.registerActivityLifecycleCallbacks(this)
+        (PipLibraryNavigation.currentPlayerHost()
+            ?: CommonActivity.activity as? FragmentActivity)?.let(::use)
+    }
+
+    private fun use(activity: FragmentActivity) {
+        if (host !== activity) {
+            host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+            detach()
+            host = activity
+            activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        }
+        fun scan(manager: FragmentManager) {
+            manager.fragments.forEach { child ->
+                if (child.view != null) watch(child)
+                if (child.isAdded) scan(child.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
+    }
+
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is FragmentActivity &&
+            (activity is com.lagradost.cloudstream3.MainActivity ||
+                activity is com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity)) {
+            use(activity)
+        }
+    }
+
+    override fun onActivityDestroyed(activity: Activity) {
+        if (activity === host) {
+            host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+            detach()
+            host = null
+        }
+    }
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
     fun watch(fragment: Fragment) {
         if (fragment !is GeneratorPlayer) return
@@ -426,36 +504,118 @@ internal class StremioScrobble(context: Context) {
     }
 
     fun stop() {
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        host = null
+        application.unregisterActivityLifecycleCallbacks(this)
         detach()
-        queue.close() 
+        queue.close()
+    }
+
+    private suspend fun stremioOverrides(item: Item): Map<String, String> {
+        val provider = item.stremioProvider ?: return emptyMap()
+        val settings = legacyPrefs.getString("stremio_saved_links", null)
+        if (stremioCatalogSettings != settings) {
+            stremioMappings.clear()
+            stremioCatalogSettings = settings
+        }
+        stremioMappings[item.key]?.let { return it }
+        val result = withTimeoutOrNull(12_000L) {
+            val completion = CompletableDeferred<Map<String, String>>()
+            try {
+                val method = provider.javaClass.getMethod("resolvePlaybackIds",
+                    String::class.java, java.lang.Integer.TYPE, Consumer::class.java)
+                method.invoke(provider, item.stremioData.orEmpty(), item.season ?: 0,
+                    Consumer<Map<String, String>> { completion.complete(it) })
+                completion.await()
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        } ?: emptyMap()
+        stremioMappings[item.key] = result
+        if (stremioMappings.size > 24) stremioMappings.remove(stremioMappings.keys.first())
+        return result
+    }
+
+    private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> {
+        if (id.toLongOrNull()?.let { it > 0L } != true) return emptyMap()
+        val key = (if (movie) "movie:" else "series:") + id
+        val now = System.currentTimeMillis()
+        simklMappings[key]?.takeIf {
+            now - it.first < (if (it.second.isEmpty()) 300_000L else 3_600_000L)
+        }?.let { return it.second }
+        val ids = try {
+            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+                ?.authData()
+            if (auth == null) emptyMap() else {
+                val headers = SimklApi.getHeaders(auth.token)
+                val clientId = headers["simkl-api-key"]
+                if (clientId.isNullOrBlank()) emptyMap() else {
+                    val params = mapOf("client_id" to clientId)
+                    val search = org.json.JSONArray(app.get("https://api.simkl.com/search/id",
+                        params = params + ("simkl" to id), headers = headers, timeout = 15L).text)
+                    val item = (0 until search.length()).mapNotNull { search.optJSONObject(it) }
+                        .firstOrNull {
+                            it.optJSONObject("ids")?.optString("simkl") == id &&
+                                when (it.optString("type")) {
+                                    "movie" -> movie
+                                    "tv" -> !movie
+                                    "anime" -> true
+                                    else -> false
+                                }
+                        }
+                    val segment = when (item?.optString("type")) {
+                        "movie" -> "movies"
+                        "tv" -> "tv"
+                        "anime" -> "anime"
+                        else -> null
+                    }
+                    if (segment == null) emptyMap() else {
+                        val detail = org.json.JSONObject(app.get(
+                            "https://api.simkl.com/" + segment + "/" + id,
+                            params = params, headers = headers, timeout = 15L).text)
+                        val externalIds = detail.optJSONObject("ids")
+                        val isMovie = when (segment) {
+                            "movies" -> true
+                            "tv" -> false
+                            else -> detail.optString("anime_type").equals("movie", true)
+                        }
+                        if (externalIds == null || externalIds.optString("simkl") != id ||
+                            isMovie != movie) emptyMap() else buildMap {
+                            externalIds.optString("imdb").takeIf { it.matches(Regex("tt[0-9]+")) }
+                                ?.let { put("imdb", it) }
+                            externalIds.optString("tmdb").takeIf {
+                                it.toLongOrNull()?.let { n -> n > 0L } == true
+                            }?.let { put("tmdb", it) }
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+        simklMappings[key] = now to ids
+        if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
+        return ids
     }
 
     private suspend fun send(report: Report) {
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return
         val item = report.item
+        val overrides = stremioOverrides(item)
+        if (item.stremioProvider != null && overrides["_historyEnabled"] != "true") return
         val ids = item.ids.toMutableMap()
-        val data = item.source
-        if (item.anime && data != null &&
-            ((item.season ?: 0) > 1 || ids["imdb"].isNullOrBlank() && ids["kitsu"].isNullOrBlank())) {
-            val mapped = if (trackerMappings.containsKey(item.key)) trackerMappings[item.key]
-                else {
-                    val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
-                        .firstOrNull { it.name.equals(item.api, true) }
-                        ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
-                    provider?.playbackTrackerIds(data).also {
-                        trackerMappings[item.key] = it
-                        if (trackerMappings.size > 12) trackerMappings.remove(trackerMappings.keys.first())
-                    }
-                }
-            mapped?.kitsu?.let { ids["kitsu"] = it.toString() }
-            mapped?.mal?.let { ids["mal"] = it.toString() }
-            mapped?.aniList?.let { ids["anilist"] = it.toString() }
+        ids.putAll(overrides.filterKeys { !it.startsWith("_") })
+        if (ids["imdb"]?.matches(Regex("tt[0-9]+")) != true &&
+            ids["tmdb"]?.toLongOrNull()?.let { it > 0L } != true) {
+            ids["simkl"]?.let { ids.putAll(resolveSimkl(it, item.movie)) }
         }
         val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
-        val tmdb = ids["tmdb"]?.takeIf { it.matches(Regex("[0-9]+")) }
-        val kitsu = ids["kitsu"]?.takeIf { it.matches(Regex("[0-9]+")) }
-        val mal = ids["mal"]?.takeIf { it.matches(Regex("[0-9]+")) }
+        val tmdb = ids["tmdb"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        val kitsu = ids["kitsu"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        val mal = ids["mal"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        val anime = item.anime || overrides["_anime"] == "true"
         val base = when {
-            item.anime && kitsu != null -> "kitsu:" + kitsu
+            item.stremioProvider != null && anime && kitsu != null -> "kitsu:" + kitsu
             imdb != null -> imdb
             tmdb != null -> "tmdb:" + tmdb
             kitsu != null -> "kitsu:" + kitsu
@@ -464,13 +624,14 @@ internal class StremioScrobble(context: Context) {
                 it.matches(Regex("tt[0-9]+|(?:tmdb|kitsu|mal):[0-9]+"))
             } ?: return
         }
-        val episode = item.episode
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
-            else data?.imdbSeason?.takeIf { it > 0 } ?: item.season
+            else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 } ?: item.season
+        val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:")) item.episode
+            else overrides["_episode"]?.toIntOrNull()?.takeIf { it > 0 } ?: item.episode
         val videoId = if (item.movie) base else {
             if (episode == null || episode <= 0 || season == null || season <= 0) return
             if (base.startsWith("kitsu:") || base.startsWith("mal:")) base + ":" + episode
-            else base + ":" + season + ":" + (data?.imdbEpisode?.takeIf { it > 0 } ?: episode)
+            else base + ":" + season + ":" + episode
         }
         val body = JSONObject()
             .put("id", UUID.randomUUID().toString())
@@ -479,7 +640,7 @@ internal class StremioScrobble(context: Context) {
             .put("videoId", videoId)
             .put("positionMs", report.position)
             .put("durationMs", report.duration)
-            .put("ids", JSONObject(ids as Map<*, *>))
+            .put("ids", JSONObject(ids))
         if (!item.movie) {
             body.put("season", season)
             body.put("episode", episode)
@@ -488,8 +649,6 @@ internal class StremioScrobble(context: Context) {
             body.put("played", report.played ?: (report.duration > 0L &&
                 report.position.toDouble() / report.duration >= 0.80))
         val type = if (item.movie) "movie" else "series"
-        // Scrobble is a fire-and-forget status request; its response body is
-        // never consumed. Close it even for 204 and error status codes.
         val response = app.post(
             report.target + "/playback/" + type + "/" + Uri.encode(videoId) + ".json",
             headers = mapOf("Content-Type" to "application/json"),

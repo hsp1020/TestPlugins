@@ -447,6 +447,44 @@ open class StremioC(
             setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
         } else emptySet()
 
+    /** StremioC-only playback ID mapping; other providers never call this method. */
+    fun resolvePlaybackIds(episodeJson: String, season: Int,
+        callback: java.util.function.Consumer<Map<String, String>>) {
+        val data = runCatching {
+            com.lagradost.cloudstream3.utils.AppUtils.parseJson<LoadData>(episodeJson)
+        }.getOrNull()
+        val catalog = data?.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
+        val enabled = getSyncSettings().historySyncMap[catalog.cleanBaseUrl().lowercase()] == true
+        val ids = linkedMapOf("_historyEnabled" to enabled.toString())
+        if (data == null) {
+            callback.accept(ids)
+            return
+        }
+        data.imdbId?.let { ids["imdb"] = it }
+        data.tmdbId?.let { ids["tmdb"] = it.toString() }
+        data.kitsuId?.removePrefix("kitsu:")?.let { ids["kitsu"] = it }
+        data.malId?.let { ids["mal"] = it.toString() }
+        data.anilistId?.let { ids["anilist"] = it.toString() }
+        data.imdbSeason?.takeIf { it > 0 }?.let { ids["_season"] = it.toString() }
+        data.imdbEpisode?.takeIf { it > 0 }?.let { ids["_episode"] = it.toString() }
+        if (data.isAnime) ids["_anime"] = "true"
+        if (!enabled ||
+            (season <= 1 && !ids["imdb"].isNullOrBlank() && !ids["kitsu"].isNullOrBlank())) {
+            callback.accept(ids)
+            return
+        }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                playbackTrackerIds(data)?.let { mapped ->
+                    mapped.kitsu?.let { ids["kitsu"] = it.toString() }
+                    mapped.mal?.let { ids["mal"] = it.toString() }
+                    mapped.aniList?.let { ids["anilist"] = it.toString() }
+                }
+            }
+            callback.accept(ids)
+        }
+    }
+
     private fun libraryMetadataBase(): String? = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         ?.getString("history_sync_url", null)
@@ -2727,7 +2765,7 @@ open class StremioC(
             }
             if (libraryService != null) {
                 val base = libraryMetadataBase()
-                    ?: throw IllegalStateException("Configure a metadata/history addon before opening a library item.")
+                    ?: throw IllegalStateException("Configure a metadata addon before opening a library item.")
                 val metaUrl = run {
                     getLoadUrl(libraryService, url)
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
@@ -3153,9 +3191,8 @@ open class StremioC(
         val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
 
         val syncSettings = getSyncSettings()
-        val (syncUrl, _, historySyncMap) = syncSettings
+        val syncUrl = syncSettings.syncUrl
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
-        val isHistorySyncEnabled = historySyncMap[currentCleanUrl] ?: false
 
         val savedStreamsAddon = syncSettings.streamsAddonMap[currentCleanUrl]
         val savedSubtitlesAddon = syncSettings.subtitlesAddonMap[currentCleanUrl]
@@ -3517,17 +3554,6 @@ open class StremioC(
                     fetchAnimeAwareSubtitles(currentMainUrl, mappedId, null, null, "series")
                 } else if (!isLibraryAnimeId(primaryId) || actualIsMovie) {
                     fetchAnimeAwareSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
-                }
-            },
-            {
-                if (isHistorySyncEnabled && syncUrl.isNotBlank()) {
-                    fetchAnimeAwareSubtitles(
-                        syncUrl,
-                        globalId ?: primaryId,
-                        globalSeason,
-                        globalEpisode,
-                        integrationTargetType
-                    )
                 }
             },
             {
