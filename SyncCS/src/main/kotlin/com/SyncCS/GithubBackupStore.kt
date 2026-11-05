@@ -57,6 +57,10 @@ internal class GithubBackupStore(
         val shardHashes: List<String>
     )
     private val apiRoot = "https://api.github.com/repos/$owner/$repository"
+    // Avoid Android Log failures when this pure storage engine runs in JVM tests.
+    private fun trace(event: String, info: String) {
+        runCatching { SyncTrace.log(event, info) }
+    }
     internal class ApiException(val code: Int, text: String) : IOException(text)
 
     @Volatile private var activeToken: String = token
@@ -102,6 +106,7 @@ internal class GithubBackupStore(
                     url.contains("/git/refs") -> "ref-write"
                     else -> "backup-api"
                 }
+                trace("GITHUB_HTTP_ERROR", "status=" + status + " step=" + stage)
                 throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
             }
             if (response.isEmpty()) JSONObject()
@@ -459,7 +464,7 @@ internal class GithubBackupStore(
         val newArchives = archiveChanges(existing, archives)
 
         if (patches.isEmpty() && newArchives.isEmpty()) {
-
+            trace("GITHUB_PUBLISH_NOOP", "mode=partial reason=no_changed_blobs")
             return expectedRevision
         }
         patches.putAll(newArchives)
@@ -670,16 +675,23 @@ internal class GithubBackupStore(
         parent: String, baseTree: String, branch: String,
         changes: Map<String, ByteArray>
     ): String {
+        trace("GITHUB_COMMIT_STAGE", "step=blobs_begin count=" + changes.size)
         val paths = JSONArray()
         for ((path, bytes) in changes) paths.put(JSONObject()
             .put("path", path).put("mode", "100644").put("type", "blob")
             .put("sha", createBlob(bytes)))
+        trace("GITHUB_COMMIT_STAGE", "step=blobs_done count=" + changes.size)
+        trace("GITHUB_COMMIT_STAGE", "step=tree_begin")
         val newTree = write("/git/trees", "POST",
             JSONObject().put("base_tree", baseTree).put("tree", paths)).getString("sha")
+        trace("GITHUB_COMMIT_STAGE", "step=tree_done")
+        trace("GITHUB_COMMIT_STAGE", "step=commit_begin")
         val next = write("/git/commits", "POST", JSONObject()
             .put("message", "SyncCS encrypted snapshot · " +
                 deviceName.take(50).replace("\n", " ") + " · " + deviceId.take(8))
             .put("tree", newTree).put("parents", JSONArray().put(parent))).getString("sha")
+        trace("GITHUB_COMMIT_STAGE", "step=commit_done revision=" + next.take(12))
+        trace("GITHUB_COMMIT_STAGE", "step=ref_patch_begin")
         try {
             write(branchEndpoint(branch), "PATCH",
                 JSONObject().put("sha", next).put("force", false))
@@ -690,6 +702,7 @@ internal class GithubBackupStore(
             }
             throw e
         }
+        trace("GITHUB_COMMIT_STAGE", "step=ref_patch_done revision=" + next.take(12))
         return next
     }
 
@@ -737,7 +750,10 @@ internal class GithubBackupStore(
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
         val newArchives = archiveChanges(index(previous.revision).second, archives)
-        if (changed.isEmpty() && newArchives.isEmpty()) return previous.revision
+        if (changed.isEmpty() && newArchives.isEmpty()) {
+            trace("GITHUB_PUBLISH_NOOP", "mode=full reason=no_changed_keys")
+            return previous.revision
+        }
         SyncSafety.validateChanges(changed.size)
         val changes = linkedMapOf<String, ByteArray>()
         val hashes = previous.shardHashes.toMutableList()
