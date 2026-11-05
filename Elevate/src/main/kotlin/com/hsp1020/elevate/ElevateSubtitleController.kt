@@ -136,6 +136,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private var autoRefreshUrl: String? = null
     private var autoSpinView: ImageButton? = null
     private var autoSpinAnimator: ObjectAnimator? = null
+    private var spinStartedAt = 0L
+    private var manualSpinTail: Job? = null
+    private var panelPendingTimeout: Job? = null
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
     private var panelListener: ((GeneratorPlayer, String) -> Unit)? = null
@@ -214,6 +217,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
         runAppliedRefresh()
+        appliedRefresh?.let { pending ->
+            fragment?.let { panelListener?.invoke(it, pending.entry.originalUrl) }
+        }
     }
 
     private fun runAppliedRefresh() {
@@ -227,6 +233,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         if (target.playerView?.player == null ||
             target.player.getCurrentPreferredSubtitle()?.url != deferred.entry.originalUrl) return
         appliedRefresh = null
+        panelPendingTimeout?.cancel()
+        panelPendingTimeout = null
+        android.util.Log.d("ElevateSubtitleRefresh",
+            "queuedActivated url=${deferred.entry.originalUrl.hashCode()} instance=${deferred.instance}")
         requestSubtitleRefresh(deferred.entry, null, deferred.automatic)
     }
 
@@ -252,6 +262,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             refreshGeneration++
             refreshJob?.cancel()
             refreshJob = null
+            activeRefreshUrl = null
             endAutoRefresh()
             refreshedOverlay.detach()
             selectedUrl = currentUrl
@@ -736,10 +747,25 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     }
 
     private fun stopAutoSpin() {
+        manualSpinTail?.cancel()
+        manualSpinTail = null
         autoSpinAnimator?.cancel()
         autoSpinAnimator = null
         autoSpinView?.rotation = 0f
         autoSpinView = null
+    }
+
+    private fun finishManualSpin() {
+        if (autoSpinView == null) return
+        val remaining = (800L - (SystemClock.elapsedRealtime() - spinStartedAt)).coerceAtLeast(0L)
+        if (remaining == 0L) stopAutoSpin()
+        else {
+            manualSpinTail?.cancel()
+            manualSpinTail = refreshScope.launch {
+                delay(remaining)
+                stopAutoSpin()
+            }
+        }
     }
 
     private fun startAutoSpin(button: ImageButton) {
@@ -748,6 +774,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         button.animate().cancel()
         button.rotation = 0f
         autoSpinView = button
+        spinStartedAt = SystemClock.elapsedRealtime()
         android.util.Log.d("ElevateSubtitleRefresh",
             "spinStart url=${button.tag?.hashCode()} attached=${button.isAttachedToWindow} shown=${button.isShown} size=${button.width}x${button.height}")
         autoSpinAnimator = ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
@@ -813,7 +840,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             refreshGeneration++
             refreshJob?.cancel()
             refreshJob = null
+            activeRefreshUrl = null
             endAutoRefresh()
+            panelListener?.invoke(target, entry.originalUrl)
             button?.isEnabled = true
             button?.alpha = 1f
             return false
@@ -895,7 +924,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             } finally {
                 if (generation == refreshGeneration) {
                     activeRefreshUrl = null
-                    if (automatic) endAutoRefresh() else stopAutoSpin()
+                    if (automatic) endAutoRefresh() else finishManualSpin()
                     refreshJob = null
                     android.util.Log.d("ElevateSubtitleRefresh", "finish url=${entry.originalUrl.hashCode()} automatic=${automatic}")
                     if (button != null && button.tag == entry.originalUrl) {
@@ -910,14 +939,24 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 }
             }
         }
+        panelListener?.invoke(target, entry.originalUrl)
         return true
     }
 
     fun syncPanelRefreshButton(url: String, button: ImageButton) {
         val active = activeRefreshUrl == url && refreshJob?.isActive == true
-        if (autoSpinView === button && !active) stopAutoSpin()
-        button.isEnabled = !active || autoRefreshUrl == url
-        if (active && button.isAttachedToWindow) startAutoSpin(button)
+        val queued = appliedRefresh?.let {
+            it.entry.originalUrl == url && it.instance == model?.state?.instance
+        } == true
+        val running = active || queued
+        if (autoSpinView === button && !running && manualSpinTail?.isActive != true) stopAutoSpin()
+        button.isEnabled = !running || autoRefreshUrl == url
+        if (running && button.isAttachedToWindow && button.visibility == View.VISIBLE)
+            startAutoSpin(button)
+    }
+
+    fun releasePanelRefreshButton(button: ImageButton) {
+        if (autoSpinView === button) stopAutoSpin()
     }
 
     fun setPanelListener(listener: ((GeneratorPlayer, String) -> Unit)?) {
@@ -928,17 +967,14 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
 
     /** Called directly from the integrated panel, never through a fake Dialog. */
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null,
-                        expectedUrl: String? = null): Boolean {
+                        expectedUrl: String? = null, pendingSelection: Boolean = false): Boolean {
         val target = fragment ?: run {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=noFragment")
             return false
         }
-        val url = target.player.getCurrentPreferredSubtitle()?.url ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=noPreferred expected=${expectedUrl?.hashCode()}")
-            return false
-        }
-        if (expectedUrl != null && expectedUrl != url) {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=panelMismatch expected=${expectedUrl.hashCode()} actual=${url.hashCode()}")
+        val actual = target.player.getCurrentPreferredSubtitle()?.url
+        val url = expectedUrl ?: actual ?: run {
+            android.util.Log.d("ElevateSubtitleRefresh", "reject=noPreferred")
             return false
         }
         val subtitle = model?.state?.subtitles?.firstOrNull { it.url == url } ?: run {
@@ -948,6 +984,39 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         val entry = ElevateSubtitleRefreshRegistry.entryFor(subtitle) ?: run {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=noEntry url=${url.hashCode()}")
             return false
+        }
+        if (actual != url) {
+            if (!pendingSelection || expectedUrl != url) {
+                android.util.Log.d("ElevateSubtitleRefresh",
+                    "reject=panelMismatch expected=${url.hashCode()} actual=${actual?.hashCode()}")
+                return false
+            }
+            val instance = model?.state?.instance ?: return false
+            if (automatic && appliedRefresh?.entry?.originalUrl == url &&
+                appliedRefresh?.automatic == true) {
+                appliedRefresh = null
+                panelPendingTimeout?.cancel()
+                panelPendingTimeout = null
+                panelListener?.invoke(target, url)
+                return false
+            }
+            val pending = DeferredRefresh(entry, automatic, instance,
+                model?.state?.generatorState?.id)
+            appliedRefresh = pending
+            panelPendingTimeout?.cancel()
+            panelPendingTimeout = refreshScope.launch {
+                delay(20_000L)
+                if (appliedRefresh === pending) {
+                    appliedRefresh = null
+                    android.util.Log.d("ElevateSubtitleRefresh",
+                        "queuedTimeout url=${url.hashCode()} instance=$instance")
+                    panelListener?.invoke(target, url)
+                }
+            }
+            android.util.Log.d("ElevateSubtitleRefresh",
+                "queuedDuringReload url=${url.hashCode()} actual=${actual?.hashCode()} automatic=$automatic")
+            panelListener?.invoke(target, url)
+            return true
         }
         return requestSubtitleRefresh(entry, button, automatic)
     }
@@ -1030,8 +1099,10 @@ internal class ElevateSubtitleRefreshHook(
         unbind()
     }
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null,
-                        expectedUrl: String? = null) =
-        controller.refreshSelected(automatic, button, expectedUrl)
+                        expectedUrl: String? = null, pendingSelection: Boolean = false) =
+        controller.refreshSelected(automatic, button, expectedUrl, pendingSelection)
+    fun releasePanelRefreshButton(button: ImageButton) =
+        controller.releasePanelRefreshButton(button)
     fun syncPanelRefreshButton(url: String, button: ImageButton) =
         controller.syncPanelRefreshButton(url, button)
     fun setPanelListener(listener: ((GeneratorPlayer, String) -> Unit)?) =
