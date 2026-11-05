@@ -213,6 +213,14 @@ internal class ElevatePlayerPanel(
                     background = null
                     scaleType = ImageView.ScaleType.CENTER_INSIDE
                     isFocusable = false
+                    addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                        override fun onViewAttachedToWindow(view: View) {
+                            (view.tag as? String)?.let { url ->
+                                ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, view as ImageButton)
+                            }
+                        }
+                        override fun onViewDetachedFromWindow(view: View) = Unit
+                    })
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
@@ -244,6 +252,9 @@ internal class ElevatePlayerPanel(
             isFocusable = false
             isClickable = false
             isLongClickable = false
+            if (refresh != null && refreshUrl != null) {
+                ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(refreshUrl, this)
+            }
         }
         return row
     }
@@ -830,7 +841,7 @@ internal class ElevatePlayerPanel(
     private fun bindRefreshListener() {
         ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
             if (target === fragment && tab == Tab.SUBTITLES) {
-                if (inSync) updateSyncCues()
+                if (inSync) updateSyncCues() else renderSubtitles()
             }
         }
     }
@@ -1324,11 +1335,13 @@ internal class ElevatePlayerPanel(
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url)
+                    android.util.Log.d("ElevatePanelRefresh", "tap url=${sub.url.hashCode()} accepted=${accepted}")
                     if (accepted != true) renderSubtitles()
                     Unit
                 }) else null,
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button, sub.url)
+                    android.util.Log.d("ElevatePanelRefresh", "longPress url=${sub.url.hashCode()} accepted=${accepted}")
                     if (accepted != true) renderSubtitles()
                     Unit
                 }) else null,
