@@ -141,6 +141,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private var manualSpinTail: Job? = null
     private var panelPendingTimeout: Job? = null
     private var observedPlayer: Player? = null
+    private var observedRoot: View? = null
+    private val playerLayoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        bindPlayer()
+    }
     private var selectedUrl: String? = null
     private var panelListener: ((GeneratorPlayer, String) -> Unit)? = null
     private var iconSelectionUrl: String? = null
@@ -220,6 +224,8 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         observedPlayer = current
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
+        android.util.Log.d("ElevateSubtitleRefresh",
+            "playerBound player=${current?.let { System.identityHashCode(it) }} pending=${appliedRefresh?.entry?.originalUrl?.hashCode()}")
         runAppliedRefresh()
         appliedRefresh?.let { pending ->
             fragment?.let { panelListener?.invoke(it, pending.entry.originalUrl) }
@@ -383,6 +389,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         if (candidate !is GeneratorPlayer || candidate === fragment) return
         detach()
         fragment = candidate
+        observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(playerLayoutListener) }
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         val currentModel = model ?: return
         val observer = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Resource<Unit>>> { event ->
@@ -841,12 +848,14 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         val instance = model?.state?.instance ?: run {
             return false
         }
+        bindPlayer()
         val actual = target.player.getCurrentPreferredSubtitle()?.url
         if (actual != entry.originalUrl) {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=selection expected=${entry.originalUrl.hashCode()} actual=${actual?.hashCode()}")
             return false
         }
-        bindPlayer()
+        // A selection can become active before its first onEvents callback.
+        selectedUrl = actual
         if (automatic && autoRefreshUrl == entry.originalUrl) {
             refreshGeneration++
             refreshJob?.cancel()
@@ -998,6 +1007,8 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             android.util.Log.d("ElevateSubtitleRefresh", "reject=noFragment")
             return false
         }
+        // Make Korean reloads Media3 without loading links again. Observe the replacement now.
+        bindPlayer()
         val actual = target.player.getCurrentPreferredSubtitle()?.url
         val url = expectedUrl ?: actual ?: run {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=noPreferred")
@@ -1034,6 +1045,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 delay(20_000L)
                 if (appliedRefresh === pending) {
                     appliedRefresh = null
+                    panelPendingTimeout = null
                     android.util.Log.d("ElevateSubtitleRefresh",
                         "queuedTimeout url=${url.hashCode()} instance=$instance")
                     panelListener?.invoke(target, url)
@@ -1065,6 +1077,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         removeStateObserver = null
         removeLinksObserver?.invoke()
         removeLinksObserver = null
+        observedRoot?.removeOnLayoutChangeListener(playerLayoutListener)
+        observedRoot = null
+        panelPendingTimeout?.cancel()
+        panelPendingTimeout = null
         observedPlayer?.removeListener(playerListener)
         observedPlayer = null
         selectedUrl = null
@@ -1153,4 +1169,3 @@ internal class ElevateSubtitleRefreshHook(
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 }
-

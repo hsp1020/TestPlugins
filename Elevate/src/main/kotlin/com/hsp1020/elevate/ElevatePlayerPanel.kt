@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.graphics.Color
 import android.content.res.ColorStateList
 import android.view.Gravity
-import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -26,6 +25,7 @@ import androidx.preference.PreferenceManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -134,59 +134,12 @@ internal class ElevatePlayerPanel(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) =
             size > 160
     }
-    private var lastListTouchX = -1f
-    private var lastListTouchY = -1f
-    private var refreshTouch: Pair<Row, ImageButton>? = null
     private var pendingRefreshRebindUrl: String? = null
     private var refreshRebindPosted = false
-    private val refreshGesture = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDown(e: MotionEvent): Boolean = true
-        override fun onSingleTapUp(e: MotionEvent): Boolean {
-            val (row, button) = refreshTouch ?: return false
-            if (button.isEnabled) row.refresh?.invoke(button)
-            return true
-        }
-        override fun onLongPress(e: MotionEvent) {
-            refreshTouch?.let { (row, button) ->
-                if (button.isEnabled) row.autoRefresh?.invoke(button)
-            }
-        }
-    })
     private var pendingSubtitleUrl: String? = null
     private var pendingSubtitleInstance = -1
     private var resumeAfterSubtitleReloadInstance: Int? = null
-    private val list = object : ListView(ctx) {
-        override fun onAttachedToWindow() {
-            super.onAttachedToWindow()
-            android.util.Log.d("ElevatePanelRefresh", "listAttached view=${System.identityHashCode(this)} children=$childCount")
-            visibleSubtitleUrl()?.let(::scheduleRefreshRebind)
-        }
-        override fun onDetachedFromWindow() {
-            android.util.Log.d("ElevatePanelRefresh", "listDetached view=${System.identityHashCode(this)} children=$childCount")
-            super.onDetachedFromWindow()
-        }
-        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                lastListTouchX = event.x
-                lastListTouchY = event.y
-                val position = pointToPosition(event.x.toInt(), event.y.toInt())
-                val child = getChildAt(position - firstVisiblePosition)
-                val button = refreshButtonAt(position, child)
-                refreshTouch = if (button != null)
-                    rows.getOrNull(position)?.let { it to button } else null
-                if (button != null) android.util.Log.d("ElevatePanelRefresh",
-                    "iconDown row=$position enabled=${button.isEnabled} state=${refreshViewState(button)}")
-            }
-            // The refresh icon has no row selection ripple; preserve native row feedback elsewhere.
-            if (refreshTouch != null) {
-                refreshGesture.onTouchEvent(event)
-                if (event.actionMasked == MotionEvent.ACTION_UP ||
-                    event.actionMasked == MotionEvent.ACTION_CANCEL) refreshTouch = null
-                return true
-            }
-            return super.dispatchTouchEvent(event)
-        }
-    }.apply {
+    private val list = ListView(ctx).apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
     }
@@ -195,14 +148,14 @@ internal class ElevatePlayerPanel(
         return "view=${System.identityHashCode(view)} attached=${view.isAttachedToWindow} " +
             "shown=${view.isShown} token=${view.windowToken != null} " +
             "parent=${parent?.javaClass?.simpleName} parentAttached=${parent?.isAttachedToWindow} " +
-            "listAttached=${list.isAttachedToWindow} listParent=${list.parent?.javaClass?.simpleName}"
+            "optionsAttached=${subtitleOptions.isAttachedToWindow}"
     }
 
     private fun scheduleRefreshRebind(url: String) {
         pendingRefreshRebindUrl = url
         if (refreshRebindPosted) return
         refreshRebindPosted = true
-        list.post {
+        subtitleOptions.post {
             refreshRebindPosted = false
             pendingRefreshRebindUrl?.let {
                 pendingRefreshRebindUrl = null
@@ -214,12 +167,12 @@ internal class ElevatePlayerPanel(
     private fun rebindVisibleRefreshButton(url: String) {
         var candidates = 0
         var attached = 0
-        for (index in 0 until list.childCount) {
-            val row = list.getChildAt(index) as? LinearLayout ?: continue
+        for (index in 0 until subtitleOptions.childCount) {
+            val row = subtitleOptions.getChildAt(index) as? LinearLayout ?: continue
             val button = row.getChildAt(2) as? ImageButton ?: continue
             if (button.tag != url || button.visibility != View.VISIBLE) continue
             candidates++
-            if (list.isAttachedToWindow && row.isAttachedToWindow &&
+            if (subtitleOptions.isAttachedToWindow && row.isAttachedToWindow &&
                 button.isAttachedToWindow && button.isShown) {
                 attached++
                 ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, button)
@@ -292,7 +245,9 @@ internal class ElevatePlayerPanel(
                     })
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
-        row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
+        val height = if (compact) dp(48) else -2
+        row.layoutParams = if (parent is RecyclerView) RecyclerView.LayoutParams(-1, height)
+            else AbsListView.LayoutParams(-1, height)
         row.minimumHeight = if (compact || tab == Tab.SUBTITLES) dp(48) else dp(28)
         (row.getChildAt(0) as ImageView).apply {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
@@ -316,8 +271,7 @@ internal class ElevatePlayerPanel(
             visibility = if (refresh != null) View.VISIBLE else View.GONE
             tag = refreshUrl
             isEnabled = refresh != null
-            // Let the attached ListView own click and long-click dispatch.
-            // A detached recycled ImageButton can receive touch but cannot run posted clicks.
+            // The owning adapter installs actions after binding the current row.
             setOnTouchListener(null)
             setOnClickListener(null)
             setOnLongClickListener(null)
@@ -327,23 +281,11 @@ internal class ElevatePlayerPanel(
             isLongClickable = false
             if (refresh != null && refreshUrl != null) {
                 ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(refreshUrl, this)
+            } else {
+                ElevateSubtitleRefreshHook.active()?.releasePanelRefreshButton(this)
             }
         }
         return row
-    }
-
-    private fun refreshButtonAt(position: Int, rowView: View?): ImageButton? {
-        if (tab != Tab.SUBTITLES || inSync) return null
-        val row = rows.getOrNull(position) ?: return null
-        val button = (rowView as? LinearLayout)?.getChildAt(2) as? ImageButton ?: return null
-        if (row.refresh == null || button.visibility != View.VISIBLE ||
-            button.tag != row.refreshUrl) return null
-        val left = rowView.left + button.left
-        val top = rowView.top + button.top
-        return button.takeIf {
-            lastListTouchX >= left && lastListTouchX < left + it.width &&
-                lastListTouchY >= top && lastListTouchY < top + it.height
-        }
     }
 
     private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
@@ -398,9 +340,53 @@ internal class ElevatePlayerPanel(
             }
         }
     }
+    private class SubtitleOptionHolder(val row: LinearLayout) : RecyclerView.ViewHolder(row)
+    private val subtitleOptionsAdapter: RecyclerView.Adapter<SubtitleOptionHolder> = object : RecyclerView.Adapter<SubtitleOptionHolder>() {
+        override fun getItemCount() = rows.size
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+            SubtitleOptionHolder(bindRow(null, parent, 0, "", false, false) as LinearLayout)
+
+        override fun onBindViewHolder(holder: SubtitleOptionHolder, position: Int) {
+            val value = rows[position]
+            bindRow(holder.row, subtitleOptions, position,
+                if (value.richText) value.label.html() else value.label,
+                value.selected, false, value.refresh, value.autoRefresh, value.refreshUrl)
+            holder.row.setOnClickListener { value.action() }
+            (holder.row.getChildAt(2) as ImageButton).apply {
+                setOnClickListener { if (isEnabled) value.refresh?.invoke(this) }
+                setOnLongClickListener {
+                    if (isEnabled) value.autoRefresh?.invoke(this)
+                    true
+                }
+                isClickable = value.refresh != null
+                isLongClickable = value.autoRefresh != null
+            }
+        }
+
+        override fun onViewAttachedToWindow(holder: SubtitleOptionHolder) {
+            super.onViewAttachedToWindow(holder)
+            (holder.row.getChildAt(2) as ImageButton).let { button ->
+                if (button.visibility == View.VISIBLE)
+                    (button.tag as? String)?.let { url -> scheduleRefreshRebind(url) }
+            }
+        }
+
+        override fun onViewRecycled(holder: SubtitleOptionHolder) {
+            ElevateSubtitleRefreshHook.active()?.releasePanelRefreshButton(
+                holder.row.getChildAt(2) as ImageButton)
+            super.onViewRecycled(holder)
+        }
+    }
+    // Keep subtitle actions on attached holders, independent of ListView's measurement scrap.
+    private val subtitleOptions: RecyclerView = RecyclerView(ctx).apply {
+        layoutManager = LinearLayoutManager(ctx)
+        adapter = subtitleOptionsAdapter
+        itemAnimator = null
+    }
     private val subtitlePane = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
+        addView(subtitleOptions, LinearLayout.LayoutParams(0, -1, .65f))
     }
     // All subtitle origins share the same language and option lists.
     private var beforeImport: Set<String>? = null
@@ -823,18 +809,7 @@ internal class ElevatePlayerPanel(
         list.adapter = adapter
         list.setOnItemClickListener { _, view, position, _ ->
             val row = rows.getOrNull(position)?.takeUnless { it.header } ?: return@setOnItemClickListener
-            val button = refreshButtonAt(position, view)
-            if (button != null) {
-                if (button.isEnabled) row.refresh?.invoke(button)
-            } else row.action()
-        }
-        list.setOnItemLongClickListener { _, view, position, _ ->
-            val row = rows.getOrNull(position) ?: return@setOnItemLongClickListener false
-            val button = refreshButtonAt(position, view)
-            if (button != null) {
-                if (button.isEnabled) row.autoRefresh?.invoke(button)
-                true
-            } else false
+            row.action()
         }
         for (entry in Tab.entries) {
             val button = TextView(ctx).apply {
@@ -916,9 +891,9 @@ internal class ElevatePlayerPanel(
         ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
             if (target === fragment && tab == Tab.SUBTITLES) {
                 if (inSync) updateSyncCues() else {
-                    // Never animate a cached/detached row; wait for the live ListView child.
+                    // Animate only the holder attached to the visible right column.
                     rebindVisibleRefreshButton(url)
-                    if (!list.isAttachedToWindow) scheduleRefreshRebind(url)
+                    if (!subtitleOptions.isAttachedToWindow) scheduleRefreshRebind(url)
                 }
             }
         }
@@ -990,7 +965,8 @@ internal class ElevatePlayerPanel(
     private fun replaceRows(values: List<Row>) {
         rows.clear()
         rows.addAll(values)
-        adapter.notifyDataSetChanged()
+        if (tab == Tab.SUBTITLES) subtitleOptionsAdapter.notifyDataSetChanged()
+        else adapter.notifyDataSetChanged()
     }
 
     private fun panelContent(view: View) {
@@ -998,9 +974,6 @@ internal class ElevatePlayerPanel(
         (list.parent as? ViewGroup)?.removeView(list)
         (subtitleScroll.parent as? ViewGroup)?.removeView(subtitleScroll)
         (nativeSync.parent as? ViewGroup)?.removeView(nativeSync)
-        if (view === subtitleScroll) {
-            subtitlePane.addView(list, LinearLayout.LayoutParams(0, -1, .65f))
-        }
         body.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
