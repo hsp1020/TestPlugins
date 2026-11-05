@@ -32,12 +32,17 @@ import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.util.UnstableApi
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MovieLoadResponse
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,6 +59,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
     private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
+    private val downloadedMappings = LinkedHashMap<String, Pair<Long, Item>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queue = Channel<Report>(64)
     private var fragment: GeneratorPlayer? = null
@@ -86,7 +92,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val movie: Boolean, val season: Int?, val episode: Int?,
         val anime: Boolean, val stremioProvider: Any?, val stremioData: String?,
         val ids: Map<String, String>, val cineKitsu: Pair<Int?, Int?>?, val urlId: String?,
-        val expectedDurationMs: Long?
+        val expectedDurationMs: Long?, val offline: ExtractorUri? = null
     ) { val key: String get() = url + "#" + id }
 
     private data class Report(
@@ -107,7 +113,18 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
 
     private fun snapshot(): Item? {
         val state = model?.state?.generatorState ?: run { skip("no_generator_state"); return null }
-        val response = state.response ?: run { skip("no_load_response"); return null }
+        val response = state.response ?: run {
+            val file = state.meta as? ExtractorUri
+                ?: run { skip("no_load_response"); return null }
+            val id = file.id ?: run { skip("offline_no_id"); return null }
+            val parentId = file.parentId ?: run { skip("offline_no_parent"); return null }
+            val movie = file.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
+            trace("SNAPSHOT", "downloaded=true id=" + id + " parent=" + parentId)
+            return Item(id, "download:$parentId", "Download", movie,
+                if (movie) null else file.season, if (movie) null else file.episode,
+                file.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
+                null, null, emptyMap(), null, null, null, file)
+        }
         val episode = state.meta as? ResultEpisode ?: run { skip("no_episode"); return null }
         val ids = linkedMapOf<String, String>()
         val saved = readIdFromString(response.syncData["simkl"])
@@ -231,9 +248,12 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
 
     private fun refreshEpisode(): Boolean {
         val state = model?.state?.generatorState ?: run { skip("refresh_no_state"); return false }
-        val response = state.response ?: run { skip("refresh_no_response"); return false }
-        val episode = state.meta as? ResultEpisode ?: run { skip("refresh_no_episode"); return false }
-        if (active?.key == response.url + "#" + episode.id) return false
+        val key = when (val meta = state.meta) {
+            is ResultEpisode -> state.response?.let { it.url + "#" + meta.id }
+            is ExtractorUri -> "download:" + meta.parentId + "#" + meta.id
+            else -> null
+        } ?: run { skip("refresh_no_playable_metadata"); return false }
+        if (active?.key == key) return false
 
         val next = snapshot()
         active?.let { old ->
@@ -649,9 +669,112 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         return ids
     }
 
+
+    /** Resolve offline metadata on the sender thread; never block playback callbacks. */
+    private suspend fun resolveDownloaded(item: Item): Item? {
+        val file = item.offline ?: return item
+        val header = application.getKey<DownloadObjects.DownloadHeaderCached>(
+            DOWNLOAD_HEADER_CACHE, file.parentId.toString()
+        ) ?: run { trace("SKIP", "reason=download_header_missing"); return null }
+        val cacheKey = listOf(header.apiName, header.url, file.parentId, file.id,
+            file.season, file.episode).joinToString("|")
+        val now = System.currentTimeMillis()
+        downloadedMappings[cacheKey]?.takeIf { now - it.first < 3_600_000L }
+            ?.let { return it.second }
+
+        val stremio = header.apiName.equals("StremioC", true)
+        val cine = header.apiName.equals("CineStream", true)
+        val detail = if (stremio || cine) {
+            try {
+                withTimeoutOrNull(8_000L) {
+                    APIHolder.getApiFromNameNull(header.apiName)?.load(header.url)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+        } else null
+        val episodeData = when (detail) {
+            is TvSeriesLoadResponse -> {
+                val matches = detail.episodes.filter {
+                    file.episode != null && file.episode > 0 && it.episode == file.episode
+                }
+                (matches.firstOrNull { it.season == file.season }
+                    ?: matches.singleOrNull())?.data
+            }
+            is MovieLoadResponse -> detail.dataUrl
+            else -> null
+        }
+        val stremioProvider = if (stremio) APIHolder.allProviders.firstOrNull {
+            it.name.equals(header.apiName, true) &&
+                it.javaClass.name == "com.hsp1020.StremioC"
+        } else null
+        if (stremio && (stremioProvider == null || episodeData.isNullOrBlank())) {
+            trace("SKIP", "reason=download_stremioc_mapping_unavailable")
+            return null // Never bypass StremioC's per-catalog History Sync toggle.
+        }
+
+        val ids = linkedMapOf<String, String>()
+        header.url.substringBefore(':').takeIf { it.matches(Regex("tt[0-9]+")) }
+            ?.let { ids["imdb"] = it }
+        detail?.getImdbId()?.let { ids["imdb"] = it }
+        detail?.getTMDbId()?.let { ids["tmdb"] = it }
+        detail?.getKitsuId()?.let { ids["kitsu"] = it }
+        detail?.getMalId()?.let { ids["mal"] = it }
+        detail?.getAniListId()?.let { ids["anilist"] = it }
+        detail?.syncData?.get("simkl")?.let { saved ->
+            val parsed = readIdFromString(saved)
+            parsed[SimklSyncServices.Imdb]?.let { ids.putIfAbsent("imdb", it) }
+            parsed[SimklSyncServices.Tmdb]?.let { ids.putIfAbsent("tmdb", it) }
+            parsed[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
+            saved.takeIf { it.all(Char::isDigit) }?.let { ids["simkl"] = it }
+        }
+        if (detail == null || ids.isEmpty()) {
+            ElevateSkipRepository.identityDownloaded(header, file, 0L)?.let { mapped ->
+                mapped.imdb?.let { ids.putIfAbsent("imdb", it) }
+                mapped.tmdb?.let { ids.putIfAbsent("tmdb", it) }
+                mapped.kitsu?.let { ids.putIfAbsent("kitsu", it) }
+                mapped.mal?.let { ids.putIfAbsent("mal", it) }
+                mapped.anilist?.let { ids.putIfAbsent("anilist", it) }
+            }
+        }
+        val extra = runCatching { JSONObject(episodeData.orEmpty()) }.getOrNull()
+        val cineKitsu = if (cine && extra?.optBoolean("isKitsu") == true)
+            extra.optInt("imdbSeason").takeIf { it > 0 } to
+                extra.optInt("imdbEpisode").takeIf { it > 0 }
+        else null
+        val movie = file.tvType in setOf(TvType.Movie, TvType.AnimeMovie) ||
+            header.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
+            detail?.type in setOf(TvType.Movie, TvType.AnimeMovie)
+        val anime = file.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
+            header.type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
+            detail?.type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
+            ids.keys.any { it in setOf("kitsu", "mal", "anilist") } ||
+            extra?.optBoolean("isAnime") == true
+        val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(header.url)
+            ?.groupValues?.getOrNull(1)?.let(Uri::decode)
+        val resolved = item.copy(
+            url = header.url, api = header.apiName, movie = movie,
+            season = if (movie) null else file.season,
+            episode = if (movie) null else file.episode,
+            anime = anime, stremioProvider = stremioProvider,
+            stremioData = if (stremio) episodeData else null,
+            ids = ids, cineKitsu = cineKitsu, urlId = urlId
+        )
+        trace("DOWNLOADED_IDS", "provider=" + header.apiName +
+            " ids=" + ids.keys + " stremio=" + stremio +
+            " cineKitsu=" + (cineKitsu != null))
+        downloadedMappings[cacheKey] = now to resolved
+        if (downloadedMappings.size > 20)
+            downloadedMappings.remove(downloadedMappings.keys.first())
+        return resolved
+    }
+
     private suspend fun send(report: Report) {
         if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return
-        val item = report.item
+        val item = report.item.offline?.let { resolveDownloaded(report.item) ?: return }
+            ?: report.item
         trace("PREPARE", "provider=" + item.api + " event=" + report.event)
         val overrides = stremioOverrides(item)
         if (item.stremioProvider != null && overrides["_historyEnabled"] != "true") {
