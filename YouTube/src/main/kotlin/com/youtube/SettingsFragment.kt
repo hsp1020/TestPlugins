@@ -163,8 +163,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         val serialized = mapper.writeValueAsString(filteredList)
                         sharedPref.edit().putString("custom_homepages_v3", serialized).apply()
                         defaultPrefs.edit().putString("custom_homepages_v3", serialized).apply()
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                    } catch (_: Exception) {
+                        // Preserve existing settings when their JSON cannot be parsed.
                     }
 
                     view?.post { updateTexts() }
@@ -241,9 +241,9 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                                 val serialized = mapper.writeValueAsString(filteredList)
                                 sharedPref.edit().putString("custom_homepages_v3", serialized).apply()
                                 defaultPrefs.edit().putString("custom_homepages_v3", serialized).apply()
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
+                            } catch (_: Exception) {
+                        // Preserve existing settings when their JSON cannot be parsed.
+                    }
 
                             Toast.makeText(ctx, Loc.getString(sharedPref, "cleared_msg"), Toast.LENGTH_SHORT).show()
                             visitorPref.text = ""

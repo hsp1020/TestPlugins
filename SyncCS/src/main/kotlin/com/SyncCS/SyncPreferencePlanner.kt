@@ -153,26 +153,6 @@ internal object SyncPreferencePlanner {
                 }
             }
 
-        val traced = all.filter { SyncTrace.relevant(it) }
-        val samples = traced.filter { it.startsWith("p/ElevateFeatures/") }.take(12) +
-            traced.filter { it.startsWith("p/ultima_evo_settings/") }.take(20)
-        SyncTrace.log("RECONCILE_SAMPLE", "relevant=" + traced.size +
-            " shown=" + samples.size + " omitted=" +
-            (traced.size - samples.size).coerceAtLeast(0))
-        for (key in samples) {
-            val outcome = when {
-                key in apply && key in upload -> "merge"
-                key in apply -> "apply"
-                key in upload -> "upload"
-                else -> "no_change"
-            }
-            SyncTrace.log("RECONCILE_DECISION",
-                "id=" + SyncBackend.digest(key).take(16) +
-                " local=" + (key in local) + " remote=" + (key in remoteValues) +
-                " remoteDeleted=" + (key in remoteValues && remoteValues[key] == null) +
-                " baseline=" + (key in base) + " dirty=" + (key in modifiedKeys) +
-                " conflict=" + (key in conflicts) + " decision=" + outcome)
-        }
         return Plan(apply, upload, next, conflicts)
     }
 }

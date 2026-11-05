@@ -128,14 +128,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         val cipher = cipher()
         val baseRevision = preferences.getString("github_base_revision", null)
         val generation = preferences.getInt("github_generation", 0)
-        SyncTrace.log("GITHUB_PULL_ENTER", "basePresent=" + (baseRevision != null) +
-            " generation=" + generation + " cursorPresent=" + (previousCursor != null))
         if (baseRevision != null && preferences.contains("base") && generation > 0) {
             val delta = github.incrementalSince(baseRevision, cipher, generation)
             if (delta != null) {
-                SyncTrace.log("GITHUB_DELTA_READY", "keys=" +
-                    delta.encryptedChanges.size + " revision=" +
-                    delta.revision.take(12))
                 verifiedState = delta.revision to delta.generation
                 latest = null
                 val rows = delta.encryptedChanges.map { (key, sealed) ->
@@ -144,12 +139,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
 
                 return SyncBackend.PullResult(rows, null, false)
             }
-            SyncTrace.log("GITHUB_DELTA_FALLBACK", "reason=no_valid_incremental")
         }
-        SyncTrace.log("GITHUB_FULL_PULL_BEGIN")
         var snapshot = github.current(cipher)
         if (snapshot == null) {
-            SyncTrace.log("INITIAL_BACKUP_NEEDED")
             val alreadyEnrolled = preferences.contains("github_base_revision") ||
                 preferences.contains("base")
             check(SyncSafety.canCreateFirstBackup(
@@ -163,18 +155,12 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             preserveUnlinkedDeviceState()
             val initial = localState()
             uploadAvailableArchives(initial.getValue("x/plugins"))
-            SyncTrace.log("INITIAL_BACKUP_PUBLISH_BEGIN", "settings=" + initial.size +
-                " archives=" + archives.size)
             val initialRevision = github.initialize(cipher, initial, archives)
-            SyncTrace.log("INITIAL_BACKUP_PUBLISH_DONE", "revision=" +
-                initialRevision.take(12))
             createdFreshBackup = true
             archives.clear()
             snapshot = github.current(cipher)
                 ?: error("GitHub commit did not produce a verifiable completed backup")
         } else {
-            SyncTrace.log("GITHUB_FULL_PULL_READY", "keys=" + snapshot.values.size +
-                " revision=" + snapshot.revision.take(12))
             checkGeneration(snapshot)
             preserveUnlinkedDeviceState()
         }
@@ -223,25 +209,18 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     ) {
         check(verifiedState != null) { "Pull must complete before staging any writes." }
         stagedChanges.putAll(changes)
-        SyncTrace.log("GITHUB_STAGE_BUFFERED", "added=" + changes.size +
-            " total=" + stagedChanges.size + " archives=" + archives.size)
     }
 
     override fun flush(cipher: SyncCipher) {
         lastFlushPublished = false
         lastFlushMode = "no_changes"
-        SyncTrace.log("GITHUB_FLUSH_ENTER", "settings=" + stagedChanges.size +
-            " archives=" + archives.size + " fullSnapshot=" + (latest != null))
         if (stagedChanges.isEmpty() && archives.isEmpty()) {
-            SyncTrace.log("GITHUB_FLUSH_SKIP", "reason=empty_buffer")
             return
         }
         val current = latest
         if (current == null) {
             lastFlushMode = "incremental"
             val (known, generation) = verifiedRevision()
-            SyncTrace.log("GITHUB_PARTIAL_PUBLISH_BEGIN", "expected=" + known.take(12) +
-                " keys=" + stagedChanges.size + " archives=" + archives.size)
             val published = github.publishPartial(known, generation, cipher,
                 stagedChanges, verifiedDeletionPaths, archives)
             check(github.remoteHead() == published) {
@@ -249,17 +228,12 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             }
             verifiedState = published to generation
             lastFlushPublished = published != known
-            SyncTrace.log("GITHUB_PARTIAL_PUBLISH_VERIFIED", "published=" +
-                lastFlushPublished + " revision=" + published.take(12))
             stagedChanges.clear()
             archives.clear()
             verifiedDeletionPaths.clear()
             return
         }
         lastFlushMode = "full"
-        SyncTrace.log("GITHUB_FULL_PUBLISH_BEGIN", "expected=" +
-            current.revision.take(12) + " keys=" + stagedChanges.size +
-            " archives=" + archives.size)
         checkGeneration(current)
         val target = current.values.toMutableMap()
         for ((key, value) in stagedChanges) {
@@ -288,8 +262,6 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             ?: error("Could not verify the newly committed GitHub snapshot.")
         verifiedState = latest!!.revision to latest!!.generation
         lastFlushPublished = latest!!.revision != current.revision
-        SyncTrace.log("GITHUB_FULL_PUBLISH_VERIFIED", "published=" +
-            lastFlushPublished + " revision=" + latest!!.revision.take(12))
         stagedChanges.clear()
         archives.clear()
         verifiedDeletionPaths.clear()
