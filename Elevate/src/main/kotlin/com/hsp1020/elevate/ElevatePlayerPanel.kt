@@ -129,6 +129,11 @@ internal class ElevatePlayerPanel(
         ))
     }
     private val rows = ArrayList<Row>()
+    // Preserve displayed descriptions if StremioC's plugin-local metadata cache is reloaded.
+    private val subtitleDetails = object : LinkedHashMap<String, String>(48, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) =
+            size > 160
+    }
     private var lastListTouchX = -1f
     private var lastListTouchY = -1f
     private var refreshTouch: Pair<Row, ImageButton>? = null
@@ -336,6 +341,7 @@ internal class ElevatePlayerPanel(
     private fun syncImportInstance() {
         if (importInstance == vm.state.instance) return
         importInstance = vm.state.instance
+        subtitleDetails.clear()
         beforeImport = null
         resumeAfterFileImport = false
     }
@@ -841,7 +847,17 @@ internal class ElevatePlayerPanel(
     private fun bindRefreshListener() {
         ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
             if (target === fragment && tab == Tab.SUBTITLES) {
-                if (inSync) updateSyncCues() else renderSubtitles()
+                if (inSync) updateSyncCues() else {
+                    // Refreshing the subtitle body does not change its choice labels.
+                    // A full adapter rebuild can lose details after a plugin reload.
+                    for (index in 0 until list.childCount) {
+                        val button = (list.getChildAt(index) as? LinearLayout)
+                            ?.getChildAt(2) as? ImageButton ?: continue
+                        if (button.tag == url && button.visibility == View.VISIBLE) {
+                            ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, button)
+                        }
+                    }
+                }
             }
         }
     }
@@ -868,6 +884,7 @@ internal class ElevatePlayerPanel(
         resumeAfterFileImport = false
         resumeAfterSubtitleReloadInstance = null
         importInstance = -1
+        subtitleDetails.clear()
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
         observeCuePlayer(false)
         touches.forEach { it.setOnTouchListener(null) }
@@ -1321,7 +1338,10 @@ internal class ElevatePlayerPanel(
                 "$number ($embedded" + if (detail.isNotEmpty()) " · $detail)" else ")"
             } else {
                 val suffix = sub.nameSuffix.trim()
-                val detail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
+                val freshDetail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
+                    ?: sub.originalName.substringAfter(" · ", "").takeIf { it.isNotBlank() }
+                if (freshDetail != null) subtitleDetails[sub.url] = freshDetail
+                val detail = freshDetail ?: subtitleDetails[sub.url]
                     ?: if (sub.origin == SubtitleOrigin.DOWNLOADED_FILE)
                         numberedDownloadedDetail.matchEntire(suffix)?.groupValues?.get(1)?.removeSuffix(")")
                             ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
@@ -1336,13 +1356,17 @@ internal class ElevatePlayerPanel(
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url)
                     android.util.Log.d("ElevatePanelRefresh", "tap url=${sub.url.hashCode()} accepted=${accepted}")
-                    if (accepted != true) renderSubtitles()
+                    if (accepted != true) {
+                        ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(sub.url, button)
+                    }
                     Unit
                 }) else null,
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button, sub.url)
                     android.util.Log.d("ElevatePanelRefresh", "longPress url=${sub.url.hashCode()} accepted=${accepted}")
-                    if (accepted != true) renderSubtitles()
+                    if (accepted != true) {
+                        ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(sub.url, button)
+                    }
                     Unit
                 }) else null,
                 richText = true, selected = sub.url == current, refreshUrl = sub.url)

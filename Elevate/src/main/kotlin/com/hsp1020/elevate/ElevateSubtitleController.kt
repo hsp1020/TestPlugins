@@ -748,6 +748,8 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         button.animate().cancel()
         button.rotation = 0f
         autoSpinView = button
+        android.util.Log.d("ElevateSubtitleRefresh",
+            "spinStart url=${button.tag?.hashCode()} attached=${button.isAttachedToWindow} shown=${button.isShown} size=${button.width}x${button.height}")
         autoSpinAnimator = ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
             duration = 800L
             interpolator = LinearInterpolator()
@@ -818,7 +820,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         }
         if (refreshJob?.isActive == true) {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=busy expected=${entry.originalUrl.hashCode()} active=${activeRefreshUrl?.hashCode()}")
-            return activeRefreshUrl == entry.originalUrl
+            return false
         }
         val mediaPlayer = observedPlayer ?: run {
             android.util.Log.d("ElevateSubtitleRefresh", "reject=noPlayer expected=${entry.originalUrl.hashCode()}")
@@ -864,6 +866,8 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                     if (!current()) {
                         break
                     }
+                    android.util.Log.d("ElevateSubtitleRefresh",
+                        "received url=${entry.originalUrl.hashCode()} attempt=$attempt changed=${result !== previous} cues=${result.cues.size}")
                     if (result !== previous) {
                         // Only rebuild the overlay when the subtitle body changed.
                         if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
