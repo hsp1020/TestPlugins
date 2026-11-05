@@ -33,6 +33,9 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.isMovieType
 import com.lagradost.cloudstream3.subtitles.AbstractSubtitleEntities.SubtitleSearch
 import com.lagradost.cloudstream3.ui.player.ExtractorUri
@@ -83,6 +86,16 @@ internal class ElevatePlayerPanel(
     private val ctx = overlay.context
     private val dp: (Int) -> Int = { (it * ctx.resources.displayMetrics.density + .5f).toInt() }
     private val textColor = episodeTitle?.currentTextColor ?: Color.WHITE
+    private val tvControls = isLayout(TV or EMULATOR)
+    private fun View.enableTvFocus() {
+        if (!tvControls) return
+        isFocusable = true
+        isFocusableInTouchMode = true
+        if (foreground == null) foreground =
+            androidx.appcompat.content.res.AppCompatResources.getDrawable(
+                ctx, R.drawable.outline_drawable_forced
+            )
+    }
     private val standardTextColor by lazy {
         (LayoutInflater.from(ctx).inflate(R.layout.sort_bottom_single_choice, null, false) as TextView).textColors
     }
@@ -110,6 +123,7 @@ internal class ElevatePlayerPanel(
         setPadding(dp(10), 0, dp(10), 0)
         minimumHeight = dp(44)
         setOnClickListener { showQualityProfiles() }
+        enableTvFocus()
     }
     private val sourceSettingsButton = ImageView(ctx).apply {
         setImageResource(R.drawable.ic_outline_settings_24)
@@ -120,6 +134,7 @@ internal class ElevatePlayerPanel(
         )
         contentDescription = "Source profile settings"
         setOnClickListener { showQualityProfiles() }
+        enableTvFocus()
     }
     private val sourceActions = FrameLayout(ctx).apply {
         visibility = View.GONE
@@ -226,6 +241,7 @@ internal class ElevatePlayerPanel(
         row.layoutParams = if (parent is RecyclerView) RecyclerView.LayoutParams(-1, height)
             else AbsListView.LayoutParams(-1, height)
         row.minimumHeight = if (compact || tab == Tab.SUBTITLES) dp(48) else dp(28)
+        if (parent is RecyclerView) row.enableTvFocus()
         (row.getChildAt(0) as ImageView).apply {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             visibility = if (checked) View.VISIBLE else View.INVISIBLE
@@ -248,8 +264,9 @@ internal class ElevatePlayerPanel(
             setOnTouchListener(null)
             setOnClickListener(null)
             setOnLongClickListener(null)
-            // Listener removal can make a View clickable again; disable it last.
+            // Only real attached RecyclerView subtitle actions need D-pad focus.
             isFocusable = false
+            if (tvControls && refresh != null && parent is RecyclerView) enableTvFocus()
             isClickable = false
             isLongClickable = false
             if (refresh != null && refreshUrl != null) {
@@ -392,6 +409,7 @@ internal class ElevatePlayerPanel(
                 action()
             }
         }
+        enableTvFocus()
     }
     private val fileImport = importAction(R.string.player_load_subtitles) {
         resumeAfterFileImport = fragment.player.getIsPlaying()
@@ -474,6 +492,7 @@ internal class ElevatePlayerPanel(
         })
         addView(syncForward, LinearLayout.LayoutParams(dp(14), dp(14)))
         setOnClickListener { if (inSync) showTabContents() else showSync() }
+        enableTvFocus()
     }
     private val encodingButton = TextView(ctx).apply {
         setTextColor(textColor)
@@ -485,6 +504,7 @@ internal class ElevatePlayerPanel(
         ellipsize = TextUtils.TruncateAt.END
         minimumHeight = dp(44)
         setOnClickListener { showEncodingDialog() }
+        enableTvFocus()
     }
     private val subtitleSettingsButton = ImageView(ctx).apply {
         setImageResource(R.drawable.ic_outline_settings_24)
@@ -507,6 +527,7 @@ internal class ElevatePlayerPanel(
                 dialog.show(fragment.parentFragmentManager, "SubtitleSettings")
             }.onFailure { android.util.Log.w("Elevate", "Subtitle settings failed", it) }
         }
+        enableTvFocus()
     }
     private val subtitleTools = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -798,6 +819,8 @@ internal class ElevatePlayerPanel(
                 minimumHeight = dp(48)
                 applyElevateNativeFont(bold = true)
                 setOnClickListener { show(entry) }
+                enableTvFocus()
+                id = View.generateViewId()
             }
             buttons[entry] = button
             tabs.addView(button, LinearLayout.LayoutParams(0, dp(48), 1f))
@@ -849,7 +872,10 @@ internal class ElevatePlayerPanel(
     fun attach() {
         updateAvailableTabs()
         nativeWidth = overlay.layoutParams.width
-        overlay.layoutParams = overlay.layoutParams.apply { width = dp(360) }
+        // TV's native 400dp episode list must fit inside the padded overlay.
+        val nativeListWidth = episodeList?.layoutParams?.width?.takeIf { it > 0 } ?: 0
+        val width = maxOf(dp(360), nativeListWidth + overlay.paddingLeft + overlay.paddingRight)
+        overlay.layoutParams = overlay.layoutParams.apply { this.width = width }
         overlay.addView(tabs, 0, LinearLayout.LayoutParams(-1, dp(48)))
         overlay.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         vm.currentLinks.observe(fragment.viewLifecycleOwner, linksChanged)
@@ -1106,6 +1132,7 @@ internal class ElevatePlayerPanel(
                 minimumHeight = dp(36)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
+                enableTvFocus()
             }
             // Keep the 1/3 and 2/4 row order, but size each row independently.
             filterRows[filterButtonCount++ % filterRowCount]

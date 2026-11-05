@@ -633,8 +633,14 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         textSize = 25f
                         applyElevateNativeFont()
                         gravity = Gravity.CENTER
-                        isFocusable = false
-                        contentDescription = "Drag provider to reorder"
+                        isFocusable = isLayout(TV)
+                        isFocusableInTouchMode = isLayout(TV)
+                        if (isLayout(TV)) foreground =
+                            androidx.appcompat.content.res.AppCompatResources.getDrawable(
+                                context, R.drawable.outline_drawable_forced
+                            )
+                        contentDescription = if (isLayout(TV))
+                            "Use up and down to reorder provider" else "Drag provider to reorder"
                         layoutParams = LinearLayout.LayoutParams(dp(36), dp(48))
                     }
                     val number = EditText(context).apply {
@@ -667,6 +673,26 @@ internal class SearchProviderOrderHook(private val app: Application) :
                                 holder.bindingAdapterPosition >= 2)
                                 touchHelper?.startDrag(holder)
                             false
+                        }
+                        if (isLayout(TV)) handle.setOnKeyListener { _, key, event ->
+                            val from = holder.bindingAdapterPosition
+                            val delta = when (key) {
+                                KeyEvent.KEYCODE_DPAD_UP -> -1
+                                KeyEvent.KEYCODE_DPAD_DOWN -> 1
+                                else -> 0
+                            }
+                            val to = from + delta
+                            if (event.action != KeyEvent.ACTION_DOWN || delta == 0 ||
+                                from < 2 || to !in 2..entries.lastIndex) {
+                                false
+                            } else {
+                                move(entries[from].name, to)
+                                list.post {
+                                    (list.findViewHolderForAdapterPosition(to) as? Holder)
+                                        ?.handle?.requestFocus()
+                                }
+                                true
+                            }
                         }
                     }
                 }

@@ -255,6 +255,12 @@ private class PipControlButton {
                     }
                 )
                 setTextColor(sample.textColors)
+                // The native TV button uses a stateful background drawable, not a tint.
+                if (sample.tag == view.context.getString(R.string.tv_no_focus_tag)) {
+                    sample.background?.constantState?.newDrawable(view.resources)?.mutate()?.let {
+                        background = it
+                    }
+                }
                 setTextSize(TypedValue.COMPLEX_UNIT_PX, sample.textSize)
                 typeface = sample.typeface
                 letterSpacing = sample.letterSpacing

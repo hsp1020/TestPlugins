@@ -21,6 +21,10 @@ import android.content.res.ColorStateList
 import android.graphics.drawable.Drawable
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.view.LayoutInflater
+import com.google.android.material.button.MaterialButton
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.lifecycle.ViewModelProvider
@@ -796,7 +800,9 @@ internal class NativeEpisodeOverlayHook(
             opened
         }
         private val originalCardColors = LinkedHashMap<CardView, ColorStateList>()
-        private var selector: AppCompatSpinner? = null
+        private var selector: View? = null
+        private var selectorSeasons = emptyList<Int>()
+        private var tvSeasonButtons = emptyList<Pair<Int, MaterialButton>>()
         private val tree = root.viewTreeObserver
         private var overlayCheckQueued = false
         private var lastNativeAdapter: RecyclerView.Adapter<*>? = null
@@ -1050,6 +1056,8 @@ internal class NativeEpisodeOverlayHook(
         private fun removeSelector() {
             selector?.let { (it.parent as? ViewGroup)?.removeView(it) }
             selector = null
+            selectorSeasons = emptyList()
+            tvSeasonButtons = emptyList()
             title?.let {
                 if (it.parent !== overlay) overlay?.addView(it, if (playerPanelEnabled) 1 else titlePosition)
                 it.isVisible = true
@@ -1115,6 +1123,50 @@ internal class NativeEpisodeOverlayHook(
         private fun seasonLabel(episode: ResultEpisode, context: Context): String =
             ResultViewModel2.seasonToTxt(episode.seasonData, seasonOf(episode))
                 ?.asStringNull(context) ?: context.getString(R.string.season)
+
+        private fun syncTvSeasonButtons() {
+            tvSeasonButtons.forEach { (season, button) ->
+                button.isSelected = season == selectedSeason
+            }
+            list?.nextFocusUpId = tvSeasonButtons.firstOrNull { it.first == selectedSeason }
+                ?.second?.id ?: selector?.id ?: View.NO_ID
+        }
+
+        // Reuse CloudStream's native TV season button style instead of a phone Spinner.
+        private fun makeTvSeasonSelector(context: Context): View {
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            tvSeasonButtons = fullEpisodes.distinctBy(::seasonOf).map { episode ->
+                val season = seasonOf(episode)
+                val button = LayoutInflater.from(context).inflate(
+                    R.layout.result_selection, row, false
+                ) as MaterialButton
+                button.id = View.generateViewId()
+                button.text = seasonLabel(episode, context)
+                button.isFocusable = true
+                button.isFocusableInTouchMode = true
+                button.isSelected = season == selectedSeason
+                button.setOnClickListener {
+                    if (selectedSeason != season) {
+                        selectedSeason = season
+                        syncTvSeasonButtons()
+                        // Leave focus on the selected TV button for repeated season navigation.
+                        renderSeason(focusEpisode = false)
+                    }
+                }
+                row.addView(button)
+                season to button
+            }
+            return HorizontalScrollView(context).apply {
+                id = View.generateViewId()
+                isHorizontalScrollBarEnabled = false
+                addView(row, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+            }
+        }
 
         private fun makeSeasonSpinner(context: Context): AppCompatSpinner {
             val choices = fullEpisodes.distinctBy(::seasonOf)
@@ -1235,21 +1287,24 @@ internal class NativeEpisodeOverlayHook(
                 return
             }
 
-            // Replace the native season label in the SAME position, rather
-            // than adding another row above it.
+            // Keep the native label position; TV uses individual native selection buttons.
+            val seasons = distinct.map(::seasonOf)
+            if (selector != null && selectorSeasons != seasons) removeSelector()
+            selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
             if (selector == null) {
                 val context = overlay?.context ?: return
-                selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
-                selector = makeSeasonSpinner(context)
+                selector = if (isLayout(TV or EMULATOR)) makeTvSeasonSelector(context)
+                    else makeSeasonSpinner(context)
+                selectorSeasons = seasons
                 title?.let { overlay.removeView(it) }
                 overlay.addView(selector, if (playerPanelEnabled) 1 else titlePosition,
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(44)))
             } else {
-                selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
                 val position = distinct.indexOfFirst { seasonOf(it) == selectedSeason }
-                if (position >= 0) selector?.setSelection(position, false)
+                if (position >= 0) (selector as? AppCompatSpinner)?.setSelection(position, false)
             }
-            list?.nextFocusUpId = selector?.id ?: View.NO_ID
+            if (tvSeasonButtons.isNotEmpty()) syncTvSeasonButtons()
+            else list?.nextFocusUpId = selector?.id ?: View.NO_ID
 
             if (filteredAdapter == null) filteredAdapter = EpisodeAdapter(false, { click ->
                 if (click.action == ACTION_CLICK_DEFAULT) {
@@ -1274,7 +1329,7 @@ internal class NativeEpisodeOverlayHook(
             renderSeason()
         }
 
-        private fun renderSeason() {
+        private fun renderSeason(focusEpisode: Boolean = true) {
             val season = selectedSeason ?: return
             val visible = fullEpisodes.filter { seasonOf(it) == season }
             val currentId = (model?.state?.generatorState?.meta as? ResultEpisode)?.id
@@ -1283,9 +1338,7 @@ internal class NativeEpisodeOverlayHook(
             filteredAdapter?.submitList(visible) {
                 if (selectedSeason != season || fragment.view !== root) return@submitList
                 list?.scrollToPosition(currentPosition)
-                if (com.lagradost.cloudstream3.ui.settings.Globals.isLayout(
-                        com.lagradost.cloudstream3.ui.settings.Globals.TV
-                    )) {
+                if (focusEpisode && isLayout(TV or EMULATOR)) {
                     list?.post {
                         if (selectedSeason == season && fragment.view === root) {
                             list?.findViewHolderForAdapterPosition(currentPosition)
