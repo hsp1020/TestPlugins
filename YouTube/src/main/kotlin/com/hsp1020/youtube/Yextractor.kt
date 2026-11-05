@@ -963,6 +963,21 @@ open class YoutubeExtractor : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
+    ) = getUrlInternal(url, referer, subtitleCallback, callback, includeDownloader = false)
+
+    suspend fun getUrlWithDownloader(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) = getUrlInternal(url, referer, subtitleCallback, callback, includeDownloader = true)
+
+    private suspend fun getUrlInternal(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        includeDownloader: Boolean
     ) {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
@@ -1097,7 +1112,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
-                if (pkgName.isNotEmpty()) {
+                if (includeDownloader && pkgName.isNotEmpty()) {
                     val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
                     sourceCallback(newExtractorLink(
                         source = "YouTube Downloader", 
