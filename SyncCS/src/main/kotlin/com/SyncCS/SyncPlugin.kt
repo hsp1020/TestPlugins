@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +58,26 @@ internal object SyncRuntime {
             }
         }
         localReady = loadedFlag("LoadedLocalPlugins")
-        onlineReady = loadedFlag("LoadedOnlinePlugins")
+        val coreOnlineReady = loadedFlag("LoadedOnlinePlugins")
+        // With automatic extension updates OFF, CloudStream loads all installed
+        // online plugins but never sets loadedOnlinePlugins. Verify the actual
+        // loaded registry before treating that path as complete.
+        val verifiedWithoutUpdates = if (localReady && !coreOnlineReady) {
+            runCatching {
+                val context = com.lagradost.cloudstream3.CloudStreamApp.context
+                    ?: return@runCatching false
+                if (PreferenceManager.getDefaultSharedPreferences(context)
+                        .getBoolean("auto_update_plugins", true)) return@runCatching false
+                val installed = PluginManager.getPluginsOnline()
+                synchronized(PluginManager.plugins) {
+                    installed.all { PluginManager.plugins.containsKey(it.filePath) }
+                }
+            }.getOrDefault(false)
+        } else false
+        if (verifiedWithoutUpdates && !onlineReady)
+            SyncTrace.log("ONLINE_LOADER_VERIFIED",
+                "mode=updates_off installed_plugins_loaded=true")
+        onlineReady = coreOnlineReady || verifiedWithoutUpdates
         pluginsLoaded = localReady && onlineReady
         return pluginsLoaded
     }
@@ -420,6 +440,7 @@ class SyncPlugin : Plugin() {
                 // A changed HEAD (or local edits) triggers a complete verified merge.
                 delay(20 * 1000L)
                 if (!isOwner(context)) break
+                if (!ready) ready = SyncRuntime.refreshLoadedState()
                 if (foreground && ready && config(context).active() &&
                     (!SyncAuthGuard.needsReauthentication(config(context)) ||
                         SyncAuthGuard.mayRecover(config(context)))) {
