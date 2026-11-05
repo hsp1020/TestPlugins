@@ -20,6 +20,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.function.Consumer
 import android.net.Uri
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -59,6 +60,16 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private var model: PlayerGeneratorViewModel? = null
     private var tree: ViewTreeObserver? = null
     private val main = Handler(Looper.getMainLooper())
+    private var lastSkipReason: String? = null
+    private fun trace(stage: String, detail: String) {
+        Log.d("ElevateHistoryDiag", "stage=" + stage + " " + detail)
+    }
+    private fun skip(reason: String) {
+        if (lastSkipReason != reason) {
+            lastSkipReason = reason
+            trace("SKIP", "reason=" + reason)
+        }
+    }
     private var player: Media3Player? = null
     private var active: Item? = null
     private var lastEvent: String? = null
@@ -88,14 +99,16 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             for (report in queue) try {
                 send(report)
             } catch (e: Exception) {
+                Log.e("ElevateHistoryDiag", "stage=SEND_FAILED event=" +
+                    report.event + " type=" + e.javaClass.simpleName)
             }
         }
     }
 
     private fun snapshot(): Item? {
-        val state = model?.state?.generatorState ?: return null
-        val response = state.response ?: return null
-        val episode = state.meta as? ResultEpisode ?: return null
+        val state = model?.state?.generatorState ?: run { skip("no_generator_state"); return null }
+        val response = state.response ?: run { skip("no_load_response"); return null }
+        val episode = state.meta as? ResultEpisode ?: run { skip("no_episode"); return null }
         val ids = linkedMapOf<String, String>()
         val saved = readIdFromString(response.syncData["simkl"])
         saved[SimklSyncServices.Imdb]?.let { ids["imdb"] = it }
@@ -114,12 +127,19 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             it.name.equals(response.apiName, true) &&
                 it.javaClass.name == "com.hsp1020.StremioC"
         }
-        if (response.apiName == "StremioC" && stremio == null) return null
+        if (response.apiName == "StremioC" && stremio == null) {
+            skip("stremioc_provider_missing")
+            return null
+        }
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
         val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
             ?: episode.runTime else episode.runTime
+        lastSkipReason = null
+        trace("SNAPSHOT", "provider=" + response.apiName + " movie=" + movie +
+            " ids=" + ids.keys + " stremio=" + (stremio != null) +
+            " episode=" + episode.episode + " season=" + episode.season)
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
             episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
@@ -172,7 +192,14 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             return
         }
 
-        if (!approvedRuntime(item, current)) return
+        if (!approvedRuntime(item, current)) {
+            skip("runtime_not_approved")
+            return
+        }
+        val target = playbackBase() ?: run {
+            skip("missing_or_invalid_history_url")
+            return
+        }
         val openingSession = event == "start" && lastEvent == null
         val (pos, rawDuration) = playbackPosition(item, current)
         val duration = if (current == null) approvedDurationMs else rawDuration
@@ -184,9 +211,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             seekCompletionPending = true
             seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
         }
-        val target = playbackBase() ?: run {
-            return
-        }
+        trace("QUEUE", "provider=" + item.api + " event=" + event +
+            " position=" + pos + " duration=" + duration)
         val report = Report(item, event, pos, duration, target, played)
         if (queue.trySend(report).isFailure) {
 
@@ -195,9 +221,9 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     }
 
     private fun refreshEpisode(): Boolean {
-        val state = model?.state?.generatorState ?: return false
-        val response = state.response ?: return false
-        val episode = state.meta as? ResultEpisode ?: return false
+        val state = model?.state?.generatorState ?: run { skip("refresh_no_state"); return false }
+        val response = state.response ?: run { skip("refresh_no_response"); return false }
+        val episode = state.meta as? ResultEpisode ?: run { skip("refresh_no_episode"); return false }
         if (active?.key == response.url + "#" + episode.id) return false
 
         val next = snapshot()
@@ -225,6 +251,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
+        trace("PLAYER", "attached=" + (next != null) +
+            " host=" + fragment?.activity?.javaClass?.simpleName)
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
         cancelCompletion()
@@ -419,8 +447,25 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             ?: CommonActivity.activity as? FragmentActivity)?.let(::use)
     }
 
+    private fun containsPlayer(manager: FragmentManager): Boolean =
+        manager.fragments.any { candidate ->
+            (candidate is GeneratorPlayer && candidate.view != null) ||
+                (candidate.isAdded && containsPlayer(candidate.childFragmentManager))
+        }
+
     private fun use(activity: FragmentActivity) {
+        // The visible online GeneratorPlayer may stay in MainActivity while an
+        // auxiliary DownloadedPlayerActivity is resumed (e.g. PiP navigation).
+        // Do not detach its observer for an Activity without that fragment.
+        if (host !== activity &&
+            host?.let { containsPlayer(it.supportFragmentManager) } == true &&
+            !containsPlayer(activity.supportFragmentManager)) {
+            trace("HOST_KEEP", "playerHost=" + host?.javaClass?.simpleName +
+                " ignored=" + activity.javaClass.simpleName)
+            return
+        }
         if (host !== activity) {
+            trace("HOST", "selected=" + activity.javaClass.simpleName)
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             detach()
             host = activity
@@ -464,6 +509,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             return
         }
         detach()
+        trace("WATCH", "host=" + fragment.activity?.javaClass?.simpleName)
         this.fragment = fragment
         model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
         fragment.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
@@ -521,6 +567,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
                 emptyMap()
             }
         } ?: emptyMap()
+        trace("STREMIO_IDS", "enabled=" + result["_historyEnabled"] +
+            " keys=" + result.keys)
         return result
     }
 
@@ -534,7 +582,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val ids = try {
             val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
                 ?.authData()
-            if (auth == null) emptyMap() else {
+            if (auth == null) {
+                trace("SIMKL_ID_LOOKUP", "reason=no_native_simkl_login")
+                emptyMap()
+            } else {
                 val headers = SimklApi.getHeaders(auth.token)
                 val clientId = headers["simkl-api-key"]
                 if (clientId.isNullOrBlank()) emptyMap() else {
@@ -578,9 +629,12 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
                     }
                 }
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            trace("SIMKL_ID_LOOKUP", "reason=request_failed type=" +
+                error.javaClass.simpleName)
             emptyMap()
         }
+        trace("SIMKL_ID_LOOKUP", "resolved=" + ids.keys + " found=" + ids.isNotEmpty())
         simklMappings[key] = now to ids
         if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
         return ids
@@ -589,14 +643,19 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private suspend fun send(report: Report) {
         if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return
         val item = report.item
+        trace("PREPARE", "provider=" + item.api + " event=" + report.event)
         val overrides = stremioOverrides(item)
-        if (item.stremioProvider != null && overrides["_historyEnabled"] != "true") return
+        if (item.stremioProvider != null && overrides["_historyEnabled"] != "true") {
+            trace("SKIP", "reason=stremioc_catalog_disabled_or_mapping_failed")
+            return
+        }
         val ids = item.ids.toMutableMap()
         ids.putAll(overrides.filterKeys { !it.startsWith("_") })
         if (ids["imdb"]?.matches(Regex("tt[0-9]+")) != true &&
             ids["tmdb"]?.toLongOrNull()?.let { it > 0L } != true) {
             ids["simkl"]?.let { ids.putAll(resolveSimkl(it, item.movie)) }
         }
+        trace("IDS", "provider=" + item.api + " keys=" + ids.keys)
         val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
         val tmdb = ids["tmdb"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val kitsu = ids["kitsu"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
@@ -610,7 +669,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             mal != null -> "mal:" + mal
             else -> item.urlId?.takeIf {
                 it.matches(Regex("tt[0-9]+|(?:tmdb|kitsu|mal):[0-9]+"))
-            } ?: return
+            } ?: run {
+                trace("SKIP", "reason=no_server_supported_id provider=" + item.api)
+                return
+            }
         }
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
             else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 } ?: item.season
@@ -637,12 +699,18 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             body.put("played", report.played ?: (report.duration > 0L &&
                 report.position.toDouble() / report.duration >= 0.80))
         val type = if (item.movie) "movie" else "series"
+        trace("SEND", "provider=" + item.api + " event=" + report.event +
+            " kind=" + type + " idType=" + base.substringBefore(':').let {
+                if (it.startsWith("tt")) "imdb" else it
+            })
         val response = app.post(
             report.target + "/playback/" + type + "/" + Uri.encode(videoId) + ".json",
             headers = mapOf("Content-Type" to "application/json"),
             requestBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()),
             timeout = 15L
         )
+        trace("HTTP", "provider=" + item.api + " event=" + report.event +
+            " status=" + response.okhttpResponse.code)
         response.okhttpResponse.close()
     }
 }
