@@ -224,8 +224,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         observedPlayer = current
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
-        android.util.Log.d("ElevateSubtitleRefresh",
-            "playerBound player=${current?.let { System.identityHashCode(it) }} pending=${appliedRefresh?.entry?.originalUrl?.hashCode()}")
         runAppliedRefresh()
         appliedRefresh?.let { pending ->
             fragment?.let { panelListener?.invoke(it, pending.entry.originalUrl) }
@@ -245,8 +243,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         appliedRefresh = null
         panelPendingTimeout?.cancel()
         panelPendingTimeout = null
-        android.util.Log.d("ElevateSubtitleRefresh",
-            "queuedActivated url=${deferred.entry.originalUrl.hashCode()} instance=${deferred.instance}")
         requestSubtitleRefresh(deferred.entry, null, deferred.automatic)
     }
 
@@ -793,8 +789,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         button.animate().cancel()
         button.rotation = 0f
         autoSpinView = button
-        android.util.Log.d("ElevateSubtitleRefresh",
-            "spinStart url=${button.tag?.hashCode()} attached=${button.isAttachedToWindow} shown=${button.isShown} size=${button.width}x${button.height}")
         autoSpinAnimator = ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
             duration = 800L
             interpolator = LinearInterpolator()
@@ -851,7 +845,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         bindPlayer()
         val actual = target.player.getCurrentPreferredSubtitle()?.url
         if (actual != entry.originalUrl) {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=selection expected=${entry.originalUrl.hashCode()} actual=${actual?.hashCode()}")
             return false
         }
         // A selection can become active before its first onEvents callback.
@@ -868,16 +861,13 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             return false
         }
         if (refreshJob?.isActive == true) {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=busy expected=${entry.originalUrl.hashCode()} active=${activeRefreshUrl?.hashCode()}")
             return false
         }
         val mediaPlayer = observedPlayer ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=noPlayer expected=${entry.originalUrl.hashCode()}")
             return false
         }
         val generation = ++refreshGeneration
         activeRefreshUrl = entry.originalUrl
-        android.util.Log.d("ElevateSubtitleRefresh", "start url=${entry.originalUrl.hashCode()} automatic=${automatic} player=${System.identityHashCode(mediaPlayer)} instance=${instance}")
         val originalTint = button?.imageTintList
         button?.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
         if (automatic) {
@@ -919,20 +909,13 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                     if (!current()) {
                         break
                     }
-                    android.util.Log.d("ElevateSubtitleRefresh",
-                        "received url=${entry.originalUrl.hashCode()} attempt=$attempt changed=${result !== previous} cues=${result.cues.size}")
                     if (result !== previous) {
                         // Only rebuild the overlay when the subtitle body changed.
                         if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
                             refreshedCues.keys.firstOrNull { it != selectedUrl }?.let(refreshedCues::remove)
                         }
                         refreshedCues[entry.originalUrl] = result
-                        val applied = refreshedOverlay.attach(target, entry.originalUrl, result)
-                        android.util.Log.d("ElevateSubtitleRefresh",
-                            "overlayApply url=${entry.originalUrl.hashCode()} installed=$applied cues=${result.cues.size} player=${System.identityHashCode(mediaPlayer)}")
-                    } else {
-                        android.util.Log.d("ElevateSubtitleRefresh",
-                            "overlayUnchanged url=${entry.originalUrl.hashCode()} cues=${result.cues.size}")
+                        refreshedOverlay.attach(target, entry.originalUrl, result)
                     }
                     panelListener?.invoke(target, entry.originalUrl)
                     if (!automatic || attempt + 1 >= attempts ||
@@ -955,7 +938,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                     activeRefreshUrl = null
                     if (automatic) endAutoRefresh() else finishManualSpin()
                     refreshJob = null
-                    android.util.Log.d("ElevateSubtitleRefresh", "finish url=${entry.originalUrl.hashCode()} automatic=${automatic}")
                     if (button != null && button.tag == entry.originalUrl) {
                         val selected = fragment === target && model?.state?.instance == instance &&
                             target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
@@ -984,9 +966,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         if (running && button.isAttachedToWindow && button.visibility == View.VISIBLE &&
             button.isShown) {
             startAutoSpin(button)
-        } else if (running && !button.isAttachedToWindow) {
-            android.util.Log.d("ElevateSubtitleRefresh",
-                "spinDeferred url=${url.hashCode()} view=${System.identityHashCode(button)} attached=false")
         }
     }
 
@@ -1004,28 +983,22 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null,
                         expectedUrl: String? = null, pendingSelection: Boolean = false): Boolean {
         val target = fragment ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=noFragment")
             return false
         }
         // Make Korean reloads Media3 without loading links again. Observe the replacement now.
         bindPlayer()
         val actual = target.player.getCurrentPreferredSubtitle()?.url
         val url = expectedUrl ?: actual ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=noPreferred")
             return false
         }
         val subtitle = model?.state?.subtitles?.firstOrNull { it.url == url } ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=notInModel url=${url.hashCode()}")
             return false
         }
         val entry = ElevateSubtitleRefreshRegistry.entryFor(subtitle) ?: run {
-            android.util.Log.d("ElevateSubtitleRefresh", "reject=noEntry url=${url.hashCode()}")
             return false
         }
         if (actual != url) {
             if (!pendingSelection || expectedUrl != url) {
-                android.util.Log.d("ElevateSubtitleRefresh",
-                    "reject=panelMismatch expected=${url.hashCode()} actual=${actual?.hashCode()}")
                 return false
             }
             val instance = model?.state?.instance ?: return false
@@ -1046,13 +1019,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 if (appliedRefresh === pending) {
                     appliedRefresh = null
                     panelPendingTimeout = null
-                    android.util.Log.d("ElevateSubtitleRefresh",
-                        "queuedTimeout url=${url.hashCode()} instance=$instance")
                     panelListener?.invoke(target, url)
                 }
             }
-            android.util.Log.d("ElevateSubtitleRefresh",
-                "queuedDuringReload url=${url.hashCode()} actual=${actual?.hashCode()} automatic=$automatic")
             panelListener?.invoke(target, url)
             return true
         }

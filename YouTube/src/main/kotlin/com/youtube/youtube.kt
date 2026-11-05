@@ -511,10 +511,6 @@ class YoutubeProvider(
         try {
             val payload = fetchAndPrepareHomeBootstrap(requestLang)
             if (payload == null || payload.apiKey.isBlank() || payload.chips.isEmpty()) {
-                Log.w(
-                    "YoutubeUtils",
-                    "[CHIP_BOOTSTRAP] REFRESH_INVALID payload=${payload != null} chips=${payload?.chips?.size ?: 0}; fallback=${fallback != null}"
-                )
                 return fallback
             }
 
@@ -2403,11 +2399,6 @@ class YoutubeProvider(
                                         horizontalImages = true
                                     )
                                 )
-                            } else {
-                                Log.w(
-                                    "YoutubeUtils",
-                                    "[CHIP_DEBUG] mainPage - Skipped enabled chip '$chipName' because it's missing from cachedChipsMap!"
-                                )
                             }
                         }
                         else -> {
@@ -2639,9 +2630,7 @@ class YoutubeProvider(
                         }
                     } else {
                         val bootstrap = ensureChipBootstrap()
-                        if (bootstrap == null) {
-                            Log.w("YoutubeUtils", "[CHIP] page=1 bootstrap unavailable key=$requestData")
-                        } else {
+                        if (bootstrap != null) {
                             val persistedChips = readPersistedChips()
                             val chipName: String?
                             val tokenToUse: String?
@@ -2658,20 +2647,13 @@ class YoutubeProvider(
                                 tokenToUse = freshToken ?: legacyToken
                             }
 
-                            if (tokenToUse.isNullOrBlank()) {
-                                Log.w(
-                                    "YoutubeUtils",
-                                    "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size} persisted=${persistedChips.size}"
-                                )
-                            } else {
+                            if (!tokenToUse.isNullOrBlank()) {
                                 val browse = executeChipBrowseAndProcess(bootstrap, tokenToUse, requestData, 1)
                                 if (browse != null) {
                                     results.addAll(browse.items)
                                     val nextToken = browse.nextToken
                                     nextContinuation = nextToken
-                                    if (results.isEmpty()) {
-                                        Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=1 key=$requestData")
-                                    }
+                                    
 
                                     if (results.isNotEmpty() || !nextToken.isNullOrBlank()) {
                                         val newSession = ChipCatalogSession(bootstrap)
@@ -2683,12 +2665,8 @@ class YoutubeProvider(
                                             homeCacheKey(requestData),
                                             DirectPageResult(results.toList(), nextToken)
                                         )
-                                    } else {
-                                        Log.w("YoutubeUtils", "[CHIP] SESSION_NOT_COMMITTED page=1 key=$requestData")
                                     }
 
-                                } else {
-                                    Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
                                 }
                             }
                         }
@@ -2696,27 +2674,19 @@ class YoutubeProvider(
                 } else {
                     val session = chipCatalogSessions[requestData]
                     val tokenToUse = session?.pageTokens?.get(page)
-                    if (session == null) {
-                        Log.w("YoutubeUtils", "[CHIP] SESSION_MISSING page=$page key=$requestData")
-                    } else if (tokenToUse.isNullOrBlank()) {
-                        Log.w("YoutubeUtils", "[CHIP] PAGE_TOKEN_MISSING page=$page key=$requestData")
-                    } else {
+                    if (session != null && !tokenToUse.isNullOrBlank()) {
                         val browse = executeChipBrowseAndProcess(session.bootstrap, tokenToUse, requestData, page)
                         if (browse != null) {
                             results.addAll(browse.items)
                             val nextToken = browse.nextToken
                             nextContinuation = nextToken
-                            if (results.isEmpty()) {
-                                Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=$page key=$requestData")
-                            }
+                            
                             if (!nextToken.isNullOrBlank()) {
                                 session.pageTokens[page + 1] = nextToken
                             } else {
                                 session.pageTokens.remove(page + 1)
                             }
 
-                        } else {
-                            Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=$page key=$requestData")
                         }
                     }
                 }
@@ -3553,9 +3523,6 @@ class YoutubeProvider(
             
             finalRecs.addAll(episodeResponses)
 
-            Log.i("YouTubeMeta", "[HTML_META] type=shorts id=$videoId html=${response != null} " +
-                "player=${videoDetails != null} plotChars=${cleanShortsDescription.length} tags=${displayTags.size} movedHashtags=${descriptionTags.size} " +
-                "uploader=${if (channelName.isNotBlank()) "initialData" else if (htmlUploader.isNotBlank()) "player" else "none"} direct=$direct")
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
@@ -3625,7 +3592,6 @@ class YoutubeProvider(
                             if (channelDescription.isNotBlank()) channelDescSource = "about_og"
                         }
                     } catch (e: Exception) {
-                        Log.w("YouTubeMeta", "[HTML_META] type=channel id=$cleanUrl about_error=${e.javaClass.simpleName}")
                         logError(e)
                     }
                 }
@@ -3634,9 +3600,6 @@ class YoutubeProvider(
                         .selectFirst("meta[property=og:description]")?.attr("content").orEmpty()
                     if (channelDescription.isNotBlank()) channelDescSource = "videos_og"
                 }
-                Log.i("YouTubeMeta", "[HTML_META] type=channel id=$cleanUrl source=$channelDescSource " +
-                    "chars=${channelDescription.length} lines=${channelDescription.count { it == '\n' } + 1} " +
-                    "aboutFetched=$aboutFetched")
                 
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
@@ -4024,11 +3987,6 @@ class YoutubeProvider(
         if (channelName.isBlank()) channelName = htmlUploader
         val (cleanPlot, descriptionTags) = extractDescriptionHashtags(plot)
         val displayTags = (descriptionTags + htmlTags).distinctBy { it.lowercase() }.take(10)
-        Log.i("YouTubeMeta", "[HTML_META] type=video id=$videoId html=${response != null} " +
-            "player=${videoDetails != null} source=$plotSource chars=${plot.length} " +
-            "lines=${plot.count { it == '\n' } + if (plot.isBlank()) 0 else 1} " +
-            "tags=${displayTags.size} movedHashtags=${descriptionTags.size} uploader=${if (channelName.isNotBlank()) "html" else "none"} " +
-            "avatar=${channelAvatar.isNotBlank()} direct=$direct")
 
         rememberChannel(url, channelName, channelId)
 

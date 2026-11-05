@@ -75,8 +75,6 @@ internal object SyncRuntime {
             }.getOrDefault(false)
         } else false
         if (verifiedWithoutUpdates && !onlineReady)
-            SyncTrace.log("ONLINE_LOADER_VERIFIED",
-                "mode=updates_off installed_plugins_loaded=true")
         onlineReady = coreOnlineReady || verifiedWithoutUpdates
         pluginsLoaded = localReady && onlineReady
         return pluginsLoaded
@@ -142,9 +140,6 @@ class SyncPlugin : Plugin() {
             return@OnSharedPreferenceChangeListener
         }
         val path = type + key
-        if (SyncTrace.relevant(path)) SyncTrace.log("PREF_EVENT",
-            "id=" + SyncBackend.digest(path).take(16) + " tracked=" +
-                SyncData.isTracked(path) + " applying=" + SyncCoordinator.applying)
         if (!SyncData.isTracked(path)) return@OnSharedPreferenceChangeListener
         SyncCoordinator.markChanged(context, path)
         if (SyncPlaybackThrottle.isProgressPath(path)) {
@@ -161,8 +156,6 @@ class SyncPlugin : Plugin() {
     private val loaded = { _: Boolean ->
         ready = true
         SyncRuntime.refreshLoadedState()
-        SyncTrace.log("PLUGINS_LOADED_EVENT", "local=" + SyncRuntime.localReady +
-            " online=" + SyncRuntime.onlineReady)
         watchPreferences()
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null && LocalSyncJournal.pending(context)) {
@@ -188,10 +181,6 @@ class SyncPlugin : Plugin() {
         observe("core", prefs)
         observe("default", PreferenceManager.getDefaultSharedPreferences(context))
         val directory = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
-        SyncTrace.log("WATCH_SWEEP", "evoExists=" +
-            java.io.File(directory, "ultima_evo_settings.xml").isFile +
-            " elevateExists=" + java.io.File(directory, "ElevateFeatures.xml").isFile +
-            " observed=" + observed.size)
         directory.listFiles()?.forEach { file ->
             if (file.extension != "xml") return@forEach
             val name = file.nameWithoutExtension
@@ -206,8 +195,6 @@ class SyncPlugin : Plugin() {
         if (observed.containsKey(name)) return
         observed[name] = pref
         pref.registerOnSharedPreferenceChangeListener(observedListener)
-        if (name == "ultima_evo_settings" || name == "ElevateFeatures")
-            SyncTrace.log("WATCH_ATTACHED", "file=" + name + " keys=" + pref.all.size)
     }
     private fun foregroundActivity(): Activity? {
         if (!foreground) return null
@@ -230,32 +217,25 @@ class SyncPlugin : Plugin() {
 
     private fun queueSync(reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: run {
-            SyncTrace.log("QUEUE_SKIPPED", "reason=" + reason + " gate=no_context")
             return
         }
         if (!isOwner(context) || !config(context).active()) {
-            SyncTrace.log("QUEUE_SKIPPED", "reason=" + reason + " gate=owner_or_account")
             return
         }
         if (SyncAuthGuard.needsReauthentication(config(context)) &&
             !SyncAuthGuard.mayRecover(config(context))) {
-            SyncTrace.log("QUEUE_SKIPPED", "reason=" + reason + " gate=auth")
             return
         }
         synchronized(workerGuard) {
             if (worker?.isActive == true &&
                 reason in setOf("remote-head-poll-20s", "home-reload",
                     "activity-resumed", "activity-paused", "activity-stopped")) {
-                SyncTrace.log("QUEUE_COALESCED", "reason=" + reason +
-                    " activeWorker=true")
                 return
             }
             rerunRequested = true
             if (worker?.isActive == true) {
-                SyncTrace.log("QUEUE_RERUN_SCHEDULED", "reason=" + reason)
                 return
             }
-            SyncTrace.log("QUEUE_WORKER_STARTED", "reason=" + reason)
             worker = scope.launch {
                 while (true) {
                     val next = synchronized(workerGuard) {
@@ -268,11 +248,9 @@ class SyncPlugin : Plugin() {
                         }
                     }
                     if (!next) {
-                        SyncTrace.log("QUEUE_WORKER_IDLE", "reason=" + reason)
                         break
                     }
                     if (!isOwner(context) || !config(context).active()) {
-                        SyncTrace.log("QUEUE_WORKER_STOP", "gate=owner_or_account")
                         synchronized(workerGuard) { worker = null }
                         break
                     }
@@ -286,37 +264,11 @@ class SyncPlugin : Plugin() {
                         val current = config(context).preferences.getString("github_base_revision", null)
                         val headAttempt = runCatching { GithubSyncAdapter(context).remoteHead() }
                         val head = headAttempt.getOrNull()
-                        headAttempt.exceptionOrNull()?.let {
-                            SyncTrace.log("QUEUE_BACKOFF_HEAD_FAILED",
-                                "class=" + it.javaClass.simpleName)
-                        }
                         if (current != null && head == current) {
-                            SyncTrace.log("QUEUE_BACKOFF_SKIP", "reason=" + reason +
-                                " sameHead=true")
                             continue
                         }
                     }
-
-
-                    val started = android.os.SystemClock.elapsedRealtime()
-                    SyncTrace.log("QUEUE_PASS_BEGIN", "reason=" + reason +
-                        " foreground=" + (active != null))
-                    val result = try {
-                        SyncCoordinator.synchronize(context, active)
-                    } catch (failure: Throwable) {
-                        SyncTrace.log("QUEUE_PASS_EXCEPTION",
-                            "class=" + failure.javaClass.simpleName)
-                        throw failure
-                    }
-                    SyncTrace.log("QUEUE_PASS_END", "reason=" + reason +
-                        " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started) +
-                        " outcome=" + when {
-                            result.startsWith("Synced:") -> "synced"
-                            result.startsWith("Sync incomplete:") -> "incomplete"
-                            result.startsWith("Sync failed") -> "failed"
-                            result.startsWith("Sync conflict:") -> "conflict"
-                            else -> "blocked"
-                        })
+                    val result = SyncCoordinator.synchronize(context, active)
                     if (result.startsWith("Sync failed:") ||
                         result.startsWith("Sync failed during") ||
                         result.startsWith("Sync conflict:")) {
@@ -355,29 +307,19 @@ class SyncPlugin : Plugin() {
     private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) {
-            if (reason != "preference-change")
-                SyncTrace.log("REQUEST_SKIPPED", "reason=" + reason +
-                    " ready=" + ready + " gate=owner_or_account")
             return
         }
         if (SyncAuthGuard.needsReauthentication(config(context)) &&
             !SyncAuthGuard.mayRecover(config(context))) {
-            SyncTrace.log("REQUEST_SKIPPED", "reason=" + reason + " gate=auth")
             return
         }
-        if (reason != "preference-change")
-            SyncTrace.log("REQUEST_ARMED", "reason=" + reason + " delayMs=" + delayMs)
         trigger?.cancel()
         trigger = scope.launch {
             delay(delayMs)
             if (isOwner(context)) {
-                SyncTrace.log("REQUEST_FIRED", "reason=" + reason)
                 // Debounce only the pending timer; collapse in-flight events
                 // into one follow-up pass without discarding any new changes.
                 queueSync(reason)
-            } else {
-                SyncTrace.log("REQUEST_DROPPED", "reason=" + reason +
-                    " gate=owner_changed")
             }
         }
     }
@@ -457,15 +399,12 @@ class SyncPlugin : Plugin() {
         val session = config(context)
 
         ready = SyncRuntime.refreshLoadedState()
-        SyncTrace.log("PLUGIN_ENTRY", "ready=" + ready +
-            " local=" + SyncRuntime.localReady + " online=" + SyncRuntime.onlineReady)
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks
         MainActivity.afterPluginsLoadedEvent += loaded
         MainActivity.mainPluginsLoadedEvent += loaded
         MainActivity.reloadAccountEvent += accountRoster
         watchPreferences()
-        SyncTrace.current(context, "SYNC_PLUGIN_LOAD")
         start(context)
         openSettings = { selected ->
             (selected as? AppCompatActivity)?.let { activity ->

@@ -143,14 +143,6 @@ internal class ElevatePlayerPanel(
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
     }
-    private fun refreshViewState(view: View): String {
-        val parent = view.parent as? View
-        return "view=${System.identityHashCode(view)} attached=${view.isAttachedToWindow} " +
-            "shown=${view.isShown} token=${view.windowToken != null} " +
-            "parent=${parent?.javaClass?.simpleName} parentAttached=${parent?.isAttachedToWindow} " +
-            "optionsAttached=${subtitleOptions.isAttachedToWindow}"
-    }
-
     private fun scheduleRefreshRebind(url: String) {
         pendingRefreshRebindUrl = url
         if (refreshRebindPosted) return
@@ -165,24 +157,15 @@ internal class ElevatePlayerPanel(
     }
 
     private fun rebindVisibleRefreshButton(url: String) {
-        var candidates = 0
-        var attached = 0
         for (index in 0 until subtitleOptions.childCount) {
             val row = subtitleOptions.getChildAt(index) as? LinearLayout ?: continue
             val button = row.getChildAt(2) as? ImageButton ?: continue
             if (button.tag != url || button.visibility != View.VISIBLE) continue
-            candidates++
             if (subtitleOptions.isAttachedToWindow && row.isAttachedToWindow &&
                 button.isAttachedToWindow && button.isShown) {
-                attached++
                 ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, button)
-            } else {
-                android.util.Log.d("ElevatePanelRefresh",
-                    "rebindDeferred url=${url.hashCode()} state=${refreshViewState(button)}")
             }
         }
-        android.util.Log.d("ElevatePanelRefresh",
-            "rebind url=${url.hashCode()} candidates=$candidates attached=$attached")
     }
 
     private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false,
@@ -229,17 +212,11 @@ internal class ElevatePlayerPanel(
                     addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                         override fun onViewAttachedToWindow(view: View) {
                             (view.tag as? String)?.let { url ->
-                                android.util.Log.d("ElevatePanelRefresh",
-                                    "buttonAttached url=${url.hashCode()} state=${refreshViewState(view)}")
                                 if (view.isShown)
                                     ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, view as ImageButton)
                             }
                         }
                         override fun onViewDetachedFromWindow(view: View) {
-                            (view.tag as? String)?.let { url ->
-                                android.util.Log.d("ElevatePanelRefresh",
-                                    "buttonDetached url=${url.hashCode()} state=${refreshViewState(view)}")
-                            }
                             ElevateSubtitleRefreshHook.active()?.releasePanelRefreshButton(view as ImageButton)
                         }
                     })
@@ -264,10 +241,6 @@ internal class ElevatePlayerPanel(
             isFocusable = false
         }
         (row.getChildAt(2) as ImageButton).apply {
-            if (refresh != null && (position == 0 || !isAttachedToWindow)) {
-                android.util.Log.d("ElevatePanelRefresh",
-                    "rowBind position=$position reused=${reuse != null} oldUrl=${(tag as? String)?.hashCode()} newUrl=${refreshUrl?.hashCode()} state=${refreshViewState(this)}")
-            }
             visibility = if (refresh != null) View.VISIBLE else View.GONE
             tag = refreshUrl
             isEnabled = refresh != null
@@ -1394,7 +1367,6 @@ internal class ElevatePlayerPanel(
                     val pending = pendingSubtitleInstance == vm.state.instance &&
                         pendingSubtitleUrl == sub.url
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url, pending)
-                    android.util.Log.d("ElevatePanelRefresh", "tap url=${sub.url.hashCode()} pending=$pending accepted=$accepted")
                     if (accepted != true) {
                         ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(sub.url, button)
                     }
@@ -1404,7 +1376,6 @@ internal class ElevatePlayerPanel(
                     val pending = pendingSubtitleInstance == vm.state.instance &&
                         pendingSubtitleUrl == sub.url
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button, sub.url, pending)
-                    android.util.Log.d("ElevatePanelRefresh", "longPress url=${sub.url.hashCode()} pending=$pending accepted=$accepted")
                     if (accepted != true) {
                         ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(sub.url, button)
                     }

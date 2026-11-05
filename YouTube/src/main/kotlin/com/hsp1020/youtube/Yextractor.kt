@@ -189,8 +189,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)
-                } catch (e: Exception) {
-                    println("[YT_PROXY_DEBUG] 외부 앱 연동 에러: ${e.message}")
+                } catch (_: Exception) {
                 }
             }
         }

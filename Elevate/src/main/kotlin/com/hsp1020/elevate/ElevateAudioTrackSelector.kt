@@ -84,19 +84,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var awaitingAnime = false
     private var pendingTrackParameters: TrackSelectionParameters? = null
     private var lastEpisodeId: Int? = null
-    private fun audioTrace(message: String) {
-        android.util.Log.d("ElevateAudioDiag", message)
-    }
-    private fun describeAudio(tracks: Tracks): String =
-        tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-            .mapIndexed { g, group ->
-                (0 until group.length).joinToString(",") { i ->
-                    val format = group.getTrackFormat(i)
-                    "g" + g + "/" + i + "(lang=" + format.language +
-                        ",label=" + format.label + ",supported=" + group.isTrackSupported(i) +
-                        ",selected=" + group.isTrackSelected(i) + ")"
-                }
-            }.joinToString(";")
+
 
     // A proxy is required because the host app may use a different Media3 Listener ABI.
     private val audioListener = java.lang.reflect.Proxy.newProxyInstance(
@@ -105,7 +93,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     ) { proxy, method, args ->
         when (method.name) {
             "onTracksChanged" -> {
-                audioTrace("EVENT onTracksChanged instance=" + lastInstance)
                 (args?.getOrNull(0) as? Tracks)?.let(::select)
                 null
             }
@@ -128,8 +115,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         player = next
         selected = false
         pendingTrackParameters = null
-        audioTrace("PLAYER_ATTACH host=" + active?.activity?.javaClass?.simpleName +
-            " attached=" + (next != null) + " instance=" + lastInstance)
         if (next != null && active != null) {
             next.addListener(audioListener)
             select(next.currentTracks)
@@ -167,7 +152,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     private fun use(next: FragmentActivity) {
         if (!started) return
-        audioTrace("HOST " + next.javaClass.simpleName)
         if (activity !== next) {
             activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
             detach()
@@ -234,7 +218,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val response = generator.response
         val offline = generator.meta as? ExtractorUri
         if (response == null && offline == null) {
-            audioTrace("SOURCE unavailable meta=" + generator.meta?.javaClass?.simpleName)
             return
         }
         val name = response?.apiName.orEmpty()
@@ -255,10 +238,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         isAnime = (flag ?: ((episode?.tvType ?: offline?.tvType ?: response?.type) in setOf(
             TvType.Anime, TvType.AnimeMovie, TvType.OVA
         ))) || "anime" in tags || ("animation" in tags && "japanese" in tags)
-        audioTrace("SOURCE instance=" + state.instance + " provider=" + name +
-            " offline=" + (offline != null) + " ExtractorUri.tvType=" + offline?.tvType +
-            " episodeType=" + episode?.tvType + " responseType=" + response?.type +
-            " episodeAnimeFlag=" + flag + " tags=" + tags + " isAnime=" + isAnime)
 
         if (offline != null && response == null && !isAnime) {
             // The native download generator often labels anime as TvSeries.
@@ -277,8 +256,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                     lastEpisodeId != episodeId) return@launch
                 awaitingAnime = false
                 if (detected != null) isAnime = detected
-                audioTrace("ANIME_RESOLVED downloaded=true header=" + (header != null) +
-                    " isAnime=" + isAnime + " tvType=" + offline.tvType)
                 val current = player
                 if (current != null) {
                     if (pendingTrackParameters != null &&
@@ -286,7 +263,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                         // Do not override a manual track change while metadata was loading.
                         selected = true
                         current.removeListener(audioListener)
-                        audioTrace("SELECT preserved changed track parameters")
                     } else {
                         select(current.currentTracks)
                     }
@@ -305,20 +281,16 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private fun select(tracks: Tracks) {
         val current = player ?: return
         if (selected) {
-            audioTrace("SELECT ignored alreadySelected=true")
             return
         }
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        audioTrace("TRACKS isAnime=" + isAnime + " entries=" + describeAudio(tracks))
         if (groups.isEmpty()) {
-            audioTrace("SELECT aborted noAudioGroups")
             return
         }
         if (awaitingAnime) {
             if (pendingTrackParameters == null) {
                 pendingTrackParameters = current.trackSelectionParameters
             }
-            audioTrace("SELECT deferred pending downloaded anime identification")
             return
         }
         val appLanguage = fragment?.context?.resources?.configuration?.let {
@@ -326,7 +298,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
         val languages = listOfNotNull(appLanguage, if (isAnime) "ja" else "en",
             "en".takeIf { isAnime }).map { it.lowercase(Locale.ROOT) }.distinct()
-        audioTrace("PRIORITY appLanguage=" + appLanguage + " candidates=" + languages)
         val match = languages.firstNotNullOfOrNull { language ->
             groups.firstNotNullOfOrNull { group ->
                 (0 until group.length).firstOrNull { i ->
@@ -341,19 +312,15 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             }
         }
         if (match == null) {
-            audioTrace("SELECT aborted noSupportedMatchingLanguage")
             return
         }
         selected = true
         current.removeListener(audioListener)
         val (group, index) = match
-        audioTrace("SELECT_REQUEST index=" + index + " lang=" + group.getTrackFormat(index).language +
-            " previouslySelected=" + group.isTrackSelected(index))
         current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
         main.postDelayed({
             if (player === current) {
-                audioTrace("SELECT_RESULT tracks=" + describeAudio(current.currentTracks))
             }
         }, 250L)
     }

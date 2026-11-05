@@ -76,7 +76,6 @@ internal object SyncCoordinator {
 
             return cached.second
         }
-        val started = android.os.SystemClock.elapsedRealtime()
         val json = JSONObject(raw)
         val parsed = json.keys().asSequence().associateWith { json.getString(it) }.toMap()
         cachedBaseline = raw to parsed
@@ -90,29 +89,21 @@ internal object SyncCoordinator {
         val remotePath = ProfileIdentity.remotePathForChange(context, path)
         val key = "modified/" + remotePath
         config.preferences.edit().putLong(key, System.currentTimeMillis()).apply()
-        if (SyncTrace.relevant(remotePath)) SyncTrace.log("DIRTY_MARKED",
-            "id=" + SyncBackend.digest(remotePath).take(16))
     }
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
         val lease = transactionLease(context) ?: run {
-            SyncTrace.log("SYNC_DEFERRED", "reason=transaction_lock_busy")
             return@withLock "Sync deferred: another SyncCS instance is updating local data."
         }
         try {
         val config = SyncConfiguration(context)
-        SyncTrace.log("SYNC_ENTER", "active=" + config.active() +
-            " auditDue=" + needsLocalAudit() + " dirtyCount=" +
-            config.preferences.all.keys.count { it.startsWith("modified/") })
         val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
         fun pause(reason: String, message: String): String {
-            SyncTrace.log("SYNC_BLOCKED", "reason=" + reason)
             lastStatus = message
             return message
         }
 
         if (LocalSyncJournal.pending(context)) {
-            SyncTrace.log("PENDING_JOURNAL_RECOVERY")
             applying = true
             try {
 
@@ -177,26 +168,16 @@ internal object SyncCoordinator {
                         return@withLock pause("github-401-head-check",
                             SyncAuthGuard.MESSAGE)
                     }
-                    if (headError != null)
-                        SyncTrace.log("FAST_HEAD_FAILED",
-                            "class=" + headError.javaClass.simpleName)
                     val remoteRevision = headAttempt.getOrNull()
                     if (remoteRevision != null) {
-                        SyncTrace.log("FAST_HEAD_RESULT",
-                            "remoteChanged=" + (remoteRevision != known) +
-                            " revision=" + remoteRevision.take(12))
 
                         if (remoteRevision == known) {
-                            SyncTrace.log("HEAD_UNCHANGED_FAST_PATH",
-                                "localSettingsNotRechecked=true")
                             lastSuccessfulSyncAt = System.currentTimeMillis()
                             val status = if (pendingPlugins)
                                 "Sync incomplete: plugins waiting for foreground; other data up to date"
                             else "Synced: verified current revision; no changes"
 
                             lastStatus = status
-                            SyncTrace.log("SYNC_EXIT", "path=unchanged_head pendingPlugins=" +
-                                pendingPlugins)
                             return@withLock status
                         }
                     }
@@ -205,17 +186,7 @@ internal object SyncCoordinator {
         }
         // The Git commit uses CAS. Re-read and re-merge any conflicting batch.
         for (attempt in 0 until 3) {
-            SyncTrace.log("SYNC_ATTEMPT", "number=" + (attempt + 1) +
-                " foreground=" + activityReady)
             val result = synchronizePass(context, activity)
-            SyncTrace.log("SYNC_ATTEMPT_RESULT", "number=" + (attempt + 1) +
-                " outcome=" + when {
-                    result.startsWith("Synced:") -> "synced"
-                    result.startsWith("Sync incomplete:") -> "incomplete"
-                    result.startsWith("Sync conflict:") -> "conflict"
-                    result.startsWith("Sync failed") -> "failed"
-                    else -> "blocked"
-                })
             if (!result.startsWith("Sync conflict:")) {
 
                 if (result.startsWith("Synced:") ||
@@ -230,14 +201,11 @@ internal object SyncCoordinator {
             }
             if (attempt < 2) {
                 val backoff = 250L * (attempt + 1)
-                SyncTrace.log("SYNC_CONFLICT_RETRY", "number=" + (attempt + 1) +
-                    " delayMs=" + backoff)
                 delay(backoff)
             }
         }
 
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
-        SyncTrace.log("SYNC_EXIT", "reason=conflicts_exhausted")
         lastStatus
         } finally {
             lease.close()
@@ -421,16 +389,9 @@ internal object SyncCoordinator {
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
-        SyncTrace.current(context, "PASS_BEGIN_LOCAL")
         val dirtyBarrier = System.currentTimeMillis()
-
-        val passStarted = android.os.SystemClock.elapsedRealtime()
         var stage = "loading cloud state"
-        fun stageTo(next: String) {
-            stage = next
-            SyncTrace.log("PASS_STAGE", "name=" + next +
-                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - passStarted))
-        }
+        fun stageTo(next: String) { stage = next }
         stageTo(stage)
         var undoStarted = false
         fun ensureUndo() {
@@ -441,17 +402,13 @@ internal object SyncCoordinator {
         }
         suspend fun undoIfNeeded(): String? {
             if (!undoStarted) {
-                SyncTrace.log("ROLLBACK_SKIPPED", "reason=no_changes")
                 return null
             }
-            SyncTrace.log("ROLLBACK_BEGIN", "stage=" + stage)
             applying = true
             return try {
                 LocalSyncJournal.recover(context, activity, backend)
-                SyncTrace.log("ROLLBACK_COMPLETED")
                 null
             } catch (failure: Exception) {
-                SyncTrace.log("ROLLBACK_FAILED", "class=" + failure.javaClass.simpleName)
                 "Local rollback incomplete; sync blocked until recovery: " +
                     (failure.message ?: failure.javaClass.simpleName).take(170)
             } finally {
@@ -472,22 +429,12 @@ internal object SyncCoordinator {
             // GitHub sign-in can finish before CloudStream's plugin loader.
             // Never capture or publish a partial inventory while it is loading.
             stageTo("waiting for CloudStream plugins")
-            SyncTrace.log("PLUGIN_WAIT_START", "local=" + SyncRuntime.localReady +
-                " online=" + SyncRuntime.onlineReady)
             for (attempt in 0 until 60) {
                 if (SyncRuntime.refreshLoadedState()) break
-                if (attempt % 20 == 0)
-                    SyncTrace.log("PLUGIN_WAIT_PROGRESS",
-                        "seconds=" + (attempt / 2) +
-                        " local=" + SyncRuntime.localReady +
-                        " online=" + SyncRuntime.onlineReady)
                 delay(500L)
                 verifyAccount()
             }
             val pluginsReady = SyncRuntime.refreshLoadedState()
-            SyncTrace.log("PLUGIN_WAIT_FINISH", "ready=" + pluginsReady +
-                " local=" + SyncRuntime.localReady +
-                " online=" + SyncRuntime.onlineReady)
             check(pluginsReady) {
                 "CloudStream plugins have not finished loading. No backup was published; retry Sync now after loading completes."
             }
@@ -497,10 +444,7 @@ internal object SyncCoordinator {
             // authenticated recovery; Git revision is the durable delta cursor.
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
-            SyncTrace.log("PULL_START", "cursorPresent=" + (previousCursor != null))
             val pull = backend.pull(previousCursor)
-            SyncTrace.log("PULL_DONE", "full=" + pull.full +
-                " entries=" + pull.entries.size)
 
 
             stageTo("decrypting remote changes")
@@ -509,9 +453,6 @@ internal object SyncCoordinator {
                     item.key, item.cipher ?: error("Missing encrypted value for " + item.key)
                 )
             }
-            SyncTrace.log("REMOTE_PULL_META", "full=" + pull.full +
-                " entries=" + pull.entries.size)
-            SyncTrace.summary("REMOTE_PULL", remoteValues)
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
             val firstRemoteRestore = SyncSafety.firstRemoteRestore(
@@ -636,9 +577,6 @@ internal object SyncCoordinator {
             val completeLocal = pull.full || firstRemoteRestore ||
                 rosterIdentitiesChanged || incomingHeaders || periodicAuditDue
 
-            SyncTrace.log("LOCAL_AUDIT_CHOICE", "complete=" + completeLocal +
-                " fullPull=" + pull.full + " firstRestore=" + firstRemoteRestore +
-                " periodicDue=" + periodicAuditDue + " dirty=" + marked.size)
             val local = if (completeLocal) {
                 ProfileIdentity.toRemote(SyncData.snapshot(context), profileMerge.target)
             } else {
@@ -647,7 +585,6 @@ internal object SyncCoordinator {
                 ProfileIdentity.toRemote(
                     SyncData.snapshotSelected(context, selectedRemote), profileMerge.target)
             }
-            SyncTrace.summary("LOCAL_SELECTED", local)
 
             val currentPlugins = PluginInventory.snapshot(context)
             stageTo("comparing changed settings")
@@ -665,13 +602,6 @@ internal object SyncCoordinator {
             val upload = planned.upload
             val next = planned.next
             val conflicts = planned.conflicts
-            SyncTrace.log("PLAN_COUNTS", "apply=" + apply.size +
-                " upload=" + upload.size + " conflicts=" + conflicts.size +
-                " dirty=" + marked.size + " profileChanged=" +
-                profileMerge.changedRemote)
-            SyncTrace.summary("PLAN_APPLY", apply)
-            SyncTrace.summary("PLAN_UPLOAD", upload)
-            SyncTrace.summary("PLAN_CONFLICT", conflicts)
 
 
 
@@ -685,31 +615,6 @@ internal object SyncCoordinator {
                 for ((key, raw) in conflicts) retained.put(key, raw)
                 check(config.preferences.edit().putString("pending_conflicts",
                     LocalVault.encrypt(retained.toString().toByteArray(Charsets.UTF_8))).commit())
-                // Log every real conflict, not only the Elevate/Ultima Evo sample.
-                // Never expose preference values or unsafe key text in logcat.
-                for (key in conflicts.keys) {
-                    val safeKey = key.takeIf { path ->
-                        path.length <= 160 && path.all { ch ->
-                            ch.isLetterOrDigit() || ch == '/' || ch == '_' ||
-                                ch == '-' || ch == '.'
-                        }
-                    } ?: "<redacted>"
-                    val namespace = if (key.startsWith("p/"))
-                        key.substringAfter("p/").substringBefore('/') else key.substringBefore('/')
-                    SyncTrace.log("SYNC_CONFLICT",
-                        "namespace=" + namespace +
-                        " key=" + safeKey +
-                        " keyId=" + SyncBackend.digest(key).take(16) +
-                        " reason=both_changed_different_values" +
-                        " baselineSha=" + (base[key]?.take(16) ?: "-") +
-                        " localSha=" + (local[key]?.let {
-                            SyncBackend.digest(it).take(16)
-                        } ?: "<deleted>") +
-                        " remoteSha=" + (remoteValues[key]?.let {
-                            SyncBackend.digest(it).take(16)
-                        } ?: "<deleted>") +
-                        " resolution=remote_wins localPreserved=true")
-                }
             }
 
             stageTo("checking plugin installation and deletions")
@@ -802,9 +707,7 @@ internal object SyncCoordinator {
                 try {
                     ensureUndo()
                     installation = installPending(context, pluginActivity!!, backend)
-                    if (installation.contains("plugins pending:")) {
-
-                    }
+                    
                 } finally {
                     applying = false
                 }
@@ -833,22 +736,16 @@ internal object SyncCoordinator {
             // write rejects this batch, do not overwrite local state before retry.
             stageTo("uploading settings changes")
             verifyAccount()
-            SyncTrace.log("SETTINGS_STAGE_BEGIN", "planned=" + upload.size)
             backend.upload(upload, cipher, versions)
-            SyncTrace.summary("UPLOAD_STAGED", upload)
-            if (upload.isEmpty()) SyncTrace.log("SETTINGS_NO_CHANGES")
             for (key in upload.keys) versions[key] = (versions[key] ?: 0L) + 1L
 
             stageTo("restoring preferences")
             verifyAccount()
             if (apply.isNotEmpty()) ensureUndo()
             val nativeApply = ProfileIdentity.toNative(apply, profileMerge.target)
-            SyncTrace.log("RESTORE_BEGIN", "planned=" + apply.size +
-                " native=" + nativeApply.size)
             applying = true
             try {
                 SyncData.apply(context, nativeApply)
-                SyncTrace.summary("RESTORE_APPLIED", nativeApply)
             } finally {
                 applying = false
             }
@@ -857,7 +754,6 @@ internal object SyncCoordinator {
                     SyncData.snapshotSelected(context, nativeApply.keys))) {
                     "Local preference apply mismatch; transaction rolled back."
                 }
-                SyncTrace.log("RESTORE_VERIFY_OK", "count=" + nativeApply.size)
 
                 // The server and local UUID mapping use the same stable key hash.
                 // These entries can be paired with a remote uploader's log.
@@ -868,26 +764,16 @@ internal object SyncCoordinator {
             // preferences together, only after local apply has succeeded.
 
             stageTo("publishing complete GitHub snapshot")
-            SyncTrace.log("GITHUB_FLUSH_START", "settings=" + upload.size +
-                " profile=" + profileMerge.changedRemote +
-                " plugins=" + merge.changedRemote)
             backend.flush(cipher)
             val storage = backend as GithubSyncAdapter
-            SyncTrace.log("GITHUB_FLUSH_DONE", "mode=" + storage.lastFlushMode +
-                " revisionChanged=" + storage.lastFlushPublished +
-                " revision=" + storage.verifiedRevision().first.take(12))
-            if (storage.lastFlushPublished)
-                SyncTrace.summary("UPLOAD_CONFIRMED", upload)
-            else SyncTrace.log("UPLOAD_NOT_NEEDED", "reason=" + storage.lastFlushMode)
+
             stageTo("persisting verified settings baseline")
             verifyAccount()
             val (githubRevision, githubGeneration) =
                 (backend as GithubSyncAdapter).verifiedRevision()
-            SyncTrace.log("BASELINE_BEGIN", "revision=" + githubRevision.take(12))
             persistCommittedBaseline(config, next, versions, priorLists,
                 completeLocal, local, apply, marked, remoteValues.keys,
                 upload, pull.cursor, githubRevision, githubGeneration, serverPluginManifest)
-            SyncTrace.log("BASELINE_DONE", "revision=" + githubRevision.take(12))
 
 
 
@@ -950,22 +836,13 @@ internal object SyncCoordinator {
                 if (uiRefreshFailed) result += "; screen refresh dispatch failed"
             }
             lastStatus = result
-            SyncTrace.log("SYNC_RESULT", "applyCount=" + apply.size +
-                " uploadCount=" + upload.size + " synced=" + result.startsWith("Synced:") +
-                " published=" + (backend as GithubSyncAdapter).lastFlushPublished +
-                " pluginsPending=" + installation.contains("plugins pending:") +
-                " uiRefreshFailed=" + uiRefreshFailed)
             return result
         } catch (cancel: CancellationException) {
-            SyncTrace.log("SYNC_CANCELLED", "stage=" + stage)
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 undoIfNeeded()
             }
             throw cancel
         } catch (error: LinkageError) {
-            SyncTrace.log("SYNC_FAILURE", "stage=" + stage +
-                " class=" + error.javaClass.simpleName +
-                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - passStarted))
             val rollbackError = undoIfNeeded()
 
             val message = "Sync incompatible during " + stage + ": " +
@@ -974,9 +851,6 @@ internal object SyncCoordinator {
             lastStatus = message
             return message
         } catch (error: Exception) {
-            SyncTrace.log("SYNC_FAILURE", "stage=" + stage +
-                " class=" + error.javaClass.simpleName +
-                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - passStarted))
             val rollbackError = undoIfNeeded()
 
             if (error is GithubBackupStore.ApiException && error.code == 401) {
@@ -995,8 +869,6 @@ internal object SyncCoordinator {
             lastStatus = message
             return message
         } finally {
-            SyncTrace.log("PASS_END", "stage=" + stage +
-                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - passStarted))
         }
     }
 

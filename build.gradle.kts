@@ -5,10 +5,8 @@ import org.gradle.kotlin.dsl.register
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
-println("[Debug] build.gradle.kts 스크립트 실행 - v1.5")
 
 buildscript {
-    println("[Debug] buildscript 저장소 설정 시작")
     repositories {
         google()
         mavenCentral()
@@ -17,7 +15,6 @@ buildscript {
     }
 
     dependencies {
-        println("[Debug] buildscript 의존성 설정 시작")
 
         // 기존부터 사용하던 AGP 8.x 환경 유지
         // R8 버그 방지를 위해 8.8.2로 상향한 상태 유지
@@ -31,7 +28,6 @@ buildscript {
 }
 
 allprojects {
-    println("[Debug] allprojects 저장소 설정 시작")
     repositories {
         google()
         mavenCentral()
@@ -48,14 +44,12 @@ fun Project.android(
 ) = extensions.getByName<BaseExtension>("android").configuration()
 
 subprojects {
-    println("[Debug] ${project.name} 하위 프로젝트 설정 시작")
 
     apply(plugin = "com.android.library")
     apply(plugin = "kotlin-android")
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        println("[Debug] ${project.name} cloudstream 확장 설정")
 
         // when running through github workflow,
         // GITHUB_REPOSITORY should contain current repository name
@@ -63,7 +57,6 @@ subprojects {
     }
 
     android {
-        println("[Debug] ${project.name} android 확장 설정")
 
         namespace = "com.example"
 
@@ -85,14 +78,12 @@ subprojects {
          * VERSION_11
          */
         compileOptions {
-            println("[Debug] ${project.name} compileOptions 설정 - JVM 11")
 
             sourceCompatibility = JavaVersion.VERSION_11
             targetCompatibility = JavaVersion.VERSION_11
         }
 
         tasks.withType<KotlinJvmCompile> {
-            println("[Debug] ${project.name} KotlinJvmCompile 태스크 옵션 설정 - JVM 11")
 
             compilerOptions {
                 /*
@@ -116,7 +107,6 @@ subprojects {
     }
 
     dependencies {
-        println("[Debug] ${project.name} dependencies 설정")
 
         val cloudstream by configurations
         val implementation by configurations
@@ -156,15 +146,7 @@ subprojects {
                 val resApk = file("build/intermediates/res.apk")
 
                 if (!resApk.exists()) {
-                    println(
-                        "[Debug] ${project.name} - make 태스크 진입 전 " +
-                            "res.apk 존재 여부 확인: 없음"
-                    )
 
-                    println(
-                        "[Debug] ${project.name} - Cloudstream 압축 해제 에러 우회를 위한 " +
-                            "빈 Zip 파일 임시 생성 (${resApk.absolutePath})"
-                    )
 
                     resApk.parentFile.mkdirs()
 
@@ -177,11 +159,6 @@ subprojects {
                         zout.write("dummy".toByteArray())
                         zout.closeEntry()
                     }
-                } else {
-                    println(
-                        "[Debug] ${project.name} - make 태스크 진입 전 " +
-                            "res.apk 존재 여부 확인: 정상 존재함"
-                    )
                 }
             }
         }
@@ -189,6 +166,5 @@ subprojects {
 }
 
 task<Delete>("clean") {
-    println("[Debug] clean 태스크 구성")
     delete(rootProject.layout.buildDirectory)
 }
