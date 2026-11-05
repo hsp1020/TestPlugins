@@ -344,14 +344,22 @@ internal class ElevateRefreshedSubtitleOverlay {
     }
 
     fun attach(candidate: GeneratorPlayer, subtitleUrl: String,
-               prepared: ElevateSubtitleRefreshRegistry.Prepared) {
+               prepared: ElevateSubtitleRefreshRegistry.Prepared): Boolean {
         val parsed = prepared.cues
         val player = candidate.playerView?.player
         val native = candidate.subView
         val nativeOutput = native?.getChildAt(0)
         val selectedUrl = candidate.player.getCurrentPreferredSubtitle()?.url
         if (player == null || native == null || nativeOutput == null || selectedUrl != subtitleUrl) {
-            return
+            val reason = when {
+                player == null -> "noPlayer"
+                native == null -> "noNativeSubtitleView"
+                nativeOutput == null -> "noNativeSubtitleOutput"
+                else -> "selectionMismatch"
+            }
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "reject reason=$reason url=${subtitleUrl.hashCode()} selected=${selectedUrl?.hashCode()} cues=${parsed.size}")
+            return false
         }
         if (fragment === candidate && mediaPlayer === player &&
             original === native && targetUrl == subtitleUrl && overlay != null) {
@@ -361,8 +369,10 @@ internal class ElevateRefreshedSubtitleOverlay {
                 preserveAssLayout = prepared.preserveAssLayout
                 rendered = null
                 synchronize()
+                android.util.Log.d("ElevateSubtitleOverlay",
+                    "updated url=${subtitleUrl.hashCode()} installed=${overlay?.parent === native} activeSegments=${rendered?.size ?: 0} cues=${parsed.size}")
             }
-            return
+            return overlay?.parent === native
         }
         detach()
         fragment = candidate
@@ -388,6 +398,10 @@ internal class ElevateRefreshedSubtitleOverlay {
         SubtitlesFragment.applyStyleEvent += styleListener
         applyAppearance()
         synchronize()
+        val installed = overlay === view && view.parent === native
+        android.util.Log.d("ElevateSubtitleOverlay",
+            "installed url=${subtitleUrl.hashCode()} installed=$installed attached=${view.isAttachedToWindow} shown=${view.isShown} activeSegments=${rendered?.size ?: 0} cues=${parsed.size}")
+        return installed
     }
 
     private fun applyAppearance() {
@@ -412,6 +426,8 @@ internal class ElevateRefreshedSubtitleOverlay {
         val view = overlay ?: return
         if (candidate.playerView?.player !== player ||
             candidate.player.getCurrentPreferredSubtitle()?.url != targetUrl) {
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "detachDuringSync url=${targetUrl?.hashCode()} playerChanged=${candidate.playerView?.player !== player} selected=${candidate.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
             detach()
             return
         }

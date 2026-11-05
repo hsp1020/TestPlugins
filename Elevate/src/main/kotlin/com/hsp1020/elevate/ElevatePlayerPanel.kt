@@ -137,6 +137,8 @@ internal class ElevatePlayerPanel(
     private var lastListTouchX = -1f
     private var lastListTouchY = -1f
     private var refreshTouch: Pair<Row, ImageButton>? = null
+    private var pendingRefreshRebindUrl: String? = null
+    private var refreshRebindPosted = false
     private val refreshGesture = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
         override fun onSingleTapUp(e: MotionEvent): Boolean {
@@ -154,6 +156,15 @@ internal class ElevatePlayerPanel(
     private var pendingSubtitleInstance = -1
     private var resumeAfterSubtitleReloadInstance: Int? = null
     private val list = object : ListView(ctx) {
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            android.util.Log.d("ElevatePanelRefresh", "listAttached view=${System.identityHashCode(this)} children=$childCount")
+            visibleSubtitleUrl()?.let(::scheduleRefreshRebind)
+        }
+        override fun onDetachedFromWindow() {
+            android.util.Log.d("ElevatePanelRefresh", "listDetached view=${System.identityHashCode(this)} children=$childCount")
+            super.onDetachedFromWindow()
+        }
         override fun dispatchTouchEvent(event: MotionEvent): Boolean {
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
                 lastListTouchX = event.x
@@ -164,7 +175,7 @@ internal class ElevatePlayerPanel(
                 refreshTouch = if (button != null)
                     rows.getOrNull(position)?.let { it to button } else null
                 if (button != null) android.util.Log.d("ElevatePanelRefresh",
-                    "iconDown row=$position enabled=${button.isEnabled} attached=${button.isAttachedToWindow} shown=${button.isShown}")
+                    "iconDown row=$position enabled=${button.isEnabled} state=${refreshViewState(button)}")
             }
             // The refresh icon has no row selection ripple; preserve native row feedback elsewhere.
             if (refreshTouch != null) {
@@ -179,6 +190,48 @@ internal class ElevatePlayerPanel(
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
     }
+    private fun refreshViewState(view: View): String {
+        val parent = view.parent as? View
+        return "view=${System.identityHashCode(view)} attached=${view.isAttachedToWindow} " +
+            "shown=${view.isShown} token=${view.windowToken != null} " +
+            "parent=${parent?.javaClass?.simpleName} parentAttached=${parent?.isAttachedToWindow} " +
+            "listAttached=${list.isAttachedToWindow} listParent=${list.parent?.javaClass?.simpleName}"
+    }
+
+    private fun scheduleRefreshRebind(url: String) {
+        pendingRefreshRebindUrl = url
+        if (refreshRebindPosted) return
+        refreshRebindPosted = true
+        list.post {
+            refreshRebindPosted = false
+            pendingRefreshRebindUrl?.let {
+                pendingRefreshRebindUrl = null
+                rebindVisibleRefreshButton(it)
+            }
+        }
+    }
+
+    private fun rebindVisibleRefreshButton(url: String) {
+        var candidates = 0
+        var attached = 0
+        for (index in 0 until list.childCount) {
+            val row = list.getChildAt(index) as? LinearLayout ?: continue
+            val button = row.getChildAt(2) as? ImageButton ?: continue
+            if (button.tag != url || button.visibility != View.VISIBLE) continue
+            candidates++
+            if (list.isAttachedToWindow && row.isAttachedToWindow &&
+                button.isAttachedToWindow && button.isShown) {
+                attached++
+                ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, button)
+            } else {
+                android.util.Log.d("ElevatePanelRefresh",
+                    "rebindDeferred url=${url.hashCode()} state=${refreshViewState(button)}")
+            }
+        }
+        android.util.Log.d("ElevatePanelRefresh",
+            "rebind url=${url.hashCode()} candidates=$candidates attached=$attached")
+    }
+
     private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false,
                          highlighted: Boolean = false) {
         // CheckLabel defines drawableStartCompat (24dp) plus a drawable gap.
@@ -223,10 +276,17 @@ internal class ElevatePlayerPanel(
                     addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                         override fun onViewAttachedToWindow(view: View) {
                             (view.tag as? String)?.let { url ->
-                                ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, view as ImageButton)
+                                android.util.Log.d("ElevatePanelRefresh",
+                                    "buttonAttached url=${url.hashCode()} state=${refreshViewState(view)}")
+                                if (view.isShown)
+                                    ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, view as ImageButton)
                             }
                         }
                         override fun onViewDetachedFromWindow(view: View) {
+                            (view.tag as? String)?.let { url ->
+                                android.util.Log.d("ElevatePanelRefresh",
+                                    "buttonDetached url=${url.hashCode()} state=${refreshViewState(view)}")
+                            }
                             ElevateSubtitleRefreshHook.active()?.releasePanelRefreshButton(view as ImageButton)
                         }
                     })
@@ -249,6 +309,10 @@ internal class ElevatePlayerPanel(
             isFocusable = false
         }
         (row.getChildAt(2) as ImageButton).apply {
+            if (refresh != null && (position == 0 || !isAttachedToWindow)) {
+                android.util.Log.d("ElevatePanelRefresh",
+                    "rowBind position=$position reused=${reuse != null} oldUrl=${(tag as? String)?.hashCode()} newUrl=${refreshUrl?.hashCode()} state=${refreshViewState(this)}")
+            }
             visibility = if (refresh != null) View.VISIBLE else View.GONE
             tag = refreshUrl
             isEnabled = refresh != null
@@ -852,15 +916,9 @@ internal class ElevatePlayerPanel(
         ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
             if (target === fragment && tab == Tab.SUBTITLES) {
                 if (inSync) updateSyncCues() else {
-                    // Refreshing the subtitle body does not change its choice labels.
-                    // A full adapter rebuild can lose details after a plugin reload.
-                    for (index in 0 until list.childCount) {
-                        val button = (list.getChildAt(index) as? LinearLayout)
-                            ?.getChildAt(2) as? ImageButton ?: continue
-                        if (button.tag == url && button.visibility == View.VISIBLE) {
-                            ElevateSubtitleRefreshHook.active()?.syncPanelRefreshButton(url, button)
-                        }
-                    }
+                    // Never animate a cached/detached row; wait for the live ListView child.
+                    rebindVisibleRefreshButton(url)
+                    if (!list.isAttachedToWindow) scheduleRefreshRebind(url)
                 }
             }
         }
@@ -889,6 +947,8 @@ internal class ElevatePlayerPanel(
         resumeAfterSubtitleReloadInstance = null
         importInstance = -1
         subtitleDetails.clear()
+        pendingRefreshRebindUrl = null
+        refreshRebindPosted = false
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
         observeCuePlayer(false)
         touches.forEach { it.setOnTouchListener(null) }

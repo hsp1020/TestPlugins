@@ -137,6 +137,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private var autoSpinView: ImageButton? = null
     private var autoSpinAnimator: ObjectAnimator? = null
     private var spinStartedAt = 0L
+    private var manualSpinUrl: String? = null
     private var manualSpinTail: Job? = null
     private var panelPendingTimeout: Job? = null
     private var observedPlayer: Player? = null
@@ -195,6 +196,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         refreshJob = null
         activeRefreshUrl = null
         endAutoRefresh()
+        manualSpinTail?.cancel()
+        manualSpinTail = null
+        manualSpinUrl = null
         refreshedCues.clear()
         refreshedOverlay.detach()
         refreshedOffsetDialog = null
@@ -264,6 +268,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             refreshJob = null
             activeRefreshUrl = null
             endAutoRefresh()
+            manualSpinTail?.cancel()
+            manualSpinTail = null
+            manualSpinUrl = null
             refreshedOverlay.detach()
             selectedUrl = currentUrl
         }
@@ -747,8 +754,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     }
 
     private fun stopAutoSpin() {
-        manualSpinTail?.cancel()
-        manualSpinTail = null
         autoSpinAnimator?.cancel()
         autoSpinAnimator = null
         autoSpinView?.rotation = 0f
@@ -756,14 +761,21 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     }
 
     private fun finishManualSpin() {
-        if (autoSpinView == null) return
+        val url = manualSpinUrl ?: return
         val remaining = (800L - (SystemClock.elapsedRealtime() - spinStartedAt)).coerceAtLeast(0L)
-        if (remaining == 0L) stopAutoSpin()
-        else {
-            manualSpinTail?.cancel()
+        manualSpinTail?.cancel()
+        if (remaining == 0L) {
+            manualSpinUrl = null
+            stopAutoSpin()
+            fragment?.let { panelListener?.invoke(it, url) }
+        } else {
             manualSpinTail = refreshScope.launch {
                 delay(remaining)
-                stopAutoSpin()
+                if (manualSpinUrl == url) {
+                    manualSpinUrl = null
+                    stopAutoSpin()
+                    fragment?.let { panelListener?.invoke(it, url) }
+                }
             }
         }
     }
@@ -774,7 +786,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         button.animate().cancel()
         button.rotation = 0f
         autoSpinView = button
-        spinStartedAt = SystemClock.elapsedRealtime()
         android.util.Log.d("ElevateSubtitleRefresh",
             "spinStart url=${button.tag?.hashCode()} attached=${button.isAttachedToWindow} shown=${button.isShown} size=${button.width}x${button.height}")
         autoSpinAnimator = ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
@@ -866,9 +877,13 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 if (it.isAttachedToWindow && it.visibility == View.VISIBLE) startAutoSpin(it)
             }
         } else {
+            manualSpinTail?.cancel()
+            manualSpinTail = null
+            manualSpinUrl = entry.originalUrl
+            spinStartedAt = SystemClock.elapsedRealtime()
             button?.let {
                 it.isEnabled = false
-                if (it.isAttachedToWindow) startAutoSpin(it)
+                if (it.isAttachedToWindow && it.visibility == View.VISIBLE) startAutoSpin(it)
             }
         }
         refreshJob = refreshScope.launch {
@@ -903,7 +918,12 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                             refreshedCues.keys.firstOrNull { it != selectedUrl }?.let(refreshedCues::remove)
                         }
                         refreshedCues[entry.originalUrl] = result
-                        refreshedOverlay.attach(target, entry.originalUrl, result)
+                        val applied = refreshedOverlay.attach(target, entry.originalUrl, result)
+                        android.util.Log.d("ElevateSubtitleRefresh",
+                            "overlayApply url=${entry.originalUrl.hashCode()} installed=$applied cues=${result.cues.size} player=${System.identityHashCode(mediaPlayer)}")
+                    } else {
+                        android.util.Log.d("ElevateSubtitleRefresh",
+                            "overlayUnchanged url=${entry.originalUrl.hashCode()} cues=${result.cues.size}")
                     }
                     panelListener?.invoke(target, entry.originalUrl)
                     if (!automatic || attempt + 1 >= attempts ||
@@ -948,11 +968,17 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         val queued = appliedRefresh?.let {
             it.entry.originalUrl == url && it.instance == model?.state?.instance
         } == true
-        val running = active || queued
-        if (autoSpinView === button && !running && manualSpinTail?.isActive != true) stopAutoSpin()
+        // A View is a disposable ListView child; the URL survives rebind/recreation.
+        val running = active || queued || manualSpinUrl == url
+        if (autoSpinView === button && !running) stopAutoSpin()
         button.isEnabled = !running || autoRefreshUrl == url
-        if (running && button.isAttachedToWindow && button.visibility == View.VISIBLE)
+        if (running && button.isAttachedToWindow && button.visibility == View.VISIBLE &&
+            button.isShown) {
             startAutoSpin(button)
+        } else if (running && !button.isAttachedToWindow) {
+            android.util.Log.d("ElevateSubtitleRefresh",
+                "spinDeferred url=${url.hashCode()} view=${System.identityHashCode(button)} attached=false")
+        }
     }
 
     fun releasePanelRefreshButton(button: ImageButton) {
