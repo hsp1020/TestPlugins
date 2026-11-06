@@ -572,7 +572,7 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
             android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4))
         }
         if (android.os.Build.VERSION.SDK_INT >= 23) {
-            foreground = ripple?.let { android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4)) }
+            foreground = tvOutlinedForeground(this, ripple)?.let { android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4)) }
         }
     }
 }
@@ -647,7 +647,7 @@ internal fun catalogStyledAdapter(
                     setBackgroundColor(rowColor)
                     val ripple = nativeCatalogRipple(activity)
                     if (android.os.Build.VERSION.SDK_INT >= 23) {
-                        foreground = ripple
+                        foreground = tvOutlinedForeground(this, ripple)
                     } else if (ripple != null) {
                         background = android.graphics.drawable.LayerDrawable(
                             arrayOf(ColorDrawable(rowColor), ripple))
@@ -1254,6 +1254,7 @@ internal class CatalogBrowserDialog(
         isAllCaps = false
         isFocusable = true
         minHeight = dp(48)
+        if (isLayout(TV)) foreground = tvOutlinedForeground(this, null)
     }
 
     private fun selector() = catalogStyledSelector(activity)
@@ -1308,6 +1309,10 @@ internal class CatalogBrowserDialog(
     }
 
     fun show(onDismiss: () -> Unit) {
+        val tvOriginFocus = if (isLayout(TV)) activity.currentFocus?.takeIf {
+            it.isAttachedToWindow && it.isFocusable
+        } else null
+        val originDestination = navigation?.currentDestination?.id
 
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
@@ -1332,6 +1337,7 @@ internal class CatalogBrowserDialog(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
                         ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                     scaleType = ImageView.ScaleType.FIT_CENTER
+                    if (isLayout(TV)) foreground = tvOutlinedForeground(this, null)
                     setOnClickListener {
                         if (pendingBackPress != null || closed || !dialog.isShowing || !isShown ||
                             detailHandoff.isActive || suspendedForNavigation) return@setOnClickListener
@@ -1363,7 +1369,13 @@ internal class CatalogBrowserDialog(
                 })
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
+                    if (isLayout(TV)) {
+                        isFocusable = true
+                        setAddStatesFromChildren(true)
+                        foreground = tvOutlinedForeground(this, null)
+                    }
                     val input = SearchView(activity).apply {
+                        if (isLayout(TV)) setAddStatesFromChildren(true)
                         queryHint = activity.getString(R.string.search_hint)
                         setIconifiedByDefault(false)
                         isIconified = false
@@ -1547,9 +1559,10 @@ internal class CatalogBrowserDialog(
             detailHandoff.close()
             grid.adapter = null
             onDismiss()
-            homeTitleFocus?.takeIf { it.isAttachedToWindow }?.let { focus ->
+            (homeTitleFocus ?: tvOriginFocus)?.takeIf { it.isAttachedToWindow }?.let { focus ->
                 focus.post {
-                    if (navigation?.currentDestination?.id == R.id.navigation_home)
+                    if (navigation?.currentDestination?.id == originDestination &&
+                        focus.isAttachedToWindow && focus.isShown && focus.isFocusable)
                         focus.requestFocus()
                 }
             }
@@ -1568,6 +1581,7 @@ internal class CatalogBrowserDialog(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
         )
         inlineInput?.clearFocus()
+        if (isLayout(TV)) backButton?.requestFocus()
         activity.window.decorView.addOnLayoutChangeListener(windowBoundsListener)
         activity.findViewById<View>(R.id.nav_rail_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)

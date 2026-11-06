@@ -96,6 +96,8 @@ internal class TrailerChooser(
     private var button: TextView? = null
     private var dialog: BottomSheetDialog? = null
     private var opening = false
+    private var stopped = false
+    private var navigatingToPlayer = false
     private var extractionJob: kotlinx.coroutines.Job? = null
     private var extractionProgress: android.widget.ProgressBar? = null
     private var reopenAfterPlayback = false
@@ -161,6 +163,7 @@ internal class TrailerChooser(
     }
 
     fun start() {
+        stopped = false
         fragment.lifecycle.addObserver(resumeObserver)
         title?.addTextChangedListener(titleWatcher)
         if (isTv) {
@@ -274,6 +277,7 @@ internal class TrailerChooser(
             if (restoreScrollY == null) showYouTubeInstallNotice()
             return false
         }
+        navigatingToPlayer = false
         val foreground = themeColor("textColor", Color.WHITE)
         val list = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -290,6 +294,7 @@ internal class TrailerChooser(
                 ) && ripple.resourceId != 0) {
                 this.foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
             }
+            if (isTv) this.foreground = tvOutlinedForeground(this, this.foreground)
             setOnClickListener { dialog?.dismiss() }
         }
         header.addView(TextView(activity, null, 0, R.style.WatchHeaderText).apply {
@@ -404,6 +409,19 @@ internal class TrailerChooser(
                     extractionProgress = null
                     opening = false
                     dialog = null
+                    if (isTv && !stopped && !navigatingToPlayer && fragment.isResumed &&
+                        fragment.view === root) {
+                        tvButton?.takeIf { it.isAttachedToWindow && it.isShown && it.isFocusable }
+                            ?.let { focus ->
+                                focus.post {
+                                    if (!stopped && fragment.isResumed && fragment.view === root &&
+                                        dialog == null && focus.isAttachedToWindow &&
+                                        focus.isShown && focus.isFocusable)
+                                        focus.requestFocus()
+                                }
+                            }
+                    }
+                    navigatingToPlayer = false
                 }
             }
             if (isTv) setOnShowListener {
@@ -457,6 +475,7 @@ internal class TrailerChooser(
                 saved.set(returnFocusKey, focusedRow)
                 try {
                     controller.navigate(R.id.global_to_navigation_player, playerArgs)
+                    navigatingToPlayer = true
                 } catch (error: Exception) {
                     saved.remove<String>(returnKey)
                     saved.remove<Int>(returnScrollKey)
@@ -481,6 +500,7 @@ internal class TrailerChooser(
     }
 
     fun stop() {
+        stopped = true
         fragment.lifecycle.removeObserver(resumeObserver)
         title?.removeTextChangedListener(titleWatcher)
         if (isTv) {

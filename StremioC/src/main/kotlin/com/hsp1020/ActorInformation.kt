@@ -257,6 +257,8 @@ internal object ActorInformation {
         private val stateKey = "stremioc_actor_info_return"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         private var dialog: AppCompatDialog? = null
+        private var originActorFocus: View? = null
+        private var focusedCreditKey: String? = null
         private var detailHandoff: StremioDetailHandoff? = null
         private var originState: androidx.lifecycle.SavedStateHandle? = null
         private var requestJob: kotlinx.coroutines.Job? = null
@@ -278,8 +280,10 @@ internal object ActorInformation {
             model.page.observe(fragment.viewLifecycleOwner, pageObserver)
         }
 
-        fun click(position: Int, item: ActorData) {
+        fun click(position: Int, item: ActorData, originCard: View? = null) {
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
+            originActorFocus = if (isLayout(TV)) originCard else null
+            focusedCreditKey = null
             val provider = model.currentRepo?.api as? StremioC
             val actualUrl = sourceUrl ?: page.url
             val ref = resolve(actualUrl, provider, page, position, item)
@@ -307,6 +311,7 @@ internal object ActorInformation {
                 put("crew", actor.preferCrew)
                 put("scroll", scroll?.scrollY ?: 0)
                 put("creditScroll", JSONObject(creditScroll.toMap()))
+                put("creditFocus", focusedCreditKey)
                 put("expanded", bioExpanded)
             }.toString())
         }
@@ -329,6 +334,9 @@ internal object ActorInformation {
                 obj.optBoolean("crew")
             )
             bioExpanded = obj.optBoolean("expanded")
+            focusedCreditKey = obj.optString("creditFocus").takeIf {
+                it.isNotBlank() && it != "null"
+            }
             creditScroll.clear()
             obj.optJSONObject("creditScroll")?.let { saved ->
                 saved.keys().forEach { name -> creditScroll[name] = saved.optInt(name) }
@@ -370,6 +378,7 @@ internal object ActorInformation {
             val activity = fragment.activity ?: return
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
             val scrollListeners = mutableListOf<Pair<View, ViewTreeObserver.OnScrollChangedListener>>()
+            var focusedCreditView: View? = null
             val navigation = (activity.supportFragmentManager
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
             val handoff = StremioDetailHandoff(
@@ -384,7 +393,16 @@ internal object ActorInformation {
                     if (closed) {
                         preserve = true
                         windowDialog.dismiss()
-                    } else windowDialog.show()
+                    } else {
+                        windowDialog.show()
+                        focusedCreditView?.takeIf { it.isAttachedToWindow }?.let { focus ->
+                            focus.post {
+                                if (dialog === windowDialog && windowDialog.isShowing &&
+                                    focus.isAttachedToWindow && focus.isShown)
+                                    focus.requestFocus()
+                            }
+                        }
+                    }
                 },
                 onReady = {
 
@@ -415,6 +433,7 @@ internal object ActorInformation {
                 if (activity.theme.resolveAttribute(
                         android.R.attr.selectableItemBackgroundBorderless, ripple, true
                     ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
+                if (isLayout(TV)) foreground = tvOutlinedForeground(this, null)
                 setOnClickListener { windowDialog.dismiss() }
             }
             heading.addView(back, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.START))
@@ -442,6 +461,9 @@ internal object ActorInformation {
                     if (dialog === windowDialog) {
                         body.visibility = View.VISIBLE
                         skeleton.loading(false)
+                        if (isLayout(TV)) focusedCreditView?.takeIf {
+                            it.isAttachedToWindow && it.isShown
+                        }?.requestFocus()
                     }
                 }
             }
@@ -500,7 +522,7 @@ internal object ActorInformation {
                 visibility = View.GONE
                 isClickable = true
                 isFocusable = true
-                foreground = themedPressedForeground(this)
+                foreground = tvOutlinedForeground(this)
             }
 
             var biographyReady = false
@@ -575,11 +597,23 @@ internal object ActorInformation {
                 skeleton.loading(false)
                 dialog = null
                 scroll = null
-                if (!preserve && !closed) clearState()
+                if (!preserve && !closed) {
+                    clearState()
+                    originActorFocus?.takeIf { it.isAttachedToWindow }?.let { focus ->
+                        focus.post {
+                            if (fragment.isResumed && dialog == null &&
+                                navigation?.currentDestination?.id == R.id.navigation_results_tv &&
+                                focus.isAttachedToWindow && focus.isShown && focus.isFocusable)
+                                focus.requestFocus()
+                        }
+                    }
+                    originActorFocus = null
+                }
             }
             dialog = windowDialog
             windowDialog.show()
             windowDialog.window?.setLayout(-1, -1)
+            if (isLayout(TV)) back.requestFocus()
             save()
             scroller.post { scroller.scrollTo(0, resumeY) }
             val scrollerListener = ViewTreeObserver.OnScrollChangedListener {
@@ -605,7 +639,7 @@ internal object ActorInformation {
                 container.addView(label("Retry", 15f, true).apply {
                     isClickable = true
                     isFocusable = true
-                    foreground = themedPressedForeground(this)
+                    foreground = tvOutlinedForeground(this)
                     setOnClickListener { retry() }
                 })
             }
@@ -670,7 +704,7 @@ internal object ActorInformation {
                         details.addView(label("Retry profile", 14f, true).apply {
                             isClickable = true
                             isFocusable = true
-                            foreground = themedPressedForeground(this)
+                            foreground = tvOutlinedForeground(this)
                             setOnClickListener { begin() }
                         })
                     }
@@ -708,7 +742,16 @@ internal object ActorInformation {
                                         isFocusable = true
                                         setBackgroundResource(R.drawable.outline_drawable)
                                         setPadding(dp(5), dp(3), dp(5), dp(8))
-                                        setOnClickListener { openCredit(originProvider, credit, it) }
+                                        val focusKey = "${title}:${credit.media}:${credit.id}"
+                                        if (isLayout(TV) && focusedCreditKey == focusKey)
+                                            focusedCreditView = this
+                                        setOnClickListener {
+                                            if (isLayout(TV)) {
+                                                focusedCreditKey = focusKey
+                                                focusedCreditView = it
+                                            }
+                                            openCredit(originProvider, credit, it)
+                                        }
                                     }
 
                                     val posterHolder = CardView(activity).apply {
@@ -810,6 +853,8 @@ internal object ActorInformation {
             if (closed) return
             closed = true
             preserve = true
+            originActorFocus = null
+            focusedCreditKey = null
             requestJob?.cancel()
 
             if (detailHandoff?.isActive != true) {

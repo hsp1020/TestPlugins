@@ -139,9 +139,19 @@ internal fun themedPressedForeground(view: View): Drawable? {
     else null
 }
 
+internal fun tvOutlinedForeground(view: View, pressed: Drawable? = themedPressedForeground(view)): Drawable? {
+    if (!isLayout(TV)) return pressed
+    val outline = AppCompatResources.getDrawable(view.context, R.drawable.outline_drawable)?.mutate()
+    return when {
+        pressed != null && outline != null ->
+            android.graphics.drawable.LayerDrawable(arrayOf(pressed, outline))
+        else -> outline ?: pressed
+    }
+}
+
 internal fun applyEpisodeChipFeedback(chip: Chip) {
     chip.rippleColor = android.content.res.ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
-    chip.foreground = themedPressedForeground(chip)
+    chip.foreground = tvOutlinedForeground(chip)
     chip.stateListAnimator = null
     chip.tag = chip.context.getString(R.string.tv_no_focus_tag)
 }
@@ -2447,7 +2457,7 @@ internal class RatingPlotImageHook(
                     R.id.voice_actor_image_holder2
                 )?.animation
                 if (runningAnimation == null) {
-                    actorInformation.click(position, actor)
+                    actorInformation.click(position, actor, card)
                 } else {
                     pendingActorOpenAnimation = runningAnimation
                     runningAnimation.setAnimationListener(object :
@@ -2461,7 +2471,7 @@ internal class RatingPlotImageHook(
                             if (!fragment.isAdded || !card.isAttachedToWindow ||
                                 list.getChildAdapterPosition(card) != position ||
                                 adapter.getItemOrNull(position) !== actor) return
-                            actorInformation.click(position, actor)
+                            actorInformation.click(position, actor, card)
                         }
                     })
                 }
