@@ -2532,7 +2532,7 @@ internal class RatingPlotImageHook(
         fun start() {
             actorInformation.start()
             val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
-            fun applyRecommendation(update: StremioC.RecommendationUpdate) {
+            fun applyRecommendation(update: StremioC.Companion.RecommendationUpdate) {
                 val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
                 if (page.url != update.url) return
                 @Suppress("UNCHECKED_CAST")
