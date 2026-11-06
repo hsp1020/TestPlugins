@@ -25,9 +25,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.ViewTreeObserver
+import android.widget.TextView
 import androidx.annotation.OptIn
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Observer
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.util.UnstableApi
 import com.lagradost.cloudstream3.APIHolder
@@ -39,6 +41,11 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.result.ResultData
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.SyncViewModel
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.secondsToReadable
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.DataStore.getKey
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
@@ -58,6 +65,7 @@ import java.util.UUID
 internal class ElevateHistoryReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
+    private val resultObservers = LinkedHashMap<Fragment, Pair<ResultViewModel2, Observer<Resource<ResultData>?>>>()
     private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
     private val downloadedMappings = LinkedHashMap<String, Pair<Long, Item>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -141,8 +149,9 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
-        val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
-            ?: episode.runTime else episode.runTime
+        val expectedDurationMs = (response as? MovieLoadResponse)?.duration
+            ?.takeIf { movie && it > 0 }?.toLong()?.times(60_000L)
+            ?: episode.runTime?.takeIf { it > 0 }?.toLong()?.times(1_000L)
         // CineStream Kitsu titles use season 1 locally, but carry IMDb season mapping.
         val cineKitsu = if (!movie && response.apiName.equals("CineStream", true))
             runCatching {
@@ -155,7 +164,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             if (movie) null else episode.season, if (movie) null else episode.episode,
             episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
             stremio, if (stremio != null) episode.data else null, ids, cineKitsu, urlId,
-            expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L))
+            expectedDurationMs)
     }
 
     private fun playbackBase(): String? {
@@ -443,12 +452,59 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         }
     } as Media3Player.Listener
 
+    // Native MAL metadata exposes seconds as minutes; correct the loaded response
+    // only while History Sync is enabled, without modifying the host app.
+    private fun watchResult(fragment: Fragment) {
+        if (resultObservers.containsKey(fragment)) return
+        val result = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+        val sync = ViewModelProvider(fragment)[SyncViewModel::class.java]
+        val responseField = runCatching {
+            ResultViewModel2::class.java.getDeclaredField("currentResponse").apply { isAccessible = true }
+        }.getOrNull() ?: return
+        val observer = Observer<Resource<ResultData>?> { page ->
+            if (page !is Resource.Success) return@Observer
+            val meta = (sync.metadata.value as? Resource.Success)?.value ?: return@Observer
+            val malId = sync.getSyncs()[AccountManager.malApi.idPrefix] ?: return@Observer
+            if (meta.id != malId) return@Observer
+            val seconds = meta.duration?.takeIf { it > 0 } ?: return@Observer
+            val response = runCatching {
+                responseField.get(result) as? com.lagradost.cloudstream3.LoadResponse
+            }.getOrNull() ?: return@Observer
+            if (page.value.url != response.url ||
+                response.getMalId() != malId || response.duration != seconds) return@Observer
+            val minutes = (seconds / 60).coerceAtLeast(1)
+            if (minutes == seconds) return@Observer
+            response.duration = minutes
+            val root = fragment.view ?: return@Observer
+            val id = root.resources.getIdentifier("result_meta_duration", "id", root.context.packageName)
+            if (id != 0) {
+                (root.findViewById<android.view.View>(id) as? TextView)?.text =
+                    secondsToReadable(minutes * 60, "0 mins")
+            }
+        }
+        resultObservers[fragment] = result to observer
+        result.page.observe(fragment.viewLifecycleOwner, observer)
+    }
+
+    private fun unwatchResult(fragment: Fragment) {
+        resultObservers.remove(fragment)?.let { (model, observer) ->
+            model.page.removeObserver(observer)
+        }
+    }
+
+    private fun clearResultObservers() {
+        resultObservers.keys.toList().forEach(::unwatchResult)
+    }
+
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: android.view.View, savedInstanceState: Bundle?
         ) = watch(f)
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = watch(f)
-        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) = detach(f)
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            unwatchResult(f)
+            detach(f)
+        }
     }
 
     fun start() {
@@ -474,6 +530,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         }
         if (host !== activity) {
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+            clearResultObservers()
             detach()
             host = activity
             activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
@@ -498,6 +555,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     override fun onActivityDestroyed(activity: Activity) {
         if (activity === host) {
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+            clearResultObservers()
             detach()
             host = null
         }
@@ -509,6 +567,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
     fun watch(fragment: Fragment) {
+        if (fragment.javaClass.name == "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") {
+            watchResult(fragment)
+            return
+        }
         if (fragment !is GeneratorPlayer) return
         if (fragment === this.fragment) {
             attachPlayer()
@@ -554,6 +616,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     fun stop() {
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         host = null
+        clearResultObservers()
         application.unregisterActivityLifecycleCallbacks(this)
         detach()
         queue.close()
