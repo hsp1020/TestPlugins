@@ -109,8 +109,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 cancelPending()
                 if (config.ready) {
                     // Changing between configured services must not reload native covers.
+                    bound.keys.toList().forEach { PosterWipe.cancel(it) }
                     bound.clear()
-                    watches.values.toList().forEach { it.hideAll() }
                 } else restoreAll()
                 unavailable.clear()
                 rescan()
@@ -251,6 +251,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
             override fun onChildViewDetachedFromWindow(view: View) {
                 view.findViewById<ImageView>(R.id.imageView)?.let { image ->
                     pending.remove(image)?.cancel()
+                    PosterWipe.cancel(image)
                     bound.remove(image)
                     image.setTag(R.id.imageView, null)
                     image.alpha = 1f
@@ -258,13 +259,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
             }
         }
 
-        private fun hide(view: View) {
-            if (config.ready) view.findViewById<ImageView>(R.id.imageView)?.alpha = 0f
-        }
-
-        fun hideAll() {
-            if (config.ready) for (i in 0 until recycler.childCount) hide(recycler.getChildAt(i))
-        }
+        // Never hide the native image while waiting for custom artwork.
+        private fun hide(view: View) = Unit
+        fun hideAll() = Unit
 
         fun showAll() {
             for (i in 0 until recycler.childCount) {
@@ -345,19 +342,20 @@ internal class LibraryPosterHook(private val appContext: Application) :
                                     bound.remove(image)
                                 } else if (prior.url.isNotBlank() && pending[image]?.isActive != true) {
                                     val current = prior
-                                    image.loadImage(prior.url) {
-                                        crossfade(false)
-                                        listener(onSuccess = { _, _ ->
-                                            if (bound[image] === current && image.isAttachedToWindow)
-                                                showNative(image, current.identity)
-                                        }, onError = { _, _ ->
-                                            if (bound[image] === current)
-                                                restore(image, current)
-                                        })
+                                    PosterWipe.ensurePlaceholder(image)
+                                    pending[image] = scope.launch {
+                                        val loaded = PosterWipe.load(image, prior.url) {
+                                            bound[image] === current
+                                        }
+                                        if (!loaded.success && loaded.error != "stale" &&
+                                            bound[image] === current)
+                                            showNative(image, current.identity)
+                                        if (bound[image] === current) pending.remove(image)
                                     }
                                 }
                             } else {
                                 pending.remove(image)?.cancel()
+                                PosterWipe.cancel(image)
                                 bound.remove(image)
                             }
                         }
@@ -389,6 +387,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
             for (i in 0 until recycler.childCount) {
                 recycler.getChildAt(i).findViewById<ImageView>(R.id.imageView)?.let { image ->
                     pending.remove(image)?.cancel()
+                    PosterWipe.cancel(image)
                     bound.remove(image)?.let { restore(image, it) }
                     image.alpha = 1f
                 }
@@ -408,18 +407,17 @@ internal class LibraryPosterHook(private val appContext: Application) :
         if (bound[image]?.let { it.identity == id && it.generation == token } == true ||
             pending[image]?.isActive == true && image.getTag(R.id.imageView) == id) return
 
-        val sameItem = image.getTag(R.id.imageView) == id
         pending.remove(image)?.cancel()
+        PosterWipe.cancel(image)
         bound.remove(image)
+        image.alpha = 1f
+        PosterWipe.ensurePlaceholder(image)
         image.setTag(R.id.imageView, id)
         val setting = config
         val marker = Binding(id, "", item.posterUrl, item.posterHeaders, token)
         bound[image] = marker
 
-        // PageAdapter has already bound this card's original image. Cancel only on
-        // a newly bound identity; on the same card the request could be ours.
-        if (!sameItem && !item.posterUrl.isNullOrBlank()) image.dispose()
-
+        // Keep PageAdapter's native Coil request alive until custom artwork is decoded.
         // Do not start an unversioned XRDB image before the initial profile lookup.
         if (setting.service == PosterService.XRDB && setting.xrdbProfile.isNotBlank() &&
             !xrdbVersionChecked) return
@@ -433,7 +431,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
                     !image.isAttachedToWindow) return@launch
                 val originalPoster = ids?.let { setting.image(it, item.type == TvType.Movie) }
                 if (originalPoster == null) {
-                    restore(image, marker)
+                    showNative(image, id)
                     return@launch
                 }
                 val poster = if (setting.service == PosterService.XRDB && version != null) {
@@ -441,31 +439,27 @@ internal class LibraryPosterHook(private val appContext: Application) :
                         .build().toString()
                 } else originalPoster
                 if (poster in unavailable) {
-                    restore(image, marker)
+                    showNative(image, id)
                     return@launch
                 }
                 val entry = marker.copy(url = poster)
-                // Preserve an already visible custom poster during a version refresh.
-                val retained = image.drawable.takeIf { sameItem && image.alpha > 0f }
                 bound[image] = entry
-                image.loadImage(poster) {
-                    if (retained != null) placeholder(retained)
-                    crossfade(false)
-                    listener(onSuccess = { _, _ ->
-                        if (bound[image] === entry) showNative(image, id)
-                    }, onError = { _, _ ->
-                        if (bound[image] === entry && image.isAttachedToWindow) {
-                            unavailable.add(poster)
-                            restore(image, entry)
-                        }
-                    })
+                val result = PosterWipe.load(image, poster) {
+                    revision == token && bound[image] === entry
+                }
+                if (bound[image] === entry && result.error != "stale") {
+                    if (result.success) showNative(image, id)
+                    else {
+                        unavailable.add(poster)
+                        // Native cover remains visible on failure.
+                        showNative(image, id)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                if (revision == token && bound[image]?.identity == id) {
-                    bound[image]?.let { restore(image, it) }
-                }
+                if (revision == token && bound[image]?.identity == id)
+                    showNative(image, id)
             } finally {
                 if (image.getTag(R.id.imageView) == id) pending.remove(image)
             }
@@ -487,7 +481,10 @@ internal class LibraryPosterHook(private val appContext: Application) :
     }
 
     private fun restoreAll() {
-        bound.entries.toList().forEach { (image, entry) -> restore(image, entry) }
+        bound.entries.toList().forEach { (image, entry) ->
+            PosterWipe.cancel(image)
+            restore(image, entry)
+        }
         bound.clear()
         // Covers hidden while resolving must also be restored on disable or teardown.
         watches.values.toList().forEach { it.showAll() }

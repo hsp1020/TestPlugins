@@ -218,6 +218,7 @@ internal class RecommendationPosterHook(private val application: Application) :
 
     private inner class TaggedWindow(private val root: View) {
         private val applied = IdentityHashMap<ImageView, Pair<String, String?>>()
+        private val loads = IdentityHashMap<ImageView, Job>()
         private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { scan() }
         private var tree: ViewTreeObserver? = null
 
@@ -232,12 +233,22 @@ internal class RecommendationPosterHook(private val application: Application) :
         fun close() {
             tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
             tree = null
-            applied.forEach { (image, data) -> restore(image, data.second) }
+            loads.values.toList().forEach { it.cancel() }
+            loads.clear()
+            applied.forEach { (image, data) ->
+                PosterWipe.cancel(image)
+                restore(image, data.second)
+            }
             applied.clear()
         }
 
         fun refresh() {
-            applied.forEach { (image, data) -> restore(image, data.second) }
+            loads.values.toList().forEach { it.cancel() }
+            loads.clear()
+            applied.forEach { (image, data) ->
+                PosterWipe.cancel(image)
+                restore(image, data.second)
+            }
             applied.clear()
             scan()
         }
@@ -267,16 +278,19 @@ internal class RecommendationPosterHook(private val application: Application) :
                             if (poster != null && poster !in unavailable) {
                                 applied[view] = value
                                 val image = view
-                                val retained = image.drawable
-                                image.loadImage(poster) {
-                                    if (retained != null) placeholder(retained)
-                                    crossfade(false)
-                                    listener(onError = { _, _ ->
-                                        if (applied[image] == value) {
-                                            unavailable.add(poster)
-                                            restore(image, original)
-                                        }
-                                    })
+                                PosterWipe.cancel(image)
+                                PosterWipe.ensurePlaceholder(image)
+                                loads.remove(image)?.cancel()
+                                loads[image] = scope.launch {
+                                    val result = PosterWipe.load(image, poster) {
+                                        applied[image] == value && setting.ready
+                                    }
+                                    if (applied[image] == value && !result.success &&
+                                        result.error != "stale") {
+                                        unavailable.add(poster)
+                                        // The original drawable was preserved during loading.
+                                    }
+                                    loads.remove(image)
                                 }
                             }
                         }
@@ -287,7 +301,11 @@ internal class RecommendationPosterHook(private val application: Application) :
                 }
             }
             walk(root)
-            applied.keys.toList().filter { it !in found }.forEach { applied.remove(it) }
+            applied.keys.toList().filter { it !in found }.forEach { image ->
+                loads.remove(image)?.cancel()
+                PosterWipe.cancel(image)
+                applied.remove(image)
+            }
         }
     }
 
@@ -337,6 +355,7 @@ internal class RecommendationPosterHook(private val application: Application) :
             override fun onChildViewDetachedFromWindow(view: View) {
                 view.findViewById<ImageView>(R.id.imageView)?.let {
                     pending.remove(it)?.cancel()
+                    PosterWipe.cancel(it)
                     covers.remove(it)
                 }
             }
@@ -367,7 +386,10 @@ internal class RecommendationPosterHook(private val application: Application) :
             adapter = null
             pending.values.toList().forEach { it.cancel() }
             pending.clear()
-            covers.forEach { (image, cover) -> restore(image, cover) }
+            covers.forEach { (image, cover) ->
+                PosterWipe.cancel(image)
+                restore(image, cover)
+            }
             covers.clear()
         }
 
@@ -400,6 +422,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                         // Only interrupted metadata work must be retried on re-entry.
                         pending.remove(image)?.let { job ->
                             job.cancel()
+                            PosterWipe.cancel(image)
                             covers.remove(image)
                         }
                     }
@@ -410,7 +433,10 @@ internal class RecommendationPosterHook(private val application: Application) :
         fun refresh() {
             pending.values.toList().forEach { it.cancel() }
             pending.clear()
-            covers.forEach { (image, cover) -> restore(image, cover) }
+            covers.forEach { (image, cover) ->
+                PosterWipe.cancel(image)
+                restore(image, cover)
+            }
             covers.clear()
             schedule(true)
         }
@@ -424,51 +450,37 @@ internal class RecommendationPosterHook(private val application: Application) :
             }
         }
 
-        private fun loadCustom(image: ImageView, cover: Cover, poster: String) {
+        private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
             trace(cover, "POSTER_REQUEST", "service=${setting.service}")
-            val previous = image.drawable
-            image.loadImage(poster) {
-                if (previous != null) placeholder(previous)
-                crossfade(false)
-                listener(
-                    onSuccess = { _, result ->
-                        if (covers[image] === cover)
-                            trace(cover, "POSTER_SUCCESS", "cache=${result.dataSource}")
-                    },
-                    onError = { _, result ->
-                        if (covers[image] === cover) {
-                            trace(cover, "POSTER_FAIL",
-                                "reason=${result.throwable.javaClass.simpleName}")
-                            unavailable.add(poster)
-                            val fallback = cover.fallback?.takeUnless { cover.fallbackAttempted }
-                            if (fallback != null) {
-                                cover.fallbackAttempted = true
-                                scope.launch {
-                                    val mapped = fallback.takeIf {
-                                        it.imdb != null || it.tmdb != null
-                                    } ?: withContext(Dispatchers.IO) { animeIds(fallback) }
-                                    if (covers[image] !== cover || revision != cover.generation ||
-                                        !image.isAttachedToWindow) return@launch
-                                    val next = mapped?.let { setting.image(it, cover.fallbackMovie) }
-                                    if (next != null && next != poster && next !in unavailable) {
-                                        trace(cover, "POSTER_RETRY", "source=anime_mapping")
-                                        cover.custom = next
-                                        loadCustom(image, cover, next)
-                                    } else {
-                                        cover.custom = null
-                                        cover.failed = true
-                                        restore(image, cover)
-                                    }
-                                }
-                            } else {
-                                cover.custom = null
-                                cover.failed = true
-                                restore(image, cover)
-                            }
-                        }
-                    }
-                )
+            val result = PosterWipe.load(image, poster) {
+                covers[image] === cover && revision == cover.generation
             }
+            if (covers[image] !== cover || revision != cover.generation ||
+                result.error == "stale") return
+            if (result.success) {
+                trace(cover, "POSTER_SUCCESS", "cache=${result.source}")
+                return
+            }
+            trace(cover, "POSTER_FAIL", "reason=${result.error}")
+            unavailable.add(poster)
+            val fallback = cover.fallback?.takeUnless { cover.fallbackAttempted }
+            if (fallback != null) {
+                cover.fallbackAttempted = true
+                val mapped = fallback.takeIf { it.imdb != null || it.tmdb != null }
+                    ?: withContext(Dispatchers.IO) { animeIds(fallback) }
+                if (covers[image] !== cover || revision != cover.generation ||
+                    !image.isAttachedToWindow) return
+                val next = mapped?.let { setting.image(it, cover.fallbackMovie) }
+                if (next != null && next != poster && next !in unavailable) {
+                    trace(cover, "POSTER_RETRY", "source=anime_mapping")
+                    cover.custom = next
+                    loadCustom(image, cover, next)
+                    return
+                }
+            }
+            cover.custom = null
+            cover.failed = true
+            // Native artwork was never replaced on a failed request.
         }
 
         private fun apply(view: View, forced: Boolean) {
@@ -483,10 +495,14 @@ internal class RecommendationPosterHook(private val application: Application) :
                 card.type + "|" + card.posterUrl
             val old = covers[image]
             if (old?.key == key && old.generation == revision) {
-                if (forced && old.custom != null) loadCustom(image, old, old.custom!!)
+                if (forced && old.custom != null && pending[image]?.isActive != true) {
+                    pending[image] = scope.launch { loadCustom(image, old, old.custom!!) }
+                }
                 return
             }
             pending.remove(image)?.cancel()
+            PosterWipe.cancel(image)
+            PosterWipe.ensurePlaceholder(image)
             val current = Cover(key, revision, card.posterUrl, card.posterHeaders,
                 card.apiName, Integer.toHexString(card.url.hashCode()), SystemClock.elapsedRealtime())
             covers[image] = current
