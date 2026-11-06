@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.text.Layout
 import android.text.StaticLayout
@@ -65,8 +64,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -381,55 +378,43 @@ internal object ActorInformation {
             // Each card retains its own ImageView, focus and custom-poster overlay.
             val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
             val nativePosterFlights = mutableMapOf<String, Deferred<coil3.Image?>>()
-            val nativeBackgroundLimiter = Semaphore(6)
             fun ImageView.loadSharedNativePoster(url: String?) {
                 setImageResource(R.drawable.default_cover)
                 if (url.isNullOrBlank()) return
-                // Inspect clipping after the dialog's first layout; credits outside
-                // horizontal/vertical scroll viewports load at reduced concurrency.
-                post {
-                    if (dialog !== windowDialog || !isAttachedToWindow) return@post
-                    val initial = drawable
-                    val visible = getGlobalVisibleRect(Rect())
-                    val existing = nativePosterFlights[url]
-                    val flight = existing ?: nativePosterScope.async(Dispatchers.IO) {
-                        val queuedAt = SystemClock.elapsedRealtime()
-                        val fetch: suspend () -> coil3.Image? = {
-                            val request = ImageRequest.Builder(activity.applicationContext)
-                                .data(url).size(dp(114), dp(180))
-                                .httpHeaders(NetworkHeaders.Builder().apply {
-                                    this["User-Agent"] = USER_AGENT
-                                }.build()).build()
-                            val result = SingletonImageLoader.get(activity.applicationContext)
-                                .execute(request) as? SuccessResult
-                            Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
-                                "urlKey=${url.hashCode().toUInt().toString(16)} " +
-                                "source=${result?.dataSource?.name ?: "ERROR"} " +
-                                "elapsedMs=${SystemClock.elapsedRealtime() - queuedAt}")
-                            result?.image
-                        }
-                        if (visible) fetch() else nativeBackgroundLimiter.withPermit { fetch() }
-                    }.also { nativePosterFlights[url] = it }
-                    Log.d("ElevatePoster",
-                        "event=${if (existing == null) "NATIVE_NEW" else "NATIVE_JOIN"} " +
-                            "origin=actor urlKey=${url.hashCode().toUInt().toString(16)} " +
-                            "visible=$visible")
-                    nativePosterScope.launch {
-                        try {
-                            val decoded = flight.await()
-                            if (decoded == null) {
-                                if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
-                                return@launch
-                            }
-                            // Do not overwrite an already finished custom poster.
-                            if (dialog === windowDialog && drawable === initial)
-                                setImageDrawable(decoded.asDrawable(resources))
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
+                val initial = drawable
+                val existing = nativePosterFlights[url]
+                val flight = existing ?: nativePosterScope.async(Dispatchers.IO) {
+                    val started = SystemClock.elapsedRealtime()
+                    val request = ImageRequest.Builder(activity.applicationContext)
+                        .data(url).size(dp(114), dp(180))
+                        .httpHeaders(NetworkHeaders.Builder().apply {
+                            this["User-Agent"] = USER_AGENT
+                        }.build()).build()
+                    val result = SingletonImageLoader.get(activity.applicationContext)
+                        .execute(request) as? SuccessResult
+                    Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
+                        "urlKey=${url.hashCode().toUInt().toString(16)} " +
+                        "source=${result?.dataSource?.name ?: "ERROR"} " +
+                        "elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                    result?.image
+                }.also { nativePosterFlights[url] = it }
+                Log.d("ElevatePoster", "event=${if (existing == null) "NATIVE_NEW" else "NATIVE_JOIN"} " +
+                    "origin=actor urlKey=${url.hashCode().toUInt().toString(16)}")
+                nativePosterScope.launch {
+                    try {
+                        val decoded = flight.await()
+                        if (decoded == null) {
                             if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
-                            // Keep the original placeholder on a failed image request.
+                            return@launch
                         }
+                        // Do not overwrite an already finished custom poster.
+                        if (dialog === windowDialog && drawable === initial)
+                            setImageDrawable(decoded.asDrawable(resources))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
+                        // Keep the original placeholder on a failed image request.
                     }
                 }
             }

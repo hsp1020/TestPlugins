@@ -48,8 +48,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.util.WeakHashMap
 import kotlin.math.max
 
@@ -69,8 +67,6 @@ internal object PosterWipe {
     private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val urlGates = HashMap<String, UrlGate>()
     private val httpAttempts = AtomicLong()
-    // Offscreen actor cards must not saturate XRDB before visible cards.
-    private val actorBackgroundLimiter = Semaphore(8)
 
     // A cache probe can never trigger an HTTP call. Only use it when another
     // size for the same URL is already filling the cache.
@@ -297,16 +293,7 @@ internal object PosterWipe {
             }
             if (!valid() || !image.isAttachedToWindow)
                 return Result(false, error = "stale")
-            // Actor dialogs eagerly create many credit cards. Let visible cards
-            // use all available slots while throttling background credits.
-            if (origin == "actor" && !image.getGlobalVisibleRect(Rect())) {
-                trace(url, "IMAGE_BACKGROUND", "origin=$origin size=$size")
-                actorBackgroundLimiter.withPermit {
-                    loadSharedImage(image.context, url, size, scale, origin)
-                }
-            } else {
-                loadSharedImage(image.context, url, size, scale, origin)
-            }
+            loadSharedImage(image.context, url, size, scale, origin)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
