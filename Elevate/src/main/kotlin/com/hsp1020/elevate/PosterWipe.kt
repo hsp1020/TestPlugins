@@ -19,6 +19,10 @@ import coil3.network.httpHeaders
 import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
+import coil3.size.Precision
+import coil3.size.Scale
+import coil3.size.Size
+import coil3.size.ViewSizeResolver
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.USER_AGENT
 import kotlinx.coroutines.CancellationException
@@ -37,33 +41,48 @@ internal object PosterWipe {
     private data class Running(val animator: ValueAnimator, val overlay: WipeDrawable)
     private val active = WeakHashMap<ImageView, Running>()
     private const val DURATION_MS = 240L
-    private data class RequestKey(val url: String, val width: Int, val height: Int)
+    private data class RequestKey(val url: String, val size: Size, val scale: Scale)
+    private class Flight(val request: Deferred<ImageResult>, var subscribers: Int = 0)
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val imageFlights = HashMap<RequestKey, Deferred<ImageResult>>()
+    private val imageFlights = HashMap<RequestKey, Flight>()
 
-    // Share only active image requests, regardless of the selected poster service.
-    // Coil retains completed images in its existing memory/disk caches.
-    private suspend fun loadSharedImage(context: Context, url: String, width: Int, height: Int): ImageResult {
-        val key = RequestKey(url, width, height)
+    // Share simultaneous requests without keeping unused downloads alive.
+    // Completed images remain in Coil's existing memory/disk caches.
+    private suspend fun loadSharedImage(context: Context, url: String, size: Size, scale: Scale): ImageResult {
+        val key = RequestKey(url, size, scale)
         val flight = synchronized(imageFlights) {
-            imageFlights[key] ?: imageScope.async(start = CoroutineStart.LAZY) {
-                val request = ImageRequest.Builder(context.applicationContext).data(url)
-                    .size(width, height)
-                    .httpHeaders(NetworkHeaders.Builder().apply {
-                        this["User-Agent"] = USER_AGENT
-                    }.build()).build()
-                SingletonImageLoader.get(context.applicationContext).execute(request)
-            }.also { task ->
-                imageFlights[key] = task
-                task.invokeOnCompletion {
-                    synchronized(imageFlights) {
-                        if (imageFlights[key] === task) imageFlights.remove(key)
+            (imageFlights[key] ?: run {
+                val job = imageScope.async(start = CoroutineStart.LAZY) {
+                    val request = ImageRequest.Builder(context.applicationContext).data(url)
+                        .size(size).scale(scale).precision(Precision.INEXACT)
+                        .httpHeaders(NetworkHeaders.Builder().apply {
+                            this["User-Agent"] = USER_AGENT
+                        }.build()).build()
+                    SingletonImageLoader.get(context.applicationContext).execute(request)
+                }
+                Flight(job).also { created ->
+                    imageFlights[key] = created
+                    job.invokeOnCompletion {
+                        synchronized(imageFlights) {
+                            if (imageFlights[key] === created) imageFlights.remove(key)
+                        }
                     }
                 }
-            }
+            }).also { it.subscribers++ }
         }
-        flight.start()
-        return flight.await()
+        flight.request.start()
+        try {
+            return flight.request.await()
+        } finally {
+            val cancel = synchronized(imageFlights) {
+                flight.subscribers--
+                if (flight.subscribers == 0 && flight.request.isActive) {
+                    if (imageFlights[key] === flight) imageFlights.remove(key)
+                    true
+                } else false
+            }
+            if (cancel) flight.request.cancel()
+        }
     }
 
     private class WipeDrawable(private val image: Drawable) : Drawable() {
@@ -109,10 +128,21 @@ internal object PosterWipe {
     }
 
     suspend fun load(image: ImageView, url: String, valid: () -> Boolean): Result {
-        // This request has no View target: it cannot dispose or clear the native cover.
+        // Match the native ImageView's size/scale to reuse Coil cache entries.
+        // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
         val outcome = try {
-            loadSharedImage(image.context, url,
-                image.width.coerceAtLeast(1), image.height.coerceAtLeast(1))
+            if (!image.isAttachedToWindow) return Result(false, error = "stale")
+            val scale = when (image.scaleType) {
+                ImageView.ScaleType.CENTER_CROP, ImageView.ScaleType.FIT_XY -> Scale.FILL
+                else -> Scale.FIT
+            }
+            val size = when (image.scaleType) {
+                ImageView.ScaleType.CENTER, ImageView.ScaleType.MATRIX -> Size.ORIGINAL
+                else -> ViewSizeResolver(image).size()
+            }
+            if (!valid() || !image.isAttachedToWindow)
+                return Result(false, error = "stale")
+            loadSharedImage(image.context, url, size, scale)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

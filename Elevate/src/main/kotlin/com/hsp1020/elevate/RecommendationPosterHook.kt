@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.net.Uri
+import android.graphics.Rect
 import android.os.Bundle
 import android.os.Build
 import android.os.Handler
@@ -80,7 +81,6 @@ internal class RecommendationPosterHook(private val application: Application) :
     private val unavailable = mutableSetOf<String>()
     private val simklLimiter = Semaphore(5)
     private val detailLimiter = Semaphore(5)
-    private val posterLimiter = Semaphore(5)
     private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
     private data class DetailLookup(val ids: DetailIds?, val reason: String, val waitMs: Long, val loadMs: Long)
     private val detailMappings = LinkedHashMap<String, Pair<Long, DetailLookup>>()
@@ -339,6 +339,37 @@ internal class RecommendationPosterHook(private val application: Application) :
         private var adapter: RecyclerView.Adapter<*>? = null
         private var queued = false
         private var rebind = false
+        private val viewport = Rect()
+        private val cardBounds = Rect()
+        private val parentScroll = ViewTreeObserver.OnScrollChangedListener { schedule() }
+        private var scrollTree: ViewTreeObserver? = null
+        private val attached = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) {
+                observeParentScroll()
+                schedule()
+            }
+            override fun onViewDetachedFromWindow(view: View) = stopParentScroll()
+        }
+
+        private fun observeParentScroll() {
+            val tree = list.viewTreeObserver
+            if (scrollTree === tree && tree.isAlive) return
+            stopParentScroll()
+            if (tree.isAlive) {
+                tree.addOnScrollChangedListener(parentScroll)
+                scrollTree = tree
+            }
+        }
+
+        private fun stopParentScroll() {
+            scrollTree?.takeIf { it.isAlive }?.removeOnScrollChangedListener(parentScroll)
+            scrollTree = null
+        }
+
+        private fun inViewport(view: View): Boolean =
+            list.isAttachedToWindow && list.getGlobalVisibleRect(viewport) &&
+                view.getGlobalVisibleRect(cardBounds) &&
+                Rect.intersects(viewport, cardBounds)
 
         private val observer = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = schedule(true)
@@ -366,14 +397,18 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
         fun open() {
             list.addOnChildAttachStateChangeListener(children)
+            list.addOnAttachStateChangeListener(attached)
             list.addOnLayoutChangeListener(layout)
             list.addOnScrollListener(scrolling)
+            if (list.isAttachedToWindow) observeParentScroll()
             syncAdapter()
             schedule()
         }
 
         fun close() {
+            stopParentScroll()
             list.removeOnChildAttachStateChangeListener(children)
+            list.removeOnAttachStateChangeListener(attached)
             list.removeOnLayoutChangeListener(layout)
             list.removeOnScrollListener(scrolling)
             adapter?.unregisterAdapterDataObserver(observer)
@@ -400,16 +435,27 @@ internal class RecommendationPosterHook(private val application: Application) :
             rebind = rebind || force
             if (queued) return
             queued = true
-            list.post {
+            list.postOnAnimation {
                 queued = false
-                if (screens.values.none { it === this@Screen }) return@post
+                if (screens.values.none { it === this@Screen }) return@postOnAnimation
                 syncAdapter()
                 val changed = rebind
                 rebind = false
-                // The parent NestedScrollView handles scrolling; its off-screen
-                // children must not be skipped just because this RecyclerView did not scroll.
+                // The parent NestedScrollView scrolls even when RecyclerView does not.
+                // Observe the whole view tree, but request artwork only for visible cards.
                 for (index in 0 until list.childCount) {
-                    apply(list.getChildAt(index), changed)
+                    val child = list.getChildAt(index)
+                    if (inViewport(child)) {
+                        apply(child, changed)
+                    } else {
+                        child.findViewById<ImageView>(R.id.imageView)?.let { image ->
+                            pending.remove(image)?.let { job ->
+                                job.cancel()
+                                PosterWipe.cancel(image)
+                                covers.remove(image)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -435,16 +481,11 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
 
         private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
-            val result = posterLimiter.withPermit {
-                if (covers[image] !== cover || revision != cover.generation ||
-                    !image.isAttachedToWindow) {
-                    PosterWipe.Result(false, error = "stale")
-                } else {
-                    trace(cover, "POSTER_REQUEST", "service=${setting.service}")
-                    PosterWipe.load(image, poster) {
-                        covers[image] === cover && revision == cover.generation
-                    }
-                }
+            if (covers[image] !== cover || revision != cover.generation ||
+                !image.isAttachedToWindow) return
+            trace(cover, "POSTER_REQUEST", "service=${setting.service}")
+            val result = PosterWipe.load(image, poster) {
+                covers[image] === cover && revision == cover.generation
             }
             if (covers[image] !== cover || revision != cover.generation ||
                 result.error == "stale") return
@@ -475,7 +516,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
 
         private fun apply(view: View, forced: Boolean) {
-            if (view.parent !== list || !setting.ready) return
+            if (view.parent !== list || !setting.ready || !inViewport(view)) return
             val native = list.adapter as? SearchAdapter ?: return
             val position = list.getChildAdapterPosition(view)
             if (position == RecyclerView.NO_POSITION) return
