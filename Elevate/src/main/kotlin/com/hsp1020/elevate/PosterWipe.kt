@@ -40,7 +40,7 @@ internal object PosterWipe {
     internal data class Result(val success: Boolean, val source: String = "", val error: String = "")
     private data class Running(val animator: ValueAnimator, val overlay: WipeDrawable)
     private val active = WeakHashMap<ImageView, Running>()
-    private const val DURATION_MS = 240L
+    private const val DURATION_MS = 500L
     private data class RequestKey(val url: String, val size: Size, val scale: Scale)
     private class Flight(val request: Deferred<ImageResult>, var subscribers: Int = 0)
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
