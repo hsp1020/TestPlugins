@@ -5275,8 +5275,7 @@ open class StremioC(
                 this@CatalogEntry.kitsuIdExt != null || finalKitsuId != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
-            // Direct SVG logos are unsupported; AIOMetadata's art proxy can also
-            // wrap an SVG source in its "url" parameter. Fall through to TMDB/art.
+            // Skip unsupported SVG URLs, including an SVG wrapped by an art proxy.
             fun isSvgLogo(url: String): Boolean {
                 val parsed = url.toHttpUrlOrNull() ?: return url.substringBefore('?')
                     .endsWith(".svg", ignoreCase = true)
@@ -5284,18 +5283,13 @@ open class StremioC(
                     parsed.queryParameter("url")?.toHttpUrlOrNull()?.encodedPath
                         ?.endsWith(".svg", ignoreCase = true) == true
             }
-            val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
+            // Prefer the active addon's meta.logo regardless of which addon supplies it.
+            val addonLogo = detailedEntry.logo?.takeIf { it.isNotBlank() && !isSvgLogo(it) }
+            val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
-            // AIOMetadata resolves Logo URL Pattern on the server and returns the final
-            // meta.logo, with or without its image proxy. No URL rewriting is needed
-            // for the current title (unlike recommendation posters).
-            val metadataLogo = detailedEntry.logo?.takeIf { logo ->
-                logo.isNotBlank() && !isSvgLogo(logo) && logo.toHttpUrlOrNull() != null &&
-                    provider.metadataPosterAddonBaseUrl() != null &&
-                    (addonDeferred == null || syncedEntry != null)
-            }
-            val finalLogo = metadataLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
+            val finalLogo = addonLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
+                ?: fallbackAddonLogo
 
             // Keep TMDB's preferred-language/English selection for the title
             // fallback even when a custom AIOMetadata logo is displayed.
