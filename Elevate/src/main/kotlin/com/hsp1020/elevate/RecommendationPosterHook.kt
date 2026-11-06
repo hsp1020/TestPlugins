@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.net.Uri
-import android.graphics.Rect
 import android.os.Bundle
 import android.os.Build
 import android.os.Handler
@@ -81,6 +80,7 @@ internal class RecommendationPosterHook(private val application: Application) :
     private val unavailable = mutableSetOf<String>()
     private val simklLimiter = Semaphore(5)
     private val detailLimiter = Semaphore(5)
+    private val posterLimiter = Semaphore(5)
     private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
     private data class DetailLookup(val ids: DetailIds?, val reason: String, val waitMs: Long, val loadMs: Long)
     private val detailMappings = LinkedHashMap<String, Pair<Long, DetailLookup>>()
@@ -364,12 +364,6 @@ internal class RecommendationPosterHook(private val application: Application) :
         private val scrolling = object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) = schedule()
         }
-        private val viewport = Rect()
-        private val bounds = Rect()
-        private fun inViewport(view: View): Boolean =
-            list.getGlobalVisibleRect(viewport) && view.getGlobalVisibleRect(bounds) &&
-                Rect.intersects(viewport, bounds)
-
         fun open() {
             list.addOnChildAttachStateChangeListener(children)
             list.addOnLayoutChangeListener(layout)
@@ -412,20 +406,10 @@ internal class RecommendationPosterHook(private val application: Application) :
                 syncAdapter()
                 val changed = rebind
                 rebind = false
-                // RecyclerView may keep off-screen children attached. Do not enqueue
-                // their image requests until the user scrolls them into the viewport.
+                // The parent NestedScrollView handles scrolling; its off-screen
+                // children must not be skipped just because this RecyclerView did not scroll.
                 for (index in 0 until list.childCount) {
-                    val child = list.getChildAt(index)
-                    if (inViewport(child)) apply(child, changed)
-                    else child.findViewById<ImageView>(R.id.imageView)?.let { image ->
-                        // Preserve finished bindings and Coil cache when scrolling away.
-                        // Only interrupted metadata work must be retried on re-entry.
-                        pending.remove(image)?.let { job ->
-                            job.cancel()
-                            PosterWipe.cancel(image)
-                            covers.remove(image)
-                        }
-                    }
+                    apply(list.getChildAt(index), changed)
                 }
             }
         }
@@ -451,9 +435,16 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
 
         private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
-            trace(cover, "POSTER_REQUEST", "service=${setting.service}")
-            val result = PosterWipe.load(image, poster) {
-                covers[image] === cover && revision == cover.generation
+            val result = posterLimiter.withPermit {
+                if (covers[image] !== cover || revision != cover.generation ||
+                    !image.isAttachedToWindow) {
+                    PosterWipe.Result(false, error = "stale")
+                } else {
+                    trace(cover, "POSTER_REQUEST", "service=${setting.service}")
+                    PosterWipe.load(image, poster) {
+                        covers[image] === cover && revision == cover.generation
+                    }
+                }
             }
             if (covers[image] !== cover || revision != cover.generation ||
                 result.error == "stale") return
@@ -484,7 +475,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
 
         private fun apply(view: View, forced: Boolean) {
-            if (view.parent !== list || !setting.ready || !inViewport(view)) return
+            if (view.parent !== list || !setting.ready) return
             val native = list.adapter as? SearchAdapter ?: return
             val position = list.getChildAdapterPosition(view)
             if (position == RecyclerView.NO_POSITION) return
