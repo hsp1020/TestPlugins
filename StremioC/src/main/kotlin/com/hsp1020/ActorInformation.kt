@@ -9,6 +9,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
 import android.util.TypedValue
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewTreeObserver
 import android.view.View
@@ -380,17 +381,22 @@ internal object ActorInformation {
                 setImageResource(R.drawable.default_cover)
                 if (url.isNullOrBlank()) return
                 val initial = drawable
-                val flight = nativePosterFlights.getOrPut(url) {
-                    nativePosterScope.async(Dispatchers.IO) {
-                        val request = ImageRequest.Builder(activity.applicationContext)
-                            .data(url).size(dp(114), dp(180))
-                            .httpHeaders(NetworkHeaders.Builder().apply {
-                                this["User-Agent"] = USER_AGENT
-                            }.build()).build()
-                        (SingletonImageLoader.get(activity.applicationContext)
-                            .execute(request) as? SuccessResult)?.image
-                    }
-                }
+                val existing = nativePosterFlights[url]
+                val flight = existing ?: nativePosterScope.async(Dispatchers.IO) {
+                    val request = ImageRequest.Builder(activity.applicationContext)
+                        .data(url).size(dp(114), dp(180))
+                        .httpHeaders(NetworkHeaders.Builder().apply {
+                            this["User-Agent"] = USER_AGENT
+                        }.build()).build()
+                    val result = SingletonImageLoader.get(activity.applicationContext)
+                        .execute(request) as? SuccessResult
+                    Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
+                        "urlKey=${url.hashCode().toUInt().toString(16)} " +
+                        "source=${result?.dataSource?.name ?: "ERROR"}")
+                    result?.image
+                }.also { nativePosterFlights[url] = it }
+                Log.d("ElevatePoster", "event=${if (existing == null) "NATIVE_NEW" else "NATIVE_JOIN"} " +
+                    "origin=actor urlKey=${url.hashCode().toUInt().toString(16)}")
                 nativePosterScope.launch {
                     try {
                         val decoded = flight.await()

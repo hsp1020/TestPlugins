@@ -281,7 +281,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                                 PosterWipe.ensurePlaceholder(image)
                                 loads.remove(image)?.cancel()
                                 loads[image] = scope.launch {
-                                    val result = PosterWipe.load(image, poster) {
+                                    val result = PosterWipe.load(image, poster, "actor") {
                                         applied[image] == value && setting.ready
                                     }
                                     if (applied[image] == value && !result.success &&
@@ -314,7 +314,8 @@ internal class RecommendationPosterHook(private val application: Application) :
         val cardId: String, val startedAt: Long,
         var custom: String? = null, var failed: Boolean = false,
         var fallback: PosterIds? = null, var fallbackMovie: Boolean = false,
-        var fallbackAttempted: Boolean = false
+        var fallbackAttempted: Boolean = false,
+        var imdbFallback: String? = null
     )
 
     private fun trace(cover: Cover, event: String, info: String = "") {
@@ -432,7 +433,7 @@ internal class RecommendationPosterHook(private val application: Application) :
             if (covers[image] !== cover || revision != cover.generation ||
                 !image.isAttachedToWindow) return
             trace(cover, "POSTER_REQUEST", "service=${setting.service}")
-            val result = PosterWipe.load(image, poster) {
+            val result = PosterWipe.load(image, poster, "recommendation") {
                 covers[image] === cover && revision == cover.generation
             }
             if (covers[image] !== cover || revision != cover.generation ||
@@ -443,6 +444,14 @@ internal class RecommendationPosterHook(private val application: Application) :
             }
             trace(cover, "POSTER_FAIL", "reason=${result.error}")
             unavailable.add(poster)
+            val imdbPoster = cover.imdbFallback?.takeIf { it != poster && it !in unavailable }
+            cover.imdbFallback = null
+            if (imdbPoster != null) {
+                trace(cover, "POSTER_RETRY", "source=imdb")
+                cover.custom = imdbPoster
+                loadCustom(image, cover, imdbPoster)
+                return
+            }
             val fallback = cover.fallback?.takeUnless { cover.fallbackAttempted }
             if (fallback != null) {
                 cover.fallbackAttempted = true
@@ -549,7 +558,21 @@ internal class RecommendationPosterHook(private val application: Application) :
                             candidate.copy(imdb = null, tmdb = null)
                         else -> candidate
                     }
-                    val poster = config.image(posterIds, mapped.movie)
+                    // Match actor-dialog TMDB URLs when both identifiers are known.
+                    // Keep XRDB anime IDs and the original IMDb-only fallback.
+                    val primaryIds = if (posterIds.tmdb != null)
+                        posterIds.copy(imdb = null) else posterIds
+                    val primary = config.image(primaryIds, mapped.movie)
+                    val imdbPoster = if (posterIds.tmdb != null && posterIds.imdb != null)
+                        config.image(PosterIds(imdb = posterIds.imdb), mapped.movie) else null
+                    val poster = primary?.takeUnless { it in unavailable }
+                        ?: imdbPoster?.takeUnless { it in unavailable }
+                    current.imdbFallback = imdbPoster?.takeIf {
+                        poster == primary && it != primary
+                    }
+                    if (poster != null)
+                        trace(current, "POSTER_TARGET",
+                            "id=${idLabel(primaryIds)} urlKey=${poster.hashCode().toUInt().toString(16)}")
                     if (animeIdentity &&
                         (config.service == PosterService.XRDB ||
                             season != null && (candidate.imdb != null || candidate.tmdb != null))) {

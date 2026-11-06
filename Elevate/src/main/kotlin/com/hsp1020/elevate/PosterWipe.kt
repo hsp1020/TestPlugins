@@ -9,6 +9,8 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import android.widget.ImageView
 import coil3.SingletonImageLoader
 import coil3.request.ImageResult
@@ -32,6 +34,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import java.util.WeakHashMap
 import kotlin.math.max
 
@@ -46,19 +49,52 @@ internal object PosterWipe {
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val imageFlights = HashMap<RequestKey, Flight>()
 
-    // Share simultaneous requests without keeping unused downloads alive.
-    // Completed images remain in Coil's existing memory/disk caches.
-    private suspend fun loadSharedImage(context: Context, url: String, size: Size, scale: Scale): ImageResult {
+    // Exact-size Coil work shares a decoded result. Different sizes serialize
+    // the same URL's fetch, allowing Coil to reuse its disk cache before decoding.
+    private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
+    private val urlGates = HashMap<String, UrlGate>()
+
+    private fun trace(url: String, event: String, info: String) {
+        Log.d("ElevatePoster", "event=$event urlKey=${url.hashCode().toUInt().toString(16)} $info")
+    }
+
+    private suspend fun executeImage(
+        context: Context, url: String, size: Size, scale: Scale
+    ): ImageResult {
+        val gate = synchronized(urlGates) {
+            urlGates.getOrPut(url) { UrlGate() }.also { it.users++ }
+        }
+        try {
+            if (gate.mutex.isLocked) trace(url, "IMAGE_WAIT", "size=$size")
+            gate.mutex.lock()
+            try {
+                val request = ImageRequest.Builder(context.applicationContext).data(url)
+                    .size(size).scale(scale).precision(Precision.INEXACT)
+                    .httpHeaders(NetworkHeaders.Builder().apply {
+                        this["User-Agent"] = USER_AGENT
+                    }.build()).build()
+                return SingletonImageLoader.get(context.applicationContext).execute(request)
+            } finally {
+                gate.mutex.unlock()
+            }
+        } finally {
+            synchronized(urlGates) {
+                gate.users--
+                if (gate.users == 0 && urlGates[url] === gate) urlGates.remove(url)
+            }
+        }
+    }
+
+    // Never share a decoded image across distinct output dimensions.
+    private suspend fun loadSharedImage(
+        context: Context, url: String, size: Size, scale: Scale, origin: String
+    ): ImageResult {
         val key = RequestKey(url, size, scale)
+        var joined = false
         val flight = synchronized(imageFlights) {
-            (imageFlights[key] ?: run {
+            (imageFlights[key]?.also { joined = true } ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
-                    val request = ImageRequest.Builder(context.applicationContext).data(url)
-                        .size(size).scale(scale).precision(Precision.INEXACT)
-                        .httpHeaders(NetworkHeaders.Builder().apply {
-                            this["User-Agent"] = USER_AGENT
-                        }.build()).build()
-                    SingletonImageLoader.get(context.applicationContext).execute(request)
+                    executeImage(context, url, size, scale)
                 }
                 Flight(job).also { created ->
                     imageFlights[key] = created
@@ -70,9 +106,23 @@ internal object PosterWipe {
                 }
             }).also { it.subscribers++ }
         }
+        trace(url, if (joined) "IMAGE_JOIN" else "IMAGE_NEW",
+            "origin=$origin size=$size scale=$scale")
         flight.request.start()
+        val started = SystemClock.elapsedRealtime()
         try {
-            return flight.request.await()
+            val result = flight.request.await()
+            val source = when (result) {
+                is SuccessResult -> result.dataSource.name
+                is ErrorResult -> result.throwable.javaClass.simpleName
+                else -> "UNKNOWN"
+            }
+            trace(url, "IMAGE_RESULT",
+                "origin=$origin source=$source shared=$joined elapsedMs=${SystemClock.elapsedRealtime() - started}")
+            return result
+        } catch (cancelled: CancellationException) {
+            trace(url, "IMAGE_CANCEL", "origin=$origin")
+            throw cancelled
         } finally {
             val cancel = synchronized(imageFlights) {
                 flight.subscribers--
@@ -127,7 +177,7 @@ internal object PosterWipe {
         if (image.drawable == null) image.setImageResource(R.drawable.default_cover)
     }
 
-    suspend fun load(image: ImageView, url: String, valid: () -> Boolean): Result {
+    suspend fun load(image: ImageView, url: String, origin: String = "library", valid: () -> Boolean): Result {
         // Match the native ImageView's size/scale to reuse Coil cache entries.
         // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
         val outcome = try {
@@ -142,7 +192,7 @@ internal object PosterWipe {
             }
             if (!valid() || !image.isAttachedToWindow)
                 return Result(false, error = "stale")
-            loadSharedImage(image.context, url, size, scale)
+            loadSharedImage(image.context, url, size, scale, origin)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -157,11 +207,12 @@ internal object PosterWipe {
         val previous = image.drawable
         // Only now cancel a possibly still-running native request; never before decoding.
         image.dispose()
-        image.setImageDrawable(previous ?: image.context.getDrawable(R.drawable.default_cover))
-        if (image.width <= 0 || image.height <= 0) {
+        // Cached artwork is already available: avoid a redundant 500ms transition.
+        if (success.dataSource.name != "NETWORK" || image.width <= 0 || image.height <= 0) {
             image.setImageDrawable(custom)
             return Result(true, source = success.dataSource.name)
         }
+        image.setImageDrawable(previous ?: image.context.getDrawable(R.drawable.default_cover))
         val wipe = WipeDrawable(custom)
         wipe.bounds = Rect(0, 0, image.width, image.height)
         image.overlay.add(wipe)
