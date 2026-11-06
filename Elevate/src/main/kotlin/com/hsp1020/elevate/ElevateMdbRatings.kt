@@ -21,7 +21,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.Observer
-import com.lagradost.cloudstream3.BuildConfig
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
@@ -126,7 +125,7 @@ internal class ElevateMdbRatings(
                 if (at < 0) break
                 if (number.containsMatchIn(line.substring(at + symbol.length))) {
                     val id = drawableIds.getOrPut(asset) {
-                        artwork?.getIdentifier(asset, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME) ?: 0
+                        artwork?.getIdentifier(asset, "drawable", "com.example") ?: 0
                     }
                     if (id != 0) {
                         val drawable = runCatching { artwork?.getDrawable(id, null)?.mutate() }.getOrNull()

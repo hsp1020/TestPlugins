@@ -6,6 +6,7 @@ cloudstream {
     language = "en"
     status = 1
     tvTypes = listOf("Other")
+    requiresResources = true
 }
 
 dependencies {
