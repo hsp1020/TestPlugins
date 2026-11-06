@@ -59,7 +59,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
     private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
-    private val anilistMappings = LinkedHashMap<String, Pair<Long, String?>>()
     private val downloadedMappings = LinkedHashMap<String, Pair<Long, Item>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queue = Channel<Report>(64)
@@ -575,31 +574,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         return result
     }
 
-    /** AIOMetadata accepts MAL (mapped to Kitsu), but not anilist: playback IDs. */
-    private suspend fun resolveAniListMal(id: String): String? {
-        val number = id.toIntOrNull()?.takeIf { it > 0 } ?: return null
-        val now = System.currentTimeMillis()
-        anilistMappings[id]?.takeIf {
-            now - it.first < if (it.second == null) 300_000L else 86_400_000L
-        }?.let { return it.second }
-        val mapped = try {
-            withTimeoutOrNull(8_000L) {
-                val response = JSONObject(app.post("https://graphql.anilist.co",
-                    json = mapOf(
-                        "query" to "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal } }",
-                        "variables" to mapOf("id" to number)
-                    ), timeout = 7L).text)
-                    .optJSONObject("data")?.optJSONObject("Media")
-                if (response?.optInt("id") == number)
-                    response.optInt("idMal").takeIf { it > 0 }?.toString() else null
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-          catch (_: Exception) { null }
-        anilistMappings[id] = System.currentTimeMillis() to mapped
-        if (anilistMappings.size > 96) anilistMappings.remove(anilistMappings.keys.first())
-        return mapped
-    }
-
     private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> {
         if (id.toLongOrNull()?.let { it > 0L } != true) return emptyMap()
         val key = (if (movie) "movie:" else "series:") + id
@@ -819,14 +793,19 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         }
         val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
         val tmdb = ids["tmdb"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
-        val kitsu = ids["kitsu"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val anilist = (ids["anilist"] ?: item.urlId?.takeIf { it.startsWith("anilist:") })
             ?.removePrefix("anilist:")?.substringBefore(':')
             ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
-        if (imdb == null && tmdb == null && kitsu == null &&
+        if (imdb == null && tmdb == null &&
+            ids["kitsu"]?.removePrefix("kitsu:")?.toLongOrNull()?.let { it > 0L } != true &&
             ids["mal"]?.removePrefix("mal:")?.toLongOrNull()?.let { it > 0L } != true) {
-            anilist?.let { resolveAniListMal(it) }?.let { ids["mal"] = it }
+            anilist?.let { ElevateAnimeIdResolver.resolve("anilist", it) }?.let { mapped ->
+                mapped.kitsu?.let { ids["kitsu"] = it }
+                mapped.mal?.let { ids["mal"] = it }
+            }
         }
+        val kitsu = ids["kitsu"]?.removePrefix("kitsu:")
+            ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val mal = ids["mal"]?.removePrefix("mal:")
             ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val anime = item.anime || overrides["_anime"] == "true"

@@ -303,67 +303,16 @@ internal class ElevateMdbRatings(
         return found
     }
 
-    /** Resolve an anime external ID using Simkl's documented 301 Location mapping. */
+    /** Map Kitsu/MAL/AniList through AIOStreams; preserve Simkl for Simkl-only IDs. */
     private suspend fun resolveAnimeId(source: String, id: String, movie: Boolean, hash: Int): Key? {
-        if (source !in setOf("mal", "kitsu", "anilist") ||
-            id.toLongOrNull()?.let { it > 0 } != true) return null
-        val lookup = listOf(source, id, movie, hash).joinToString("|")
-        val now = System.currentTimeMillis()
-        synchronized(simklMappings) {
-            simklMappings[lookup]?.takeIf {
-                now - it.first < if (it.second == null) 300_000L else 3_600_000L
-            }?.let { return it.second }
+        val mapped = ElevateAnimeIdResolver.resolve(source, id) ?: return null
+        val imdb = mapped.imdb?.takeIf(imdbPattern::matches)
+        val tmdb = mapped.tmdb?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        return when {
+            imdb != null -> Key("imdb", imdb, movie, hash)
+            tmdb != null -> Key("tmdb", tmdb, movie, hash)
+            else -> null
         }
-        val found = try {
-            withTimeoutOrNull(28_000L) {
-                semaphore.withPermit {
-                    val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }?.authData()
-                    val headers = auth?.let { SimklApi.getHeaders(it.token) }
-                    val clientId = headers?.get("simkl-api-key")
-                    if (headers == null || clientId.isNullOrBlank()) null else {
-                        val params = mapOf("client_id" to clientId)
-                        val redirect = app.get("https://api.simkl.com/redirect",
-                            params = params + ("to" to "simkl") + (source to id),
-                            headers = headers, allowRedirects = false, timeout = 12L)
-                        val location = try {
-                            if (redirect.code == 301) redirect.headers["Location"]
-                                ?: redirect.headers["location"] else null
-                        } finally { redirect.okhttpResponse.close() }
-                        val uri = location?.let(android.net.Uri::parse)
-                        val parts = uri?.pathSegments.orEmpty()
-                        val simklId = parts.getOrNull(1)?.takeIf {
-                            it.toLongOrNull()?.let { n -> n > 0 } == true
-                        }
-                        if (uri?.host != "simkl.com" || parts.firstOrNull() != "anime" ||
-                            simklId == null) null else {
-                            val detail = JSONObject(app.get("https://api.simkl.com/anime/" + simklId,
-                                params = params, headers = headers, timeout = 12L).text)
-                            val ids = detail.optJSONObject("ids")
-                            if (ids == null || ids.optString("simkl") != simklId ||
-                                ids.optString(source).let { it.isNotBlank() && it != id } ||
-                                detail.optString("anime_type").equals("movie", true) != movie) null
-                            else {
-                                val imdb = ids.optString("imdb").takeIf(imdbPattern::matches)
-                                val tmdb = ids.optString("tmdb").takeIf {
-                                    it.toLongOrNull()?.let { n -> n > 0 } == true
-                                }
-                                when {
-                                    imdb != null -> Key("imdb", imdb, movie, hash)
-                                    tmdb != null -> Key("tmdb", tmdb, movie, hash)
-                                    else -> null
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e: CancellationException) { throw e }
-          catch (_: Exception) { null }
-        synchronized(simklMappings) {
-            simklMappings[lookup] = System.currentTimeMillis() to found
-            if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
-        }
-        return found
     }
 
     /** Keep all native anime ID candidates; never guess by title. */
