@@ -219,7 +219,6 @@ internal class RecommendationPosterHook(private val application: Application) :
         private val applied = IdentityHashMap<ImageView, Pair<String, String?>>()
         private val loads = IdentityHashMap<ImageView, Job>()
         private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { scan() }
-        private val prefetchQueue = java.util.ArrayDeque<String>()
         private val prefetched = HashSet<String>()
         private val prefetchJobs = mutableListOf<Job>()
         private var tree: ViewTreeObserver? = null
@@ -227,31 +226,27 @@ internal class RecommendationPosterHook(private val application: Application) :
         private fun clearPreloads() {
             prefetchJobs.forEach { it.cancel() }
             prefetchJobs.clear()
-            prefetchQueue.clear()
             prefetched.clear()
         }
 
         private fun schedulePreloads(identities: List<*>) {
+            prefetchJobs.removeAll { it.isCompleted }
+            val density = root.resources.displayMetrics.density
             identities.forEach { identity ->
                 val match = (identity as? String)?.let { TMDB_ARTWORK.matchEntire(it) }
                     ?: return@forEach
                 val movie = match.groupValues[1] == "movie"
                 val poster = setting.image(PosterIds(tmdb = match.groupValues[2]), movie)
                     ?: return@forEach
-                if (poster !in unavailable && prefetched.add(poster)) prefetchQueue.addLast(poster)
-            }
-            prefetchJobs.removeAll { it.isCompleted }
-            val density = root.resources.displayMetrics.density
-            while (prefetchJobs.size < 4 && prefetchQueue.isNotEmpty()) {
-                prefetchJobs.add(scope.launch {
-                    while (root.isAttachedToWindow && setting.ready) {
-                        val url = prefetchQueue.pollFirst() ?: break
-                        if (url in unavailable) continue
-                        // Match the 114x180dp CENTER_CROP actor ImageViews.
-                        PosterWipe.prefetch(root.context, url,
-                            (114 * density).toInt(), (180 * density).toInt())
-                    }
-                })
+                if (poster !in unavailable && prefetched.add(poster)) {
+                    prefetchJobs.add(scope.launch {
+                        if (root.isAttachedToWindow && setting.ready && poster !in unavailable) {
+                            // Match the 114x180dp CENTER_CROP actor ImageViews.
+                            PosterWipe.prefetch(root.context, poster,
+                                (114 * density).toInt(), (180 * density).toInt())
+                        }
+                    })
+                }
             }
         }
 

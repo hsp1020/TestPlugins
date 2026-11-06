@@ -64,8 +64,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -381,28 +379,24 @@ internal object ActorInformation {
             val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
             val nativePosterFlights = mutableMapOf<String, Deferred<coil3.Image?>>()
             val nativePrefetched = HashSet<String>()
-            val nativePosterLimiter = Semaphore(12)
-            val nativePreloadLimiter = Semaphore(4)
             fun nativePosterUrl(credit: Credit): String? =
                 credit.poster?.takeIf { it.startsWith("/") }
                     ?.let { "https://image.tmdb.org/t/p/w500$it" }
             fun requestNativePoster(url: String): Deferred<coil3.Image?> =
                 nativePosterFlights[url] ?: nativePosterScope.async(Dispatchers.IO) {
-                    nativePosterLimiter.withPermit {
-                        val started = SystemClock.elapsedRealtime()
-                        val request = ImageRequest.Builder(activity.applicationContext)
-                            .data(url).size(dp(114), dp(180))
-                            .httpHeaders(NetworkHeaders.Builder().apply {
-                                this["User-Agent"] = USER_AGENT
-                            }.build()).build()
-                        val result = SingletonImageLoader.get(activity.applicationContext)
-                            .execute(request) as? SuccessResult
-                        Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
-                            "urlKey=${url.hashCode().toUInt().toString(16)} " +
-                            "source=${result?.dataSource?.name ?: "ERROR"} " +
-                            "elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                        result?.image
-                    }
+                    val started = SystemClock.elapsedRealtime()
+                    val request = ImageRequest.Builder(activity.applicationContext)
+                        .data(url).size(dp(114), dp(180))
+                        .httpHeaders(NetworkHeaders.Builder().apply {
+                            this["User-Agent"] = USER_AGENT
+                        }.build()).build()
+                    val result = SingletonImageLoader.get(activity.applicationContext)
+                        .execute(request) as? SuccessResult
+                    Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
+                        "urlKey=${url.hashCode().toUInt().toString(16)} " +
+                        "source=${result?.dataSource?.name ?: "ERROR"} " +
+                        "elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                    result?.image
                 }.also { flight ->
                     nativePosterFlights[url] = flight
                     flight.invokeOnCompletion {
@@ -415,11 +409,9 @@ internal object ActorInformation {
                 entries.take(end).forEach { credit ->
                     nativePosterUrl(credit)?.let { url ->
                         if (nativePrefetched.add(url)) nativePosterScope.launch {
-                            nativePreloadLimiter.withPermit {
-                                try { requestNativePoster(url).await() }
-                                catch (cancelled: CancellationException) { throw cancelled }
-                                catch (_: Exception) { /* An on-screen card can retry. */ }
-                            }
+                            try { requestNativePoster(url).await() }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { /* An on-screen card can retry. */ }
                         }
                     }
                 }
