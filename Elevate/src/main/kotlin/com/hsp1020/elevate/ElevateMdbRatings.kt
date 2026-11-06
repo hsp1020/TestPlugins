@@ -425,11 +425,40 @@ internal class ElevateMdbRatings(
         var values: List<String>? = null
         var generation = 0
         private var popupBound = false
+        private val nativeRating = root.findViewById<TextView>(com.lagradost.cloudstream3.R.id.result_meta_rating)
+        private var ratingHidden = false
+        private val ratingRefresh = Runnable { syncNativeRating() }
+        private val ratingWatcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                if (active && !values.isNullOrEmpty()) {
+                    nativeRating?.removeCallbacks(ratingRefresh)
+                    nativeRating?.post(ratingRefresh)
+                }
+            }
+        }
+        private fun syncNativeRating() {
+            val rating = nativeRating ?: return
+            if (!values.isNullOrEmpty() && sourceText(view.text ?: "").isNotEmpty()) {
+                ratingHidden = true
+                if (rating.visibility != View.GONE) rating.visibility = View.GONE
+            } else if (ratingHidden) {
+                val native = (model.page.value as? Resource.Success<ResultData>)?.value?.ratingText
+                rating.visibility = when {
+                    native == null -> View.INVISIBLE
+                    native.asString(rating.context).isBlank() -> View.GONE
+                    else -> View.VISIBLE
+                }
+                ratingHidden = false
+            }
+        }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
         override fun afterTextChanged(s: Editable?) { if (!rendering) render() }
         fun start() {
             view.addTextChangedListener(this)
+            nativeRating?.addTextChangedListener(ratingWatcher)
             model.page.observe(fragment.viewLifecycleOwner) { state ->
                 val data = (state as? Resource.Success<ResultData>)?.value ?: return@observe
                 update(data)
@@ -506,11 +535,20 @@ internal class ElevateMdbRatings(
                 finally { rendering = false }
             }
             if (!values.isNullOrEmpty()) bindTvPopup()
+            syncNativeRating()
+            if (!values.isNullOrEmpty()) {
+                nativeRating?.removeCallbacks(ratingRefresh)
+                nativeRating?.post(ratingRefresh)
+            }
         }
         fun stop() {
             active = false
             generation++
             view.removeCallbacks(tvPopup)
+            nativeRating?.removeCallbacks(ratingRefresh)
+            nativeRating?.removeTextChangedListener(ratingWatcher)
+            values = null
+            syncNativeRating()
             view.removeTextChangedListener(this)
             val old = view.text
             if (old?.startsWith('\u2063') == true) view.setText(sourceText(old), TextView.BufferType.SPANNABLE)
