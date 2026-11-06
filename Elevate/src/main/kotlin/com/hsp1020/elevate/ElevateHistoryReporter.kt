@@ -185,7 +185,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private fun approvedRuntime(item: Item, current: Media3Player?): Boolean {
         val actual = current?.duration?.takeIf { it > 0L }
         if (actual != null) {
-            val minimum = item.expectedDurationMs?.let { (it + 1L) / 2L } ?: 60_000L
+            val minimum = item.expectedDurationMs?.let { (it + 1L) / 2L } ?: 300_000L
             val passed = actual >= minimum
             if (active?.key == item.key && current === player)
                 approvedDurationMs = if (passed) actual else 0L
