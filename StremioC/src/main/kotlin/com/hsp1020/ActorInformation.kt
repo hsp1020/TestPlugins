@@ -64,6 +64,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -378,42 +380,67 @@ internal object ActorInformation {
             // Each card retains its own ImageView, focus and custom-poster overlay.
             val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
             val nativePosterFlights = mutableMapOf<String, Deferred<coil3.Image?>>()
+            val nativePrefetched = HashSet<String>()
+            val nativePosterLimiter = Semaphore(12)
+            val nativePreloadLimiter = Semaphore(4)
+            fun nativePosterUrl(credit: Credit): String? =
+                credit.poster?.takeIf { it.startsWith("/") }
+                    ?.let { "https://image.tmdb.org/t/p/w500$it" }
+            fun requestNativePoster(url: String): Deferred<coil3.Image?> =
+                nativePosterFlights[url] ?: nativePosterScope.async(Dispatchers.IO) {
+                    nativePosterLimiter.withPermit {
+                        val started = SystemClock.elapsedRealtime()
+                        val request = ImageRequest.Builder(activity.applicationContext)
+                            .data(url).size(dp(114), dp(180))
+                            .httpHeaders(NetworkHeaders.Builder().apply {
+                                this["User-Agent"] = USER_AGENT
+                            }.build()).build()
+                        val result = SingletonImageLoader.get(activity.applicationContext)
+                            .execute(request) as? SuccessResult
+                        Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
+                            "urlKey=${url.hashCode().toUInt().toString(16)} " +
+                            "source=${result?.dataSource?.name ?: "ERROR"} " +
+                            "elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                        result?.image
+                    }
+                }.also { flight ->
+                    nativePosterFlights[url] = flight
+                    flight.invokeOnCompletion {
+                        nativePosterScope.launch {
+                            if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
+                        }
+                    }
+                }
+            fun prefetchNative(entries: List<Credit>, end: Int) {
+                entries.take(end).forEach { credit ->
+                    nativePosterUrl(credit)?.let { url ->
+                        if (nativePrefetched.add(url)) nativePosterScope.launch {
+                            nativePreloadLimiter.withPermit {
+                                try { requestNativePoster(url).await() }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (_: Exception) { /* An on-screen card can retry. */ }
+                            }
+                        }
+                    }
+                }
+            }
             fun ImageView.loadSharedNativePoster(url: String?) {
                 setImageResource(R.drawable.default_cover)
                 if (url.isNullOrBlank()) return
                 val initial = drawable
                 val existing = nativePosterFlights[url]
-                val flight = existing ?: nativePosterScope.async(Dispatchers.IO) {
-                    val started = SystemClock.elapsedRealtime()
-                    val request = ImageRequest.Builder(activity.applicationContext)
-                        .data(url).size(dp(114), dp(180))
-                        .httpHeaders(NetworkHeaders.Builder().apply {
-                            this["User-Agent"] = USER_AGENT
-                        }.build()).build()
-                    val result = SingletonImageLoader.get(activity.applicationContext)
-                        .execute(request) as? SuccessResult
-                    Log.d("ElevatePoster", "event=NATIVE_RESULT origin=actor " +
-                        "urlKey=${url.hashCode().toUInt().toString(16)} " +
-                        "source=${result?.dataSource?.name ?: "ERROR"} " +
-                        "elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                    result?.image
-                }.also { nativePosterFlights[url] = it }
+                nativePrefetched.add(url)
+                val flight = requestNativePoster(url)
                 Log.d("ElevatePoster", "event=${if (existing == null) "NATIVE_NEW" else "NATIVE_JOIN"} " +
                     "origin=actor urlKey=${url.hashCode().toUInt().toString(16)}")
                 nativePosterScope.launch {
                     try {
                         val decoded = flight.await()
-                        if (decoded == null) {
-                            if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
-                            return@launch
-                        }
-                        // Do not overwrite an already finished custom poster.
-                        if (dialog === windowDialog && drawable === initial)
+                        if (decoded != null && dialog === windowDialog && drawable === initial)
                             setImageDrawable(decoded.asDrawable(resources))
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
-                        if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
                         // Keep the original placeholder on a failed image request.
                     }
                 }
@@ -699,6 +726,7 @@ internal object ActorInformation {
                 biography.text = "Loading biography…"
                 toggle.visibility = View.GONE
                 filmArea.removeAllViews()
+                filmArea.tag = null
                 filmArea.addView(label("Loading credits…"))
                 requestJob = scope.launch {
                     val profile = async(Dispatchers.IO) {
@@ -772,65 +800,102 @@ internal object ActorInformation {
                         val upcoming = all.filter { item -> item.date != null && item.date > today }
                             .sortedBy(Credit::date)
                         if (all.isEmpty()) filmArea.addView(label("No credits available."))
-                        listOf(Triple("Popular", popular, 35), Triple("Latest", latest, 35),
-                            Triple("Upcoming", upcoming, 35)).forEach { (title, entries, limit) ->
+                        val preloadTargets = LinkedHashSet<String>()
+                        val preloadSections = mutableListOf<() -> Unit>()
+                        fun preparePosters(entries: List<Credit>, shown: Int) {
+                            val end = (shown + 32).coerceAtMost(entries.size)
+                            prefetchNative(entries, end)
+                            entries.take(end).forEach { credit ->
+                                preloadTargets.add(
+                                    "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}"
+                                )
+                            }
+                            // Standard TMDB identities; no dependency on Elevate classes.
+                            filmArea.tag = "elevate.actor.prefetch.v1" to preloadTargets.toList()
+                        }
+                        listOf("Popular" to popular, "Latest" to latest,
+                            "Upcoming" to upcoming).forEach { (title, entries) ->
                             if (entries.isNotEmpty()) {
                                 filmArea.addView(label(title, 19f, true))
                                 val strip = HorizontalScrollView(activity)
                                 val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-                                entries.take(limit).forEach { credit ->
-                                    val card = column().apply {
-                                        isClickable = true
-                                        isFocusable = true
-                                        setBackgroundResource(R.drawable.outline_drawable)
-                                        setPadding(dp(5), dp(3), dp(5), dp(8))
-                                        val focusKey = "${title}:${credit.media}:${credit.id}"
-                                        if (isLayout(TV) && focusedCreditKey == focusKey)
-                                            focusedCreditView = this
-                                        setOnClickListener {
-                                            if (isLayout(TV)) {
-                                                focusedCreditKey = focusKey
-                                                focusedCreditView = it
+                                var shown = 0
+                                lateinit var requestMore: () -> Unit
+                                fun appendCredits(count: Int) {
+                                    val target = (shown + count).coerceAtMost(entries.size)
+                                    while (shown < target) {
+                                        val credit = entries[shown++]
+                                        val position = shown
+                                        val card = column().apply {
+                                            isClickable = true
+                                            isFocusable = true
+                                            setBackgroundResource(R.drawable.outline_drawable)
+                                            setPadding(dp(5), dp(3), dp(5), dp(8))
+                                            val focusKey = "${title}:${credit.media}:${credit.id}"
+                                            if (isLayout(TV) && focusedCreditKey == focusKey)
+                                                focusedCreditView = this
+                                            setOnClickListener {
+                                                if (isLayout(TV)) {
+                                                    focusedCreditKey = focusKey
+                                                    focusedCreditView = it
+                                                }
+                                                openCredit(originProvider, credit, it)
                                             }
-                                            openCredit(originProvider, credit, it)
+                                            if (isLayout(TV)) setOnFocusChangeListener { focusedView, focused ->
+                                                if (focused && position >= shown - 3) focusedView.post {
+                                                    if (dialog === windowDialog && focusedView.isAttachedToWindow)
+                                                        requestMore()
+                                                }
+                                            }
                                         }
-                                    }
 
-                                    val posterHolder = CardView(activity).apply {
-                                        radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
-                                        cardElevation = 0f
-                                        setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
-                                        isDuplicateParentStateEnabled = true
-                                        addView(ImageView(activity).apply {
-                                            scaleType = ImageView.ScaleType.CENTER_CROP
+                                        val posterHolder = CardView(activity).apply {
+                                            radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
+                                            cardElevation = 0f
+                                            setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
                                             isDuplicateParentStateEnabled = true
-                                            foreground = themedPressedForeground(this)
-                                            val url = credit.poster?.takeIf { it.startsWith("/") }
-                                                ?.let { "https://image.tmdb.org/t/p/w500$it" }
-                                            // Standard TMDB artwork identity, independent of any plugin settings.
-                                            tag = "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}" to url
-                                            loadSharedNativePoster(url)
-                                        }, ViewGroup.LayoutParams(-1, -1))
-                                    }
+                                            addView(ImageView(activity).apply {
+                                                scaleType = ImageView.ScaleType.CENTER_CROP
+                                                isDuplicateParentStateEnabled = true
+                                                foreground = themedPressedForeground(this)
+                                                val url = nativePosterUrl(credit)
+                                                // Standard TMDB artwork identity, independent of any plugin settings.
+                                                tag = "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}" to url
+                                                loadSharedNativePoster(url)
+                                            }, ViewGroup.LayoutParams(-1, -1))
+                                        }
 
-                                    val posterWidth = dp(114)
-                                    card.addView(posterHolder, LinearLayout.LayoutParams(posterWidth, dp(180)))
-                                    card.addView(label(credit.title, 13f).apply {
-                                        maxLines = 2
-                                        setPadding(0, dp(6), 0, 0)
-                                    }, LinearLayout.LayoutParams(posterWidth, -2))
-                                    card.addView(label((credit.date?.take(4) ?: "") +
-                                        (if (credit.media == "movie") " · Movie" else " · Series"), 11f).apply {
-                                        setPadding(0, dp(6), 0, 0)
-                                    }, LinearLayout.LayoutParams(posterWidth, -2))
-                                    row.addView(card, LinearLayout.LayoutParams(dp(124), -2))
+                                        val posterWidth = dp(114)
+                                        card.addView(posterHolder, LinearLayout.LayoutParams(posterWidth, dp(180)))
+                                        card.addView(label(credit.title, 13f).apply {
+                                            maxLines = 2
+                                            setPadding(0, dp(6), 0, 0)
+                                        }, LinearLayout.LayoutParams(posterWidth, -2))
+                                        card.addView(label((credit.date?.take(4) ?: "") +
+                                            (if (credit.media == "movie") " · Movie" else " · Series"), 11f).apply {
+                                            setPadding(0, dp(6), 0, 0)
+                                        }, LinearLayout.LayoutParams(posterWidth, -2))
+                                        row.addView(card, LinearLayout.LayoutParams(dp(124), -2))
+                                    }
                                 }
+                                val restoreX = creditScroll[title] ?: 0
+                                appendCredits((restoreX / dp(124) + 12).coerceAtLeast(12))
+                                requestMore = {
+                                    if (dialog === windowDialog && shown < entries.size) {
+                                        appendCredits(12)
+                                        preparePosters(entries, shown)
+                                    }
+                                }
+                                preloadSections.add { preparePosters(entries, shown) }
                                 strip.addView(row)
                                 strip.post { if (dialog === windowDialog) strip.scrollTo(creditScroll[title] ?: 0, 0) }
                                 val stripListener = ViewTreeObserver.OnScrollChangedListener {
                                     if (dialog === windowDialog) {
                                         creditScroll[title] = strip.scrollX
                                         save()
+                                        if (strip.width > 0 && row.width > 0 &&
+                                            strip.scrollX + strip.width >= row.width - dp(124 * 4))
+                                            requestMore()
                                     }
                                 }
                                 strip.viewTreeObserver.addOnScrollChangedListener(stripListener)
@@ -838,6 +903,8 @@ internal object ActorInformation {
                                 filmArea.addView(strip)
                             }
                         }
+                        // Native poster requests for initial cards precede offscreen preloads.
+                        preloadSections.forEach { it() }
                     }.onFailure { error ->
                         showError(filmArea, "Credits unavailable: " +
                             (error.message ?: "Network error")) { begin() }

@@ -456,6 +456,22 @@ internal object PosterWipe {
         if (image.drawable == null) image.setImageResource(R.drawable.default_cover)
     }
 
+    /** Warm the existing Coil cache without attaching or modifying an ImageView. */
+    suspend fun prefetch(context: Context, url: String, width: Int, height: Int): Result {
+        val outcome = try {
+            loadSharedImage(context, url, Size(width, height), Scale.FILL, "actor_prefetch")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return Result(false, error = failure.javaClass.simpleName)
+        }
+        return when (outcome) {
+            is SuccessResult -> Result(true, source = outcome.dataSource.name)
+            is ErrorResult -> Result(false, error = outcome.throwable.javaClass.simpleName)
+            else -> Result(false, error = "no_image")
+        }
+    }
+
     suspend fun load(image: ImageView, url: String, origin: String = "library", valid: () -> Boolean): Result {
         // Match the native ImageView's size/scale to reuse Coil cache entries.
         // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
