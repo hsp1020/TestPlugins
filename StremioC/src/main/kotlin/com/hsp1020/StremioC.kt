@@ -779,11 +779,6 @@ open class StremioC(
         }
     }
 
-    private fun metadataPosterAddonBaseUrl(): String? {
-        val (syncUrl, syncMap, _) = getSyncSettings()
-        return syncUrl.takeIf { it.isNotBlank() && syncMap[mainUrl.cleanBaseUrl().lowercase()] == true }?.cleanBaseUrl()
-    }
-
     fun getTargetApiName(): String {
         val (_, syncMap, _) = getSyncSettings()
         val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
@@ -1619,98 +1614,6 @@ open class StremioC(
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
 
         private const val SEASON_CACHE_TTL = 12 * 60 * 60 * 1000L
-
-        private fun recommendationPosterUrl(
-            source: String?, tmdbId: Int, movie: Boolean, fallback: String, metadataHost: String?
-        ): String? {
-            if (tmdbId <= 0) return null
-            val outer = source?.toHttpUrlOrNull() ?: return null
-            val outerParts = outer.pathSegments
-            val metaProxy = metadataHost != null && outer.host == metadataHost &&
-                outerParts.size == 5 && outerParts[0] == "poster-cache" &&
-                outerParts[1] == "proxy" && outerParts[2] == "poster" &&
-                outerParts[3] in listOf("movie", "series")
-
-            val nested = if (metaProxy) outer.queryParameter("url") else null
-            val url = if (nested != null) nested.toHttpUrlOrNull() ?: return null else outer
-            val parts = url.pathSegments
-            val host = url.host.lowercase()
-            val kind = if (movie) "movie" else "series"
-            val oldId = parts.lastOrNull().orEmpty()
-            val knownId = Regex("tt[0-9]+|tmdb:(?:(?:movie|series|tv):)?[0-9]+|(?:tvdb|kitsu|mal|anilist|anidb):[0-9]+")
-            val rpdbId = Regex("tt[0-9]+|(?:movie|series|tv)-[0-9]+")
-            val builder = url.newBuilder()
-
-            when {
-
-                metaProxy && nested == null && outer.queryParameter("sig") == null &&
-                    !outer.queryParameter("key").isNullOrBlank() && oldId.matches(knownId) -> {
-                    builder.setPathSegment(3, kind).setPathSegment(4, "tmdb:$tmdbId")
-                    builder.setQueryParameter("fallback",
-                        fallback.takeUnless { it == TRANSPARENT_PIXEL }.orEmpty())
-                    return builder.build().toString()
-                }
-                (host in setOf("extendedratings.com", "www.extendedratings.com", "xrdb.elfhosted.com") ||
-                    parts.size == 2 && url.queryParameter("config") != null &&
-                        url.queryParameter("v") != null) &&
-                    parts.size == 2 && parts[0] == "poster" && oldId.matches(knownId) &&
-                    url.queryParameter("sig") == null -> {
-                    builder.setPathSegment(1, "tmdb:$kind:$tmdbId")
-                }
-                host in setOf("api.ratingposterdb.com", "api.top-posters.com",
-                    "openposterdb.com", "api.openposterdb.com", "api.aioratings.com") &&
-                    parts.size == 4 && parts[0].isNotBlank() &&
-                    parts[1] in listOf("imdb", "tmdb", "tvdb") &&
-                    (host == "api.top-posters.com" && parts[2] == "poster" ||
-                        host == "api.aioratings.com" &&
-                            parts[2].matches(Regex("[a-zA-Z0-9_-]{1,64}")) &&
-                            !parts[2].startsWith("backdrop") && !parts[2].startsWith("logo") &&
-                            !parts[2].startsWith("episode") ||
-                        host !in setOf("api.top-posters.com", "api.aioratings.com") &&
-                            (parts[2].startsWith("poster-") || parts[2].startsWith("textless-"))) &&
-                    oldId.endsWith(".jpg") && oldId.removeSuffix(".jpg").matches(rpdbId) &&
-                    url.queryParameter("img") == null && url.queryParameter("sig") == null &&
-                    url.queryParameter("url") == null -> {
-                    val prefix = when {
-                        movie -> "movie"
-                        host == "api.aioratings.com" && !oldId.startsWith("series-") -> "tv"
-                        else -> "series"
-                    }
-                    builder.setPathSegment(1, "tmdb")
-                        .setPathSegment(3, "$prefix-$tmdbId.jpg")
-                    if (url.queryParameter("fallback_url") != null) {
-                        if (fallback == TRANSPARENT_PIXEL)
-                            builder.removeAllQueryParameters("fallback_url")
-                        else builder.setQueryParameter("fallback_url", fallback)
-                    } else if (host == "api.top-posters.com" && fallback != TRANSPARENT_PIXEL) {
-                        builder.setQueryParameter("fallback_url", fallback)
-                    }
-                }
-                host in setOf("easyratingsdb.com", "www.easyratingsdb.com") &&
-                    parts.size in 3..4 && parts[0].startsWith("Tk-") &&
-                    parts[1] == "poster" && oldId.endsWith(".jpg") &&
-                    oldId.removeSuffix(".jpg").matches(knownId) &&
-                    (parts.size == 3 || parts[2] in listOf("movie", "series")) -> {
-                    if (parts.size == 4) {
-                        builder.setPathSegment(2, kind).setPathSegment(3, "tmdb:$tmdbId.jpg")
-                    } else {
-                        builder.setPathSegment(2, kind).addPathSegment("tmdb:$tmdbId.jpg")
-                    }
-                }
-                else -> return null
-            }
-            return builder.build().toString()
-        }
-
-        internal fun actorPosterUrl(
-            source: String?, tmdbId: Int, movie: Boolean,
-            posterPath: String?, metadataHost: String?
-        ): String? {
-            val fallback = posterPath?.takeIf { it.startsWith("/") }
-                ?.let { "https://image.tmdb.org/t/p/w500$it" } ?: TRANSPARENT_PIXEL
-            return recommendationPosterUrl(source, tmdbId, movie, fallback, metadataHost)
-                ?: fallback.takeUnless { it == TRANSPARENT_PIXEL }
-        }
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
@@ -4485,7 +4388,6 @@ open class StremioC(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
             preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
-            recommendationPoster: String? = null,
             recommendationMalId: Int? = null
         ): FetchedTmdbData {
             
@@ -4538,7 +4440,6 @@ open class StremioC(
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
             val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
-            val metadataHost = provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
 
             coroutineScope {
                 val shouldFocusEpisodes = stremioType == "series" &&
@@ -4684,12 +4585,7 @@ open class StremioC(
                         .thenBy { it.tmdbRank ?: it.simklRank ?: Int.MAX_VALUE }
                 ).take(50)
                 fetchedRecommendations = ordered.map { rec ->
-                    val fallback = rec.poster ?: rec.fallbackPoster ?: TRANSPARENT_PIXEL
-                    val poster = rec.tmdbId?.let {
-                        StremioC.recommendationPosterUrl(
-                            recommendationPoster, it, rec.type == "movie", fallback, metadataHost
-                        )
-                    } ?: fallback
+                    val poster = rec.poster ?: rec.fallbackPoster ?: TRANSPARENT_PIXEL
                     val thinData = LoadData(id = rec.id, type = rec.type, addonUrl = provider.mainUrl)
                     provider.newMovieSearchResponse(
                         rec.name, thinData.toJson(),
@@ -4910,8 +4806,6 @@ open class StremioC(
         ): LoadResponse = coroutineScope {
             val syncedEntry = run { addonDeferred?.await() }
             val detailedEntry = syncedEntry ?: this@CatalogEntry
-            val recommendationPoster = if (provider.metadataPosterAddonBaseUrl() != null &&
-                (addonDeferred == null || syncedEntry != null)) detailedEntry.poster else null
             val originalAnimeId = requestedAnimeId
                 ?: this@CatalogEntry.id?.takeIf { provider.isLibraryAnimeId(it) }
 
@@ -5011,7 +4905,6 @@ open class StremioC(
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                            recommendationPoster,
                             fetchedMalId ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
                                 ?.substringAfter(':')?.toIntOrNull())
                     }
@@ -5208,8 +5101,7 @@ open class StremioC(
                 } }
                 if (!isAnimeMedia) {
                     ActorInformation.register(
-                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
-                        recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
                 return@coroutineScope run { response.apply { attachMappedIds() } }
@@ -5267,8 +5159,7 @@ open class StremioC(
                 } }
                 if (!isAnimeMedia) {
                     ActorInformation.register(
-                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
-                        recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
                 return@coroutineScope run { response.apply { attachMappedIds() } }

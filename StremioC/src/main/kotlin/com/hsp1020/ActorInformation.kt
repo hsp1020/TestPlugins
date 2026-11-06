@@ -73,9 +73,7 @@ internal object ActorInformation {
         val providerUrl: String,
         val detailUrl: String,
         val actors: List<ActorData>,
-        val people: List<ActorPersonRef>,
-        val customPosterSource: String?,
-        val metadataHost: String?
+        val people: List<ActorPersonRef>
     )
 
     private val snapshots = object : LinkedHashMap<String, Snapshot>(100, 0.75f, true) {
@@ -86,12 +84,11 @@ internal object ActorInformation {
     @Synchronized
     fun register(
         provider: StremioC, url: String, actors: List<ActorData>?,
-        people: List<ActorPersonRef>, customPosterSource: String?, metadataHost: String?
+        people: List<ActorPersonRef>
     ) {
         if (actors.isNullOrEmpty() || actors.size != people.size) return
         snapshots[key(provider.mainUrl, url)] =
-            Snapshot(stremioManifestUrl(provider.mainUrl), url, actors, people,
-                customPosterSource, metadataHost)
+            Snapshot(stremioManifestUrl(provider.mainUrl), url, actors, people)
     }
 
     @Synchronized
@@ -127,15 +124,6 @@ internal object ActorInformation {
     @Synchronized
     fun hasTmdbPerson(url: String?, repo: StremioC?, page: ResultData, position: Int, item: ActorData): Boolean =
         resolve(url, repo, page, position, item) != null
-
-    @Synchronized
-    private fun posterFor(source: String?, detailUrl: String, credit: Credit): String? {
-        val snapshot = source?.let { snapshots[key(it, detailUrl)] }
-        return StremioC.actorPosterUrl(
-            snapshot?.customPosterSource, credit.id, credit.media == "movie",
-            credit.poster, snapshot?.metadataHost
-        )
-    }
 
     private data class CacheEntry(val bytes: ByteArray, val time: Long)
     private val cache = LinkedHashMap<String, CacheEntry>(50, 0.75f, true)
@@ -763,7 +751,10 @@ internal object ActorInformation {
                                             scaleType = ImageView.ScaleType.CENTER_CROP
                                             isDuplicateParentStateEnabled = true
                                             foreground = themedPressedForeground(this)
-                                            val url = posterFor(originProvider, origin, credit)
+                                            val url = credit.poster?.takeIf { it.startsWith("/") }
+                                                ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                                            // Standard TMDB artwork identity, independent of any plugin settings.
+                                            tag = "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}" to url
                                             if (url != null) loadImage(url)
                                             else loadImage(R.drawable.default_cover)
                                         }, ViewGroup.LayoutParams(-1, -1))
