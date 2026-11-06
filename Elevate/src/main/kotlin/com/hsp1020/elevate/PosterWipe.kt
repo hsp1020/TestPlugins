@@ -8,8 +8,10 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.content.Context
 import android.widget.ImageView
 import coil3.SingletonImageLoader
+import coil3.request.ImageResult
 import coil3.asDrawable
 import coil3.dispose
 import coil3.network.NetworkHeaders
@@ -20,8 +22,12 @@ import coil3.request.SuccessResult
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.USER_AGENT
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.util.WeakHashMap
 import kotlin.math.max
 
@@ -31,6 +37,34 @@ internal object PosterWipe {
     private data class Running(val animator: ValueAnimator, val overlay: WipeDrawable)
     private val active = WeakHashMap<ImageView, Running>()
     private const val DURATION_MS = 240L
+    private data class RequestKey(val url: String, val width: Int, val height: Int)
+    private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val imageFlights = HashMap<RequestKey, Deferred<ImageResult>>()
+
+    // Share only active image requests, regardless of the selected poster service.
+    // Coil retains completed images in its existing memory/disk caches.
+    private suspend fun loadSharedImage(context: Context, url: String, width: Int, height: Int): ImageResult {
+        val key = RequestKey(url, width, height)
+        val flight = synchronized(imageFlights) {
+            imageFlights[key] ?: imageScope.async(start = CoroutineStart.LAZY) {
+                val request = ImageRequest.Builder(context.applicationContext).data(url)
+                    .size(width, height)
+                    .httpHeaders(NetworkHeaders.Builder().apply {
+                        this["User-Agent"] = USER_AGENT
+                    }.build()).build()
+                SingletonImageLoader.get(context.applicationContext).execute(request)
+            }.also { task ->
+                imageFlights[key] = task
+                task.invokeOnCompletion {
+                    synchronized(imageFlights) {
+                        if (imageFlights[key] === task) imageFlights.remove(key)
+                    }
+                }
+            }
+        }
+        flight.start()
+        return flight.await()
+    }
 
     private class WipeDrawable(private val image: Drawable) : Drawable() {
         var progress = 0f
@@ -76,15 +110,9 @@ internal object PosterWipe {
 
     suspend fun load(image: ImageView, url: String, valid: () -> Boolean): Result {
         // This request has no View target: it cannot dispose or clear the native cover.
-        val context = image.context
-        val request = ImageRequest.Builder(context).data(url)
-            .size(image.width.coerceAtLeast(1), image.height.coerceAtLeast(1))
-            .httpHeaders(NetworkHeaders.Builder().apply { this["User-Agent"] = USER_AGENT }.build())
-            .build()
         val outcome = try {
-            withContext(Dispatchers.IO) {
-                SingletonImageLoader.get(context).execute(request)
-            }
+            loadSharedImage(image.context, url,
+                image.width.coerceAtLeast(1), image.height.coerceAtLeast(1))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

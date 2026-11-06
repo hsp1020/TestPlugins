@@ -32,6 +32,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.navigation.fragment.findNavController
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.USER_AGENT
+import coil3.SingletonImageLoader
+import coil3.asDrawable
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
+import coil3.request.SuccessResult
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.mvvm.Resource
@@ -365,6 +372,43 @@ internal object ActorInformation {
 
             val activity = fragment.activity ?: return
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
+            // Decode a TMDB credit poster once for every Popular/Latest occurrence.
+            // Each card retains its own ImageView, focus and custom-poster overlay.
+            val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+            val nativePosterFlights = mutableMapOf<String, Deferred<coil3.Image?>>()
+            fun ImageView.loadSharedNativePoster(url: String?) {
+                setImageResource(R.drawable.default_cover)
+                if (url.isNullOrBlank()) return
+                val initial = drawable
+                val flight = nativePosterFlights.getOrPut(url) {
+                    nativePosterScope.async(Dispatchers.IO) {
+                        val request = ImageRequest.Builder(activity.applicationContext)
+                            .data(url).size(dp(114), dp(180))
+                            .httpHeaders(NetworkHeaders.Builder().apply {
+                                this["User-Agent"] = USER_AGENT
+                            }.build()).build()
+                        (SingletonImageLoader.get(activity.applicationContext)
+                            .execute(request) as? SuccessResult)?.image
+                    }
+                }
+                nativePosterScope.launch {
+                    try {
+                        val decoded = flight.await()
+                        if (decoded == null) {
+                            if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
+                            return@launch
+                        }
+                        // Do not overwrite an already finished custom poster.
+                        if (dialog === windowDialog && drawable === initial)
+                            setImageDrawable(decoded.asDrawable(resources))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        if (nativePosterFlights[url] === flight) nativePosterFlights.remove(url)
+                        // Keep the original placeholder on a failed image request.
+                    }
+                }
+            }
             val scrollListeners = mutableListOf<Pair<View, ViewTreeObserver.OnScrollChangedListener>>()
             var focusedCreditView: View? = null
             val navigation = (activity.supportFragmentManager
@@ -578,6 +622,7 @@ internal object ActorInformation {
                     view.viewTreeObserver.takeIf { it.isAlive }?.removeOnScrollChangedListener(listener)
                 }
                 scrollListeners.clear()
+                nativePosterScope.cancel()
                 handoff.close()
                 if (detailHandoff === handoff) detailHandoff = null
                 requestJob?.cancel()
@@ -755,8 +800,7 @@ internal object ActorInformation {
                                                 ?.let { "https://image.tmdb.org/t/p/w500$it" }
                                             // Standard TMDB artwork identity, independent of any plugin settings.
                                             tag = "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}" to url
-                                            if (url != null) loadImage(url)
-                                            else loadImage(R.drawable.default_cover)
+                                            loadSharedNativePoster(url)
                                         }, ViewGroup.LayoutParams(-1, -1))
                                     }
 
