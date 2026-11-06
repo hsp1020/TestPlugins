@@ -478,17 +478,20 @@ class SettingsBottomFragment(
             field.setOnKeyListener { _, key, event -> field.activateTvInput(key, event) }
         }
         val slot = field.parent as? FrameLayout ?: return
+        val compactApiKey = field.id == getCachedResId("etTmdbApiKey", "id")
         val tagKey = getCachedResId("outline", "drawable")
         if (slot.getTag(tagKey) == true) return
         slot.setTag(tagKey, true)
         fun update() {
-            val visual = maxOf(dp(35), kotlin.math.ceil(
+            val visual = maxOf(dp(if (compactApiKey) 24 else 35), kotlin.math.ceil(
                 (field.paint.fontMetrics.bottom - field.paint.fontMetrics.top).toDouble()
-            ).toInt() + field.compoundPaddingTop + field.compoundPaddingBottom + dp(4))
+            ).toInt() + field.compoundPaddingTop + field.compoundPaddingBottom +
+                dp(if (compactApiKey) 2 else 4))
             if (field.layoutParams.height != visual) field.layoutParams = field.layoutParams.apply { height = visual }
-            slot.minimumHeight = maxOf(dp(48), visual)
-            if (slot.layoutParams.height in 1 until slot.minimumHeight)
-                slot.layoutParams = slot.layoutParams.apply { height = slot.minimumHeight }
+            slot.minimumHeight = if (compactApiKey) visual else maxOf(dp(48), visual)
+            if (compactApiKey || slot.layoutParams.height in 1 until slot.minimumHeight)
+                if (slot.layoutParams.height != slot.minimumHeight)
+                    slot.layoutParams = slot.layoutParams.apply { height = slot.minimumHeight }
             slot.touchDelegate = TouchDelegate(Rect(0, 0, slot.width, slot.height), field)
         }
         val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> update() }
