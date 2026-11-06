@@ -1253,6 +1253,7 @@ class SettingsBottomFragment(
         view.background = getDarkThemeBg()
         val settingsBody = view.findView<View>("settingsBody")
         val settingsToggle = view.findView<TextView>("settingsToggle")
+        val settingsHeader = view.findView<LinearLayout>("settingsHeader")
         val hub = view.findView<LinearLayout>("pageHub")
         val viewport = view.findView<NestedScrollView>("settingsViewport")
         val mainScroll = if (isLayout(TV)) viewport else nativeMainDialogContent(view, viewport)
@@ -1679,6 +1680,9 @@ class SettingsBottomFragment(
             settingsToggle.text = titles[next.ordinal]
             settingsToggle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
                 if (next == SettingsPage.METADATA) 18f else 16f)
+            val metadataPage = next == SettingsPage.METADATA
+            settingsHeader.minimumHeight = if (metadataPage) 0 else dp(48)
+            settingsToggle.minimumHeight = if (metadataPage) 0 else dp(48)
             back?.text = "Close"
             view.optional("saveAction")?.visibility = if (next == SettingsPage.BACKUP) View.GONE else View.VISIBLE
             updateSummaries()
