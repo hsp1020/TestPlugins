@@ -92,6 +92,7 @@ class ElevatePlugin : Plugin() {
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
+    private var recommendationPosters: RecommendationPosterHook? = null
     private var thumbnailRatios: OriginalThumbnailRatioHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
@@ -255,7 +256,11 @@ class ElevatePlugin : Plugin() {
         }
         if (enabled(ElevateFeature.LIBRARY_POSTERS)) {
             if (libraryPosters == null) libraryPosters = LibraryPosterHook(application).also { it.start() }
+            if (recommendationPosters == null)
+                recommendationPosters = RecommendationPosterHook(application).also { it.start() }
         } else {
+            recommendationPosters?.stop()
+            recommendationPosters = null
             libraryPosters?.stop()
             libraryPosters = null
         }
@@ -417,6 +422,8 @@ class ElevatePlugin : Plugin() {
         subtitleSyncRepair = null
         homeHero?.stop()
         homeHero = null
+        recommendationPosters?.stop()
+        recommendationPosters = null
         libraryPosters?.stop()
         libraryPosters = null
         thumbnailRatios?.stop()
