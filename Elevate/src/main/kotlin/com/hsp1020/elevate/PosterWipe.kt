@@ -20,6 +20,7 @@ import coil3.network.NetworkResponse
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.CachePolicy
 import okhttp3.Call
+import okhttp3.Dispatcher
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -47,6 +48,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.WeakHashMap
 import kotlin.math.max
 
@@ -66,6 +69,8 @@ internal object PosterWipe {
     private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val urlGates = HashMap<String, UrlGate>()
     private val httpAttempts = AtomicLong()
+    // Offscreen actor cards must not saturate XRDB before visible cards.
+    private val actorBackgroundLimiter = Semaphore(8)
 
     // A cache probe can never trigger an HTTP call. Only use it when another
     // size for the same URL is already filling the cache.
@@ -80,7 +85,12 @@ internal object PosterWipe {
     // Preserve Coil's default OkHttp fetching and its shared image/disk caches,
     // but log *actual request headers sent* rather than Coil NETWORK results.
     private val measuredFetcher by lazy {
-        val client = OkHttpClient.Builder().eventListenerFactory { call ->
+        val dispatcher = Dispatcher().apply {
+            // Increase per-host concurrency from OkHttp's default of five.
+            // Keep the global dispatcher limit unchanged.
+            maxRequestsPerHost = 12
+        }
+        val client = OkHttpClient.Builder().dispatcher(dispatcher).eventListenerFactory { call ->
             val key = call.request().url.toString().hashCode().toUInt().toString(16)
             object : EventListener() {
                 private var started = 0L
@@ -88,13 +98,23 @@ internal object PosterWipe {
                 private var status = 0
                 private var bodyBytes = -1L
                 private var lastId = 0L
+                private var enqueuedAt = 0L
+
+                override fun callStart(call: Call) {
+                    enqueuedAt = SystemClock.elapsedRealtime()
+                    Log.d("ElevatePoster",
+                        "event=HTTP_CALL_START urlKey=$key queued=${dispatcher.queuedCallsCount()} " +
+                            "running=${dispatcher.runningCallsCount()}")
+                }
 
                 override fun requestHeadersStart(call: Call) {
                     lastId = httpAttempts.incrementAndGet()
                     attempts++
                     if (started == 0L) started = SystemClock.elapsedRealtime()
                     Log.d("ElevatePoster",
-                        "event=HTTP_START urlKey=$key id=$lastId attempt=$attempts")
+                        "event=HTTP_START urlKey=$key id=$lastId attempt=$attempts " +
+                            "preHeaderMs=${SystemClock.elapsedRealtime() - enqueuedAt} " +
+                            "queued=${dispatcher.queuedCallsCount()} running=${dispatcher.runningCallsCount()}")
                 }
 
                 override fun responseHeadersEnd(call: Call, response: Response) {
@@ -277,7 +297,16 @@ internal object PosterWipe {
             }
             if (!valid() || !image.isAttachedToWindow)
                 return Result(false, error = "stale")
-            loadSharedImage(image.context, url, size, scale, origin)
+            // Actor dialogs eagerly create many credit cards. Let visible cards
+            // use all available slots while throttling background credits.
+            if (origin == "actor" && !image.getGlobalVisibleRect(Rect())) {
+                trace(url, "IMAGE_BACKGROUND", "origin=$origin size=$size")
+                actorBackgroundLimiter.withPermit {
+                    loadSharedImage(image.context, url, size, scale, origin)
+                }
+            } else {
+                loadSharedImage(image.context, url, size, scale, origin)
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

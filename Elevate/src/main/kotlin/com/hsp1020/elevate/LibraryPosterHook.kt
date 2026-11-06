@@ -71,7 +71,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val semaphore = Semaphore(3)
+    private val semaphore = Semaphore(10)
     private val mapCache = ConcurrentHashMap<String, CacheEntry>()
     private val unavailable = mutableSetOf<String>()
     private val bound = WeakHashMap<ImageView, Binding>()
