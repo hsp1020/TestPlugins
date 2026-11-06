@@ -28,6 +28,8 @@ android {
 }
 
 dependencies {
+    compileOnly("io.coil-kt.coil3:coil:3.3.0")
+    compileOnly("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
     testImplementation("junit:junit:4.13.2")
     implementation("com.google.android.material:material:1.13.0")
     compileOnly("androidx.navigation:navigation-common:2.9.8")
