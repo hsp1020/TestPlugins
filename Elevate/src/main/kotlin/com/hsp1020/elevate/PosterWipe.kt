@@ -32,6 +32,7 @@ import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicLong
 import coil3.request.ImageResult
 import coil3.asDrawable
@@ -74,6 +75,24 @@ internal object PosterWipe {
     private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val urlGates = HashMap<String, UrlGate>()
     private val httpAttempts = AtomicLong()
+    // Header-response waits are tracked independently of the OkHttp dispatcher
+    // to reveal per-host and per-connection (HTTP/2) contention.
+    private val headerWaitLock = Any()
+    private val hostHeaderWaits = HashMap<String, Int>()
+    private val connectionHeaderWaits = IdentityHashMap<Connection, Int>()
+
+    private fun changeHeaderWaits(host: String, connection: Connection?, delta: Int): Pair<Int, Int> =
+        synchronized(headerWaitLock) {
+            val hostCount = ((hostHeaderWaits[host] ?: 0) + delta).coerceAtLeast(0)
+            if (hostCount == 0) hostHeaderWaits.remove(host) else hostHeaderWaits[host] = hostCount
+            val connectionCount = if (connection == null) 0 else {
+                val count = ((connectionHeaderWaits[connection] ?: 0) + delta).coerceAtLeast(0)
+                if (count == 0) connectionHeaderWaits.remove(connection)
+                else connectionHeaderWaits[connection] = count
+                count
+            }
+            hostCount to connectionCount
+        }
 
     // A cache probe can never trigger an HTTP call. Only use it when another
     // size for the same URL is already filling the cache.
@@ -91,10 +110,12 @@ internal object PosterWipe {
         val dispatcher = Dispatcher().apply {
             // Increase per-host concurrency from OkHttp's default of five.
             // Keep the global dispatcher limit unchanged.
-            maxRequestsPerHost = 24
+            maxRequestsPerHost = 32
         }
         val client = OkHttpClient.Builder().dispatcher(dispatcher).eventListenerFactory { call ->
             val key = call.request().url.toString().hashCode().toUInt().toString(16)
+            val host = call.request().url.host
+            val hostKey = host.hashCode().toUInt().toString(16)
             object : EventListener() {
                 private var started = 0L
                 private var attempts = 0
@@ -116,6 +137,26 @@ internal object PosterWipe {
                 private var responseStartedAt = 0L
                 private var responseBodyStartedAt = 0L
                 private var responseBodyEndedAt = 0L
+                private var connection: Connection? = null
+                private var waitingConnection: Connection? = null
+                private var waitingForHeaders = false
+                private var hostWaitsAtSend = 0
+                private var connectionWaitsAtSend = 0
+                private var hostWaitsAtReceive = 0
+                private var connectionWaitsAtReceive = 0
+
+                private fun waitingConnectionKey(): String =
+                    connection?.let { System.identityHashCode(it).toUInt().toString(16) } ?: "-"
+
+                private fun finishHeaderWait() {
+                    if (!waitingForHeaders) return
+                    waitingForHeaders = false
+                    val (hostCount, connectionCount) =
+                        changeHeaderWaits(host, waitingConnection, -1)
+                    hostWaitsAtReceive = hostCount
+                    connectionWaitsAtReceive = connectionCount
+                    waitingConnection = null
+                }
 
                 private fun now() = SystemClock.elapsedRealtime()
                 private fun elapsed(from: Long, to: Long): Long =
@@ -190,7 +231,12 @@ internal object PosterWipe {
 
                 override fun connectionAcquired(call: Call, connection: Connection) {
                     markIo()
+                    this.connection = connection
                     connections++
+                }
+
+                override fun connectionReleased(call: Call, connection: Connection) {
+                    if (this.connection === connection) this.connection = null
                 }
 
                 override fun requestHeadersStart(call: Call) {
@@ -206,16 +252,40 @@ internal object PosterWipe {
 
                 override fun requestHeadersEnd(call: Call, request: Request) {
                     headersEndedAt = now()
+                    waitingConnection = connection
+                    val (hostCount, connectionCount) = changeHeaderWaits(host, waitingConnection, 1)
+                    hostWaitsAtSend = hostCount
+                    connectionWaitsAtSend = connectionCount
+                    waitingForHeaders = true
                 }
 
                 override fun responseHeadersStart(call: Call) {
                     responseStartedAt = now()
+                    finishHeaderWait()
                 }
 
                 override fun responseHeadersEnd(call: Call, response: Response) {
                     status = response.code
                     Log.d("ElevatePoster",
                         "event=HTTP_RESPONSE urlKey=$key id=$lastId status=$status")
+                    val waitMs = elapsed(headersEndedAt, responseStartedAt)
+                    if (waitMs >= 1_500L) {
+                        // Server-Timing, when present, distinguishes reported backend
+                        // work from network/CDN latency; absent headers prove neither.
+                        val timingHeader = response.header("Server-Timing")
+                            ?.take(96)?.replace(' ', '_') ?: "-"
+                        val cacheHeader = (response.header("CF-Cache-Status")
+                            ?: response.header("X-Cache") ?: "-").take(48).replace(' ', '_')
+                        Log.d("ElevatePoster",
+                            "event=HTTP_SLOW_HEADER urlKey=$key hostKey=$hostKey id=$lastId " +
+                                "waitMs=$waitMs status=$status protocol=${response.protocol} " +
+                                "connKey=${waitingConnectionKey()} reused=${connectCount == 0} " +
+                                "hostWaitsSend=$hostWaitsAtSend connWaitsSend=$connectionWaitsAtSend " +
+                                "hostWaitsRemain=$hostWaitsAtReceive connWaitsRemain=$connectionWaitsAtReceive " +
+                                "running=${dispatcher.runningCallsCount()} queued=${dispatcher.queuedCallsCount()} " +
+                                "cdnCache=$cacheHeader age=${response.header("Age") ?: "-"} " +
+                                "serverTiming=$timingHeader")
+                    }
                 }
 
                 override fun responseBodyStart(call: Call) {
@@ -228,6 +298,7 @@ internal object PosterWipe {
                 }
 
                 override fun callEnd(call: Call) {
+                    finishHeaderWait()
                     Log.d("ElevatePoster",
                         "event=HTTP_END urlKey=$key id=$lastId status=$status " +
                             "attempts=$attempts bytes=$bodyBytes " +
@@ -236,6 +307,7 @@ internal object PosterWipe {
                 }
 
                 override fun callFailed(call: Call, ioe: IOException) {
+                    finishHeaderWait()
                     Log.d("ElevatePoster",
                         "event=HTTP_FAIL urlKey=$key id=$lastId attempts=$attempts " +
                             "reason=${ioe.javaClass.simpleName}")
