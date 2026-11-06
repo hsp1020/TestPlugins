@@ -1131,6 +1131,7 @@ internal class ElevatePlayerPanel(
                     maxWidth = dp(164)
                 }, LinearLayout.LayoutParams(-2, -2))
                 minimumHeight = dp(36)
+                setPadding(dp(10), 0, dp(10), 0)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
                 enableTvFocus()
