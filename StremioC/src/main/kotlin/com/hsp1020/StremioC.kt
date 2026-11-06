@@ -5278,21 +5278,15 @@ open class StremioC(
             val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() }
-            // AIOMetadata's logo art proxy carries the resolved Logo URL Pattern in
-            // its "url" parameter. Ordinary AIOMetadata logos must not outrank TMDB.
-            val metadataHosts = listOfNotNull(
-                provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host,
-                provider.mainUrl.toHttpUrlOrNull()?.host
-            )
-            val customLogo = detailedEntry.logo?.takeIf { logo ->
-                val parsed = logo.toHttpUrlOrNull()
-                parsed != null && parsed.host in metadataHosts &&
-                    parsed.pathSegments.size == 5 &&
-                    parsed.pathSegments.take(3) == listOf("poster-cache", "proxy", "logo") &&
-                    parsed.pathSegments[3] in listOf("movie", "series") &&
-                    !parsed.queryParameter("url").isNullOrBlank()
+            // AIOMetadata resolves Logo URL Pattern on the server and returns the final
+            // meta.logo, with or without its image proxy. No URL rewriting is needed
+            // for the current title (unlike recommendation posters).
+            val metadataLogo = detailedEntry.logo?.takeIf { logo ->
+                logo.isNotBlank() && logo.toHttpUrlOrNull() != null &&
+                    provider.metadataPosterAddonBaseUrl() != null &&
+                    (addonDeferred == null || syncedEntry != null)
             }
-            val finalLogo = customLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
+            val finalLogo = metadataLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
 
             // Keep TMDB's preferred-language/English selection for the title
             // fallback even when a custom AIOMetadata logo is displayed.
