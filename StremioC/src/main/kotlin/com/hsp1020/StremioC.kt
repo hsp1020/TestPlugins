@@ -134,13 +134,6 @@ private fun canonicalDetailType(type: String?): String? = when (type?.lowercase(
     else -> type.lowercase()
 }
 
-private fun mdbCredentialFingerprint(): String {
-    val key = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("mdblist_api_key", "").orEmpty()
-    return key.toUniqueKey()
-}
-
 internal data class StremioManifestCachePolicy(val ttlMs: Long, val noStore: Boolean)
 
 internal fun stremioManifestCachePolicy(
@@ -172,27 +165,6 @@ internal fun stremioManifestCachePolicy(
     return StremioManifestCachePolicy(ttl, false)
 }
 
-internal object StremioCMdbUiBridge {
-    private val urls = Collections.synchronizedMap(object : java.util.LinkedHashMap<String, String>(256, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>) = size > 2000
-    })
-    private val main = android.os.Handler(android.os.Looper.getMainLooper())
-    @Volatile private var listener: ((String) -> Unit)? = null
-
-    fun bind(cacheKey: String, candidates: Iterable<String?>) {
-        candidates.forEach { url ->
-            if (!url.isNullOrBlank()) urls[url] = cacheKey
-        }
-    }
-
-    fun keyFor(url: String?): String? = url?.let { urls[it] }
-    fun listen(callback: ((String) -> Unit)?) { listener = callback }
-
-    fun publish(cacheKey: String) {
-        main.post { listener?.invoke(cacheKey) }
-    }
-}
-
 internal fun <T> stremioCacheMemoryRead(
     cached: Pair<T, Long>?, ttlMs: Long
 ): Pair<T, Long>? {
@@ -212,7 +184,7 @@ private object MetadataDiskCache {
     private const val MAX_RAW_BYTES = 2 * 1024 * 1024
     private const val ANIME_EMPTY_TTL_MS = 15L * 60 * 1000
     private val entryLimits = mapOf("detail" to 700, "season" to 300, "find" to 5000,
-        "anime" to 5000, "missing_anime" to 1000, "mdb" to 1000, "meta" to 200)
+        "anime" to 5000, "missing_anime" to 1000, "meta" to 200)
     private val lock = Any()
     private var quotaChecked = false
     private var cleanedOldTemps = false
@@ -1643,18 +1615,9 @@ open class StremioC(
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
         private val animeMappingCache = lruCacheMap<String, Pair<AnimeSeasonMapping, Long>>(5000)
         private val animeNoMappingCache = lruCacheMap<String, Long>(1000)
-        private val mdbRatingsCache = lruCacheMap<String, Pair<List<String>, Long>>(1000)
-        private val mdbFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private val mdbFetchSemaphore = Semaphore(5)
-        private val mdbInflight = mutableMapOf<MdbTarget, Deferred<SpeculativeMdbResult?>>()
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(2000)
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
 
-        internal fun mdbRatingsForUi(cacheKey: String): List<String>? {
-            val cached = mdbRatingsCache[cacheKey] ?: return null
-            val age = System.currentTimeMillis() - cached.second
-            return cached.first.takeIf { age >= 0L && age < METADATA_CACHE_TTL && it.isNotEmpty() }
-        }
         private const val SEASON_CACHE_TTL = 12 * 60 * 60 * 1000L
 
         private fun recommendationPosterUrl(
@@ -1933,7 +1896,7 @@ open class StremioC(
 
         fun isIntegrationEnabled(prefKey: String, default: Boolean = true): Boolean {
             val now = System.currentTimeMillis()
-            val cached = if (prefKey == "mdblist_enabled") null else settingsCache[prefKey]
+            val cached = settingsCache[prefKey]
             if (cached != null && (now - cached.second) < 60000L) {
                 return cached.first
             }
@@ -1949,7 +1912,7 @@ open class StremioC(
                 }
             }
 
-            if (prefKey != "mdblist_enabled") settingsCache[prefKey] = Pair(isEnabled, now)
+            settingsCache[prefKey] = Pair(isEnabled, now)
             return isEnabled
         }
 
@@ -1981,21 +1944,6 @@ open class StremioC(
         fun asFindResult(): Pair<String, String>? = if (viaFind) tmdbId to mediaType else null
     }
 
-    private data class MdbTarget(
-        val id: String,
-        val isTmdb: Boolean,
-        val mediaType: String,
-        val credentialFingerprint: String = mdbCredentialFingerprint()
-    )
-
-    private data class SpeculativeMdbResult(
-        val target: MdbTarget,
-        val ratings: List<String>,
-        val requestSucceeded: Boolean
-    ) {
-        fun matches(other: MdbTarget): Boolean = target == other && requestSucceeded
-    }
-
     private fun detailMediaType(type: String?): String =
         if (canonicalDetailType(type) == "movie") "movie" else "tv"
 
@@ -2005,76 +1953,6 @@ open class StremioC(
     private fun isLibraryAnimeId(id: String?): Boolean =
         isKitsuOrMalId(id) || id?.startsWith("anilist:") == true
 
-    private fun directMdbTarget(id: String?, mediaType: String = "tv"): MdbTarget? = when {
-        id?.startsWith("tt") == true -> MdbTarget(id, false, mediaType)
-        id?.startsWith("tmdb:") == true -> MdbTarget(id.removePrefix("tmdb:"), true, mediaType)
-        else -> null
-    }
-
-    private fun resolvedMdbTarget(
-        entry: CatalogEntry,
-        resolvedTmdbId: String?,
-        resolvedImdbId: String?
-    ): MdbTarget? {
-        val id = resolvedTmdbId ?: resolvedImdbId ?: when {
-            entry.id?.startsWith("tt") == true -> entry.id
-            entry.id?.startsWith("tmdb:") == true -> entry.id.removePrefix("tmdb:")
-            entry.moviedb_id != null -> entry.moviedb_id.toString()
-            !entry.tmdbIdExt.isNullOrBlank() -> entry.tmdbIdExt
-            else -> null
-        } ?: return null
-        return MdbTarget(id, id == resolvedTmdbId || !id.startsWith("tt"), detailMediaType(entry.type))
-    }
-
-    private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
-        val cacheKey = "${target.credentialFingerprint}:${target.isTmdb}:${target.mediaType}:${target.id}"
-        val cached = stremioCacheMemoryRead(mdbRatingsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
-            runCatching { parseJson<List<String>>(json) }.getOrNull()
-                ?.takeIf { it.isNotEmpty() }?.let { ratings ->
-                    Pair(ratings, stamp).also {
-                        mdbRatingsCache[cacheKey] = it
-                    }
-                }
-        }
-        if (cached != null) {
-
-            StremioCMdbUiBridge.publish(cacheKey)
-            return SpeculativeMdbResult(target, cached.first, true)
-        }
-        val attempt = runSuspendCatching {
-            run {
-                mdbFetchSemaphore.withPermit {
-                    fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
-                }
-            }
-        }
-        val ratings = attempt.getOrDefault(emptyList())
-        if (ratings.isNotEmpty()) {
-            mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
-
-            StremioCMdbUiBridge.publish(cacheKey)
-            MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
-        }
-        return SpeculativeMdbResult(target, ratings, attempt.isSuccess)
-    }
-
-    private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
-        target?.let { requested ->
-            synchronized(mdbInflight) {
-                mdbInflight[requested] ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
-                    fetchMdbAttempt(requested)
-                }.also { job ->
-                    mdbInflight[requested] = job
-                    job.invokeOnCompletion {
-                        synchronized(mdbInflight) {
-                            if (mdbInflight[requested] === job) mdbInflight.remove(requested)
-                        }
-                    }
-                    job.start()
-                }
-            }
-        }
-
     private fun cachedFindMatches(
         imdbId: String?,
         tmdbId: String?,
@@ -2083,16 +1961,6 @@ open class StremioC(
         if (imdbId.isNullOrBlank() || tmdbId.isNullOrBlank()) return false
         val cached = stremioCacheMemoryRead(tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: return false
         return cached.first?.first == tmdbId && cached.first?.second == mediaType
-    }
-
-    private fun hasUsableSpeculativeMdbTarget(
-        hint: DetailUrlHint?,
-        resolvedTmdbId: String?,
-        resolvedImdbId: String?
-    ): Boolean = when {
-        directMdbTarget(hint?.id) != null -> true
-        isLibraryAnimeId(hint?.id) -> !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
-        else -> false
     }
 
     private fun parseDetailUrlHint(url: String): DetailUrlHint? {
@@ -2771,9 +2639,6 @@ open class StremioC(
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
                 return@coroutineScope run {
                     StremioC(base, name).load(metaUrl).also { response ->
-                        StremioCMdbUiBridge.keyFor(metaUrl)?.let { key ->
-                            StremioCMdbUiBridge.bind(key, listOf(url))
-                        }
 
                         for (source in listOf(metaUrl, response.url)) {
                             fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
@@ -2832,25 +2697,9 @@ open class StremioC(
             }
         }
         val hintMediaType = detailMediaType(urlHint?.type)
-        val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
-        val directMdbHint = directMdbTarget(urlHint?.id, hintMediaType)
-
         val hintedAnimeId = urlHint?.id?.takeIf { isLibraryAnimeId(it) }
         val speculativeAnimeDeferred: Deferred<AnimeSeasonMapping?>? = hintedAnimeId?.let { id ->
             async(Dispatchers.IO) { run { resolveAnimeIdForLoad(id) } }
-        }
-
-        val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
-            !mdbEnabled || urlHint == null -> null
-            directMdbHint != null -> launchMdbAttempt(directMdbHint)
-            speculativeAnimeDeferred != null -> mdbFetchScope.async {
-                val resolved = run { speculativeAnimeDeferred.await() } ?: return@async null
-                val target = resolved.tmdbId?.toString()?.let { MdbTarget(it, true, hintMediaType) }
-                    ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
-                    ?: return@async null
-                launchMdbAttempt(target)?.await()
-            }
-            else -> null
         }
 
         val speculativeTmdbDeferred: Deferred<SpeculativeTmdbChain?>? = when {
@@ -3004,13 +2853,6 @@ open class StremioC(
             targetTmdbId != null && it.matchesDirect(targetTmdbId, targetTmdbMediaType)
         }?.detail
 
-        val postMetaMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
-        val speculativeMdbHasUsableTarget = speculativeMdbDeferred != null && hintMatchesAuthoritative &&
-            hasUsableSpeculativeMdbTarget(urlHint, resolvedTmdbId, resolvedImdbId)
-        val postMetaMdbDeferred = if (mdbEnabled && !speculativeMdbHasUsableTarget) {
-            launchMdbAttempt(postMetaMdbTarget)
-        } else null
-
         val normalTmdbDeferred: Deferred<TmdbDetailResponse?>? = if (
             targetTmdbId != null && speculativeTmdbDetail == null
         ) {
@@ -3090,33 +2932,6 @@ open class StremioC(
         }
         collectionDeferred?.cancel() 
 
-        var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
-        if (actualMdbTarget == null) {
-            val resolvedImdb = resolvedIdHolder[0]?.takeIf { it.startsWith("tt") }
-            val resolvedTmdb = resolvedIdHolder[1]?.takeIf { it.isNotBlank() }
-            actualMdbTarget = resolvedImdb?.let { MdbTarget(it, false, authoritativeMediaType) }
-                ?: resolvedTmdb?.let { MdbTarget(it, true, authoritativeMediaType) }
-        }
-
-        val finalMdbTarget = actualMdbTarget
-        if (finalMdbTarget != null && mdbEnabled) {
-
-            val mdbAuditKey = "${finalMdbTarget.credentialFingerprint}:${finalMdbTarget.isTmdb}:${finalMdbTarget.mediaType}:${finalMdbTarget.id}"
-            StremioCMdbUiBridge.bind(mdbAuditKey, listOf(url, loadRes.url) + libraryOrigins)
-            val mdbRatings = mdbRatingsForUi(mdbAuditKey)
-            if (mdbRatings == null) {
-                if (postMetaMdbTarget != finalMdbTarget || postMetaMdbDeferred == null) {
-                    launchMdbAttempt(finalMdbTarget)
-                }
-            } else {
-            }
-            mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
-                val ratingStr = "\u2063" + ratings.joinToString("  ")
-                val currentPlot = loadRes.plot
-                loadRes.plot = if (!currentPlot.isNullOrBlank()) "${ratingStr}<br>${currentPlot}" else ratingStr
-                loadRes.score = Score.from10(0)
-            }
-        }
         return@coroutineScope loadRes
     }
 

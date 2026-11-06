@@ -149,114 +149,6 @@ internal fun applyEpisodeChipFeedback(chip: Chip) {
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
 
-private data class RatingMeta(val name: String, val icon: String, val sortOrder: Int)
-private val RATING_SOURCES = mapOf(
-    "myanimelist" to RatingMeta("MAL", " Ⓜ️", 1),
-    "mal" to RatingMeta("MAL", " Ⓜ️", 1),
-    "imdb" to RatingMeta("IMDb", "⭐", 2),
-    "letterboxd" to RatingMeta("LB", "🟢", 3),
-    "lb" to RatingMeta("LB", "🟢", 3),
-    "audiencescore" to RatingMeta("Popcorn", "🍿", 5),
-    "tomatoesaudience" to RatingMeta("Popcorn", "🍿", 5),
-    "popcorn" to RatingMeta("Popcorn", "🍿", 5),
-    "audience" to RatingMeta("Popcorn", "🍿", 5),
-    "trakt" to RatingMeta("Trakt", "Ⓣ", 6),
-    "tmdb" to RatingMeta("TMDB", "🎬", 7),
-    "metacritic" to RatingMeta("MC", "🎯", 8),
-    "mc" to RatingMeta("MC", "🎯", 8),
-    "rottentomatoes" to RatingMeta("RT", "🍅", 9),
-    "tomatoes" to RatingMeta("RT", "🍅", 9),
-    "rt" to RatingMeta("RT", "🍅", 9),
-    "rogerebert" to RatingMeta("RE", "👍", 10),
-    "re" to RatingMeta("RE", "👍", 10)
-)
-
-suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType: String = "movie"): List<String> {
-    if (id.isNullOrBlank()) return emptyList()
-
-    val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return emptyList()
-    val prefs = context.getSharedPreferences("StremioC", android.content.Context.MODE_PRIVATE)
-
-    val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
-    val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
-    if (!mdbListEnabled || mdbListApiKey.isBlank()) {
-        return emptyList()
-    }
-    return try {
-        val provider = if (isTmdb) "tmdb" else "imdb"
-        val type = if (mediaType == "movie") "movie" else "show"
-        val modernUrl = "https://api.mdblist.com/$provider/$type/$id/?apikey=$mdbListApiKey&append_to_response=keyword"
-        val json = try {
-            val response = app.get(modernUrl, timeout = 15L)
-            JSONObject(response.text).also {
-                if (it.optJSONArray("ratings") == null) error("MDBList missing ratings")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (error: Exception) {
-            val idParam = if (isTmdb) "tm" else "i"
-            val response = app.get("https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id", timeout = 15L)
-            JSONObject(response.text)
-        }
-        val ratingsArray = json.optJSONArray("ratings") ?: run {
-            return emptyList()
-        }
-        val keywords = json.optJSONArray("keywords")
-        val certifications = (0 until (keywords?.length() ?: 0)).mapNotNull { i ->
-            val value = keywords?.opt(i)
-            (if (value is JSONObject) value.optString("name") else value as? String)
-                ?.substringAfterLast('.')?.lowercase()
-        }.toSet()
-
-        val results = mutableListOf<Pair<RatingMeta, Double>>()
-
-        for (i in 0 until ratingsArray.length()) {
-            val ratingObj = ratingsArray.optJSONObject(i) ?: continue
-            val sourceKey = ratingObj.optString("source", "").lowercase()
-            val value = if (ratingObj.has("value")) ratingObj.optDouble("value") else ratingObj.optDouble("score")
-
-            if (value.isNaN() || value <= 0.0) continue
-
-            val scaledValue = when (sourceKey) {
-                "rogerebert", "re" -> value * 2.5
-                "letterboxd", "lb" -> ratingObj.optDouble("score").takeUnless { it.isNaN() }
-                    ?.div(10.0) ?: if (value > 5.0) value else value * 2.0
-                "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn", "audience" -> value / 10.0
-                else -> value
-            }
-
-            val roundedValue = round(scaledValue * 10) / 10.0
-            if (roundedValue <= 0.0) continue
-
-            if (sourceKey == "metacriticuser") continue
-            val meta = RATING_SOURCES[sourceKey] ?: RatingMeta(sourceKey.uppercase(), "🏷️", 99)
-            val icon = when (meta.name) {
-                "RT" -> when {
-                    "certified-fresh" in certifications && scaledValue >= 7.0 -> "🍅\u2060\u2060"
-                    scaledValue < 6.0 -> "🍅\u2060"
-                    else -> "🍅"
-                }
-                "Popcorn" -> when {
-                    "certified-hot" in certifications && scaledValue >= 8.0 -> "🍿\u2060\u2060"
-                    scaledValue < 6.0 -> "🍿\u2060"
-                    else -> "🍿"
-                }
-                else -> meta.icon
-            }
-            results.add(meta.copy(icon = icon) to roundedValue)
-        }
-
-        results.sortBy { it.first.sortOrder }
-        results.map { (meta, score) ->
-            "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        emptyList()
-    }
-}
-
 fun String.fixSourceUrl(): String = this.replace("/manifest.json", "").replace("stremio://", "https://")
 
 fun getQuality(qualities: List<String?>): Int {
@@ -321,10 +213,6 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val mdbUpdate: (String) -> Unit = { cacheKey ->
-        val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
-        val applied = matched.count { it.refreshLateMdb() }
-    }
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
     private var homeRoot: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
@@ -347,7 +235,7 @@ internal class RatingPlotImageHook(
             return
         }
         val activity = host ?: return
-        val hero = phoneHero ?: PhoneHeroHook(activity, ::decoratedRatings).also { phoneHero = it }
+        val hero = phoneHero ?: PhoneHeroHook(activity) { _, _ -> null }.also { phoneHero = it }
         hero.attach(parent)
     }
     private var homePreviewText: TextView? = null
@@ -391,151 +279,11 @@ internal class RatingPlotImageHook(
             for (i in 0 until tags.childCount) apply(tags.getChildAt(i) as? TextView, normal)
         }
     }
-    private var homePreviewChanging = false
-    private val homePreviewWatcher = object : TextWatcher {
-        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-        override fun afterTextChanged(s: Editable?) {
-            if (!homePreviewChanging) renderHomePreview()
-        }
-    }
     private fun bindHomePreview(view: TextView?) {
         val next = view.takeIf { isLayout(TV or EMULATOR) }
         if (homePreviewText !== next) styleTvHero(null)
         styleTvHero(next)
-        if (homePreviewText === next) return
-        homePreviewText?.let { previous ->
-            previous.removeTextChangedListener(homePreviewWatcher)
-            (previous.text as? Spanned)?.let { old ->
-                val spans = old.getSpans(0, old.length, LogoSpan::class.java)
-                if (spans.isNotEmpty()) previous.setText(SpannableStringBuilder(old).apply {
-                    spans.forEach { removeSpan(it) }
-                }, TextView.BufferType.SPANNABLE)
-            }
-        }
         homePreviewText = next
-        next?.addTextChangedListener(homePreviewWatcher)
-        renderHomePreview()
-    }
-    private fun renderHomePreview() {
-        val view = homePreviewText ?: return
-        val original = view.text ?: return
-        val result = if (prefs.getBoolean("mdblist_enabled", false)) {
-            decoratedRatings(original, view.textSize)
-        } else {
-            val spans = (original as? Spanned)?.getSpans(0, original.length, LogoSpan::class.java)
-            if (spans.isNullOrEmpty()) null else SpannableStringBuilder(original).apply {
-                spans.forEach { removeSpan(it) }
-            }
-        } ?: return
-        homePreviewChanging = true
-        try { view.setText(result, TextView.BufferType.SPANNABLE) }
-        finally { homePreviewChanging = false }
-    }
-    private var previewPageObserver: Observer<Resource<ResultData>?>? = null
-    private var previewPageModel: ResultViewModel2? = null
-
-    private val ids = mutableMapOf<String, Int>()
-    private val icons = linkedMapOf(
-        "Ⓜ️" to "rating_mal", "⭐" to "rating_imdb",
-        "🟢" to "rating_letterboxd", "Ⓣ" to "rating_trakt",
-        "🎬" to "rating_tmdb", "🎯" to "rating_metacritic",
-        "👍" to "rating_roger_ebert",
-        "🍅\u2060\u2060" to "rating_rotten_tomatoes_certified",
-        "🍅\u2060" to "rating_rotten_tomatoes_rotten",
-        "🍅" to "rating_rotten_tomatoes",
-        "🍿\u2060\u2060" to "rating_audience_verified_hot",
-        "🍿\u2060" to "rating_audience_stale",
-        "🍿" to "rating_audience_score"
-    )
-    private val number = Regex("^\\s+\\d+(?:\\.\\d+)?(?:\\s|$)")
-    private class LogoSpan(d: android.graphics.drawable.Drawable) : ImageSpan(d, ImageSpan.ALIGN_BOTTOM)
-
-    private fun decoratedRatings(original: CharSequence, textSize: Float): SpannableStringBuilder? {
-        if (!prefs.getBoolean("mdblist_enabled", false) ||
-            original is Spanned && original.getSpans(0, original.length, LogoSpan::class.java).isNotEmpty() ||
-            !original.startsWith('\u2063')) return null
-        val end = original.indexOf('\n').let { if (it < 0) original.length else it }
-        val line = original.subSequence(0, end).toString()
-        val result = SpannableStringBuilder(original)
-        val height = (textSize * 0.92f).roundToInt().coerceAtLeast(12)
-        var applied = false
-        for ((glyph, file) in icons) {
-            var from = 1
-            while (true) {
-                val at = line.indexOf(glyph, from)
-                if (at < 0) break
-                if (number.containsMatchIn(line.substring(at + glyph.length))) {
-                    val id = ids.getOrPut(file) {
-                        resources.getIdentifier(file, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-                    }
-                    if (id != 0) {
-                        val drawable = runCatching { resources.getDrawable(id, null).mutate() }.getOrNull()
-                        if (drawable != null) {
-                            val width = (height.toFloat() * drawable.intrinsicWidth.coerceAtLeast(1) /
-                                drawable.intrinsicHeight.coerceAtLeast(1)).roundToInt().coerceIn(height / 2, height * 3)
-                            drawable.setBounds(0, 0, width, height)
-                            result.setSpan(LogoSpan(drawable), at, at + glyph.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                            applied = true
-                        }
-                    }
-                }
-                from = at + glyph.length
-            }
-        }
-        return if (applied) result else null
-    }
-
-    private fun installPreviewHook(activity: FragmentActivity, data: ResultData) {
-        val source = data.apiName.asString(activity)
-        if (source != "StremioC" && APIHolder.allProviders.none {
-                it is StremioC && it.name.equals(source, ignoreCase = true)
-            }) return
-
-        val dialog = runCatching {
-            activity.javaClass.getDeclaredField("bottomPreviewPopup").apply {
-                isAccessible = true
-            }.get(activity) as? Dialog
-        }.getOrNull()?.takeIf { it.isShowing } ?: return
-        val id = activity.resources.getIdentifier("resultview_preview_description", "id", activity.packageName)
-        val description = if (id == 0) null else dialog.findViewById<TextView>(id)
-        description ?: return
-        decoratedRatings(description.text ?: return, description.textSize)?.let {
-            description.setText(it, TextView.BufferType.SPANNABLE)
-        }
-        if (isLayout(PHONE)) description.setOnClickListener {
-
-            val raw = data.plotText.asString(activity).html()
-            AlertDialog.Builder(activity, com.lagradost.cloudstream3.R.style.AlertDialogCustom)
-                .setMessage(decoratedRatings(raw, description.textSize) ?: raw)
-                .setTitle(data.plotHeaderText.asString(activity))
-                .show()
-        }
-    }
-
-    private fun observePreview(activity: FragmentActivity) {
-        val model = ViewModelProvider(activity)[ResultViewModel2::class.java]
-        val observer = Observer<Resource<ResultData>?> { value ->
-            if (value is Resource.Success) main.post {
-                if (host === activity) runCatching { installPreviewHook(activity, value.value) }
-            }
-        }
-        model.page.observe(activity, observer)
-        previewPageModel = model
-        previewPageObserver = observer
-    }
-
-    private fun detachPreview() {
-        previewPageObserver?.let { observer -> previewPageModel?.page?.removeObserver(observer) }
-        previewPageObserver = null
-        previewPageModel = null
-    }
-
-    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "mdblist_enabled") main.post {
-            watchers.values.toList().forEach { runCatching { it.render() } }
-            runCatching { renderHomePreview() }
-        }
     }
 
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -554,9 +302,7 @@ internal class RatingPlotImageHook(
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 syncHomeHooks()
-            watchers[f]?.let { watcher ->
-                watcher.render() 
-            }
+
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
@@ -569,20 +315,15 @@ internal class RatingPlotImageHook(
     }
 
     fun start() {
-        StremioCMdbUiBridge.listen(mdbUpdate)
-        prefs.registerOnSharedPreferenceChangeListener(prefListener)
         app.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? MainActivity)?.let(::use)
     }
 
     fun stop() {
-        StremioCMdbUiBridge.listen(null)
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
-        detachPreview()
-        prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
@@ -596,7 +337,6 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
-        detachPreview()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear()
@@ -606,7 +346,6 @@ internal class RatingPlotImageHook(
         val homeObserver = Observer<String?> { syncHomeHooks() }
         homeModel.apiName.observe(activity, homeObserver)
         removeHomeProviderObserver = { homeModel.apiName.removeObserver(homeObserver) }
-        observePreview(activity)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 f.view?.let {
@@ -2566,69 +2305,6 @@ internal class RatingPlotImageHook(
         private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
-        private var changing = false
-        private var tvPopupActive = false
-        private var tvPopupInstalled = false
-        private val tvPlotClick = View.OnClickListener {
-            val data = (ViewModelProvider(fragment)[ResultViewModel2::class.java]
-                .page.value as? Resource.Success<ResultData>)?.value ?: return@OnClickListener
-            val context = view.context
-            val raw = data.plotText.asString(context).html()
-            val message = if (prefs.getBoolean("mdblist_enabled", false)) {
-                val current = view.text ?: raw
-                decoratedRatings(current, view.textSize) ?: current
-            } else raw
-            AlertDialog.Builder(context, R.style.AlertDialogCustom)
-                .setMessage(message)
-                .setTitle(data.plotHeaderText.asString(context))
-                .show()
-        }
-        // Native TV binds its click listener after setting the description text.
-        // Rebind once after that update, without polling for dialogs or layouts.
-        private val bindTvPlotPopup = Runnable {
-            if (tvPopupActive && fragment.view === root &&
-                prefs.getBoolean("mdblist_enabled", false)) {
-                view.setOnClickListener(tvPlotClick)
-                tvPopupInstalled = true
-            }
-        }
-        private fun scheduleTvPlotPopup() {
-            if (!tvPopupActive || !isLayout(TV) ||
-                !prefs.getBoolean("mdblist_enabled", false)) return
-            view.removeCallbacks(bindTvPlotPopup)
-            view.post(bindTvPlotPopup)
-        }
-
-        fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
-
-        fun refreshLateMdb(): Boolean {
-            val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
-            if (!fragment.isVisible || fragment.view !== root) {
-                return false
-            }
-            return injectCachedRatings("late")
-        }
-
-        private fun injectCachedRatings(reason: String): Boolean {
-            if (!prefs.getBoolean("mdblist_enabled", false)) return false
-            val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
-            val ratings = StremioC.mdbRatingsForUi(key)
-            if (ratings == null) {
-                return false
-            }
-            val old = view.text ?: return false
-            if (old.isEmpty() || old.startsWith('\u2063')) {
-                return false
-            }
-            val combined = SpannableStringBuilder("\u2063${ratings.joinToString("  ")}\n").append(old)
-            val decorated = decoratedRatings(combined, view.textSize) ?: combined
-            changing = true
-            try { view.setText(decorated, TextView.BufferType.SPANNABLE) }
-            finally { changing = false }
-            scheduleTvPlotPopup()
-            return true
-        }
-
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
@@ -2843,7 +2519,6 @@ internal class RatingPlotImageHook(
             }
         }
         fun start() {
-            tvPopupActive = true
             actorInformation.start()
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
@@ -2851,24 +2526,9 @@ internal class RatingPlotImageHook(
             if (castItems != null || genreGroup != null)
                 root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
             detailLayout.onGlobalLayout()
-            runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
+            runCatching { backdrop.start() }; runCatching { trailers.start() }
         }
         fun detach() {
-            tvPopupActive = false
-            view.removeCallbacks(bindTvPlotPopup)
-            if (tvPopupInstalled && fragment.view === root) {
-                // Restore CloudStream's default TV dialog when the plugin detaches.
-                val data = (ViewModelProvider(fragment)[ResultViewModel2::class.java]
-                    .page.value as? Resource.Success<ResultData>)?.value
-                view.setOnClickListener(if (data == null) null else View.OnClickListener {
-                    val context = view.context
-                    AlertDialog.Builder(context, R.style.AlertDialogCustom)
-                        .setMessage(data.plotText.asString(context).html())
-                        .setTitle(data.plotHeaderText.asString(context))
-                        .show()
-                })
-            }
-            tvPopupInstalled = false
             castLongPressHandled = false
             cancelPendingActorOpen()
             seasonSyncProbe.stop()
@@ -2889,36 +2549,14 @@ internal class RatingPlotImageHook(
                 restoreCastPress(card)
             }
             boundActorCards.clear()
-            runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
-        }
-        private fun restore() {
-            val old = view.text as? Spanned ?: return
-            val spans = old.getSpans(0, old.length, LogoSpan::class.java)
-            if (spans.isEmpty()) return
-            val plain = SpannableStringBuilder(old)
-            spans.forEach(plain::removeSpan)
-            changing = true
-            try { view.setText(plain, TextView.BufferType.SPANNABLE) }
-            finally { changing = false }
+            runCatching { trailers.stop() }; runCatching { backdrop.stop() }
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
         override fun afterTextChanged(s: Editable?) {
-            if (!changing) {
-                runCatching { trailers.refresh() }
-                runCatching { render() }
-            }
+            runCatching { trailers.refresh() }
         }
 
-        fun render() {
-            scheduleTvPlotPopup()
-            if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }
-            if (injectCachedRatings("render")) return
-            val result = decoratedRatings(view.text ?: return, view.textSize) ?: return
-            changing = true
-            try { view.setText(result, TextView.BufferType.SPANNABLE) }
-            finally { changing = false }
-        }
     }
 
     override fun onActivityResumed(activity: Activity) {
@@ -2930,7 +2568,6 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
-        detachPreview()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null

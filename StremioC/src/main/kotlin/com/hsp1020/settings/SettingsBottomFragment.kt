@@ -156,8 +156,6 @@ object SettingsRepository {
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
 
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
-    const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
-    const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -468,7 +466,6 @@ class SettingsBottomFragment(
         when (field.id) {
             getCachedResId("etTmdbApiKey", "id"),
             getCachedResId("etHistorySyncUrl", "id") -> field.setPadding(dp(12), 0, dp(12), 0)
-            getCachedResId("etMdbListApiKey", "id") -> field.setPadding(dp(12), 0, dp(60), 0)
         }
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
@@ -520,13 +517,7 @@ class SettingsBottomFragment(
             val row = view.parent as? LinearLayout
             if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL &&
                 row.childCount == 2 && row.getChildAt(0) is TextView) {
-                val switchOnly = view.id == getCachedResId("switchMdbList", "id")
-                if (switchOnly) {
-                    row.setOnClickListener(null)
-                    row.isClickable = false
-                } else {
-                    row.setOnClickListener { if (view.isEnabled) view.performClick() }
-                }
+                row.setOnClickListener { if (view.isEnabled) view.performClick() }
                 row.isFocusable = false
                 row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 if (view.contentDescription.isNullOrBlank() && view.text.isNullOrBlank())
@@ -1242,7 +1233,7 @@ class SettingsBottomFragment(
         }
         if (view !is LinearLayout || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
-                "layoutHistorySyncUrl", "layoutMdbList",
+                "layoutHistorySyncUrl",
                 "pageHub", "pageMetadata",
                 "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
                 "rowLanguage", "rowSources", "rowMetadata", "rowBackup"),
@@ -1250,9 +1241,8 @@ class SettingsBottomFragment(
             TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack"),
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
                 "btnSelectLanguage"),
-            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon", "btnRevealMdbListApiKey"),
-            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etHistorySyncUrl"),
-            Switch::class.java to listOf("switchMdbList")
+            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
+            EditText::class.java to listOf("etTmdbApiKey", "etHistorySyncUrl")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1633,52 +1623,7 @@ class SettingsBottomFragment(
         }
 
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
-        val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
-        val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
-        val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
-
-        val revealMdbListApiKey = view.findView<ImageButton>("btnRevealMdbListApiKey")
-        var mdbListKeyRevealed = false
-        revealMdbListApiKey.apply {
-            val ripple = android.util.TypedValue()
-            if (ctx.theme.resolveAttribute(
-                    android.R.attr.selectableItemBackgroundBorderless, ripple, true
-                ) && ripple.resourceId != 0) {
-                setBackgroundResource(ripple.resourceId)
-            } else {
-                background = null
-            }
-            scaleType = ImageView.ScaleType.CENTER
-            isFocusableInTouchMode = false
-            contentDescription = "Show MDBList API key"
-            setImageDrawable(ApiKeyEyeIcon(etMdbListApiKey.currentTextColor, false, dp(24)))
-            makeTvCompatible()
-            setOnClickListener {
-                val start = etMdbListApiKey.selectionStart.coerceAtLeast(0)
-                val end = etMdbListApiKey.selectionEnd.coerceAtLeast(0)
-                mdbListKeyRevealed = !mdbListKeyRevealed
-                etMdbListApiKey.transformationMethod =
-                    if (mdbListKeyRevealed) null else PasswordTransformationMethod.getInstance()
-                val length = etMdbListApiKey.text?.length ?: 0
-                etMdbListApiKey.setSelection(start.coerceAtMost(length), end.coerceAtMost(length))
-                setImageDrawable(ApiKeyEyeIcon(etMdbListApiKey.currentTextColor, mdbListKeyRevealed, dp(24)))
-                contentDescription =
-                    if (mdbListKeyRevealed) "Hide MDBList API key" else "Show MDBList API key"
-            }
-        }
-
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
-
-        val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
-        switchMdbList.isChecked = isMdbListEnabled
-        layoutMdbList.visibility = if (isMdbListEnabled) View.VISIBLE else View.GONE
-        etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
-
-        switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            if (!isChecked && layoutMdbList.hasFocus()) switchMdbList.requestFocus()
-            layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
         }
@@ -1701,8 +1646,7 @@ class SettingsBottomFragment(
             val code = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
             val names = LANGUAGES.filter { it.second == code }
             (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
-            (view.optional("summaryMetadata") as? TextView)?.text =
-                "$code · MDB Ratings: ${if (switchMdbList.isChecked) "On" else "Off"}"
+            (view.optional("summaryMetadata") as? TextView)?.text = code
             listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
@@ -1789,7 +1733,6 @@ class SettingsBottomFragment(
             }
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
-            editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
             editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray().apply {
                 extraUrlList.forEach { addon ->
                     put(JSONObject().put("name", addon.name.trim()).put("url", addon.link.trim())
@@ -1798,7 +1741,6 @@ class SettingsBottomFragment(
             }.toString())
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
             editor.remove("custom_poster_url").remove("custom_poster_enabled")
-            editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
 
             editor.commit()
             StremioC.invalidateSyncSettingsCache()
@@ -1846,7 +1788,6 @@ class SettingsBottomFragment(
         }
 
         prepareControls(view)
-        etMdbListApiKey.transformationMethod = PasswordTransformationMethod.getInstance()
         if (hub != null) listOf(addlinks, showlinks, saveIcon, btnSelectLanguage).forEach {
             it.isFocusable = false; it.isClickable = false; it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }

@@ -77,6 +77,7 @@ class ElevatePlugin : Plugin() {
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
     private var historyReporter: ElevateHistoryReporter? = null
+    private var mdbRatings: ElevateMdbRatings? = null
     private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
@@ -157,6 +158,14 @@ class ElevatePlugin : Plugin() {
         } else {
             historyReporter?.stop()
             historyReporter = null
+        }
+        if (enabled(ElevateFeature.MDB_RATINGS)) {
+            if (mdbRatings == null) {
+                mdbRatings = ElevateMdbRatings(application, resources).also { it.start() }
+            }
+        } else {
+            mdbRatings?.stop()
+            mdbRatings = null
         }
         if (enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (externalDownloaderLifecycle == null) {
@@ -378,6 +387,8 @@ class ElevatePlugin : Plugin() {
         externalQueueBridge = null
         historyReporter?.stop()
         historyReporter = null
+        mdbRatings?.stop()
+        mdbRatings = null
         externalDownloaderLifecycle?.stop()
         externalDownloaderLifecycle = null
         pipSubtitles?.stop()
