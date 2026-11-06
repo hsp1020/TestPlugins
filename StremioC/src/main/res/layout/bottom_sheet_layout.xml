@@ -241,7 +241,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="16dp"
                     android:paddingStart="12dp"
                     android:text="TMDB API Key (Required)"
                     android:textSize="12sp"
@@ -250,7 +250,7 @@
                 <FrameLayout
                     android:layout_width="match_parent"
                     android:layout_height="24dp"
-                    android:layout_marginTop="2dp">
+                    android:layout_marginTop="3dp">
                     <EditText
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
@@ -278,8 +278,8 @@
                     android:gravity="top"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
-                    android:paddingTop="8dp"
-                    android:paddingBottom="8dp"
+                    android:paddingTop="12dp"
+                    android:paddingBottom="10dp"
                     android:focusable="true"
                     android:clickable="true"
                     android:background="?android:attr/selectableItemBackground">
@@ -301,7 +301,7 @@
                             android:layout_height="wrap_content"
                             android:text="en-US"
                             android:textSize="14sp"
-                            android:layout_marginTop="2dp"
+                            android:layout_marginTop="3dp"
                             android:includeFontPadding="false"
                             android:singleLine="true"
                             android:ellipsize="end" />
@@ -325,7 +325,7 @@
                     android:id="@+id/layoutHistorySyncUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginTop="6dp"
                     android:orientation="vertical">
                     <TextView
                         android:layout_width="match_parent"
@@ -337,7 +337,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
+                        android:layout_marginTop="16dp"
                         android:paddingStart="12dp"
                         android:text="Sync metadata for enabled catalogs via AIOMetadata."
                         android:textSize="12sp"
@@ -346,7 +346,7 @@
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
+                        android:layout_marginTop="3dp"
                         android:orientation="horizontal"
                         android:gravity="center_vertical">
                         <FrameLayout
