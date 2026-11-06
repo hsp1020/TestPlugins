@@ -4416,7 +4416,7 @@ open class StremioC(
                 val target = runCatching { android.net.Uri.parse(link.url ?: "") }.getOrNull()
                     ?: return@mapNotNull null
                 val parts = target.pathSegments
-                if (target.scheme != "stremio" || target.host != null || parts.size != 3 ||
+                if (target.scheme != "stremio" || !target.host.isNullOrEmpty() || parts.size != 3 ||
                     parts[0] != "detail" || parts[1] !in listOf("movie", "series"))
                     return@mapNotNull null
                 val id = parts[2]
