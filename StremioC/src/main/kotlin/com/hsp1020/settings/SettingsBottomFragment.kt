@@ -1674,6 +1674,8 @@ class SettingsBottomFragment(
             currentPage = next
             pages.forEachIndexed { i, page -> page?.visibility = if (i == next.ordinal) View.VISIBLE else View.GONE }
             settingsToggle.text = titles[next.ordinal]
+            settingsToggle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
+                if (next == SettingsPage.METADATA) 18f else 16f)
             back?.text = "Close"
             view.optional("saveAction")?.visibility = if (next == SettingsPage.BACKUP) View.GONE else View.VISIBLE
             updateSummaries()

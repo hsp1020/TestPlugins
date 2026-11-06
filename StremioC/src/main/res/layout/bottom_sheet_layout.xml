@@ -249,12 +249,12 @@
                     android:tag="stremioc_secondary" />
                 <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="24dp"
                     android:layout_marginTop="2dp">
                     <EditText
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
+                        android:layout_height="24dp"
                         android:minHeight="0dp"
                         android:layout_gravity="top"
                         android:gravity="top|start"
@@ -273,10 +273,9 @@
                     android:id="@+id/rowLanguage"
                     android:layout_marginTop="0dp"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
+                    android:layout_height="48dp"
                     android:orientation="horizontal"
-                    android:gravity="center_vertical"
+                    android:gravity="top"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
                     android:paddingTop="0dp"
@@ -310,6 +309,7 @@
                     <TextView
                         android:layout_width="24dp"
                         android:layout_height="wrap_content"
+                        android:layout_gravity="center_vertical"
                         android:gravity="center"
                         android:text="›"
                         android:textSize="24sp"
@@ -325,7 +325,7 @@
                     android:id="@+id/layoutHistorySyncUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="0dp"
                     android:orientation="vertical">
                     <TextView
                         android:layout_width="match_parent"
