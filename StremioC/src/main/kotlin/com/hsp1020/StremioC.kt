@@ -5185,11 +5185,12 @@ open class StremioC(
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
-            var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
+            val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
+                .firstOrNull { !it.isNullOrBlank() }
+            var finalDescription = finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
 
             if (tmdbData != null) {
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
-                finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
 
             if (finalType != "movie" && finalType != "series") {
@@ -5277,10 +5278,21 @@ open class StremioC(
             val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() }
-            val finalLogo = tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
+            // AIOMetadata already resolves Logo URL Pattern placeholders (including language)
+            // and returns the final URL as meta.logo. Do not reconstruct provider-specific URLs.
+            val isSyncedMetadata = syncedEntry != null && provider.metadataPosterAddonBaseUrl() != null
+            val metadataLogo = detailedEntry.logo?.takeIf { logo ->
+                val parsed = logo.toHttpUrlOrNull()
+                parsed != null && (isSyncedMetadata ||
+                    parsed.pathSegments.take(3) == listOf("poster-cache", "proxy", "logo"))
+            }
+            val finalLogo = metadataLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
 
-            val finalLogoFallback = if (tmdbData?.fetchedLogo.isNullOrBlank())
-                finalLogo != null else tmdbData?.fetchedLogoFallback == true
+            val finalLogoFallback = when {
+                metadataLogo != null -> false
+                tmdbData?.fetchedLogo.isNullOrBlank() -> finalLogo != null
+                else -> tmdbData?.fetchedLogoFallback == true
+            }
 
             fun LoadResponse.attachMappedIds() {
                 val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
