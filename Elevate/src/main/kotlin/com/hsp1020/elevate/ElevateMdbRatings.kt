@@ -25,6 +25,9 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.SimklSyncServices
@@ -122,7 +125,7 @@ internal class ElevateMdbRatings(
                 if (at < 0) break
                 if (number.containsMatchIn(line.substring(at + symbol.length))) {
                     val id = drawableIds.getOrPut(asset) {
-                        artwork?.getIdentifier(asset, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME) ?: 0
+                        artwork?.getIdentifier(asset, "drawable", "com.example") ?: 0
                     }
                     if (id != 0) {
                         val drawable = runCatching { artwork?.getDrawable(id, null)?.mutate() }.getOrNull()
