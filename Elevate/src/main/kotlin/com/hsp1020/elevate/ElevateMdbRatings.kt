@@ -300,6 +300,120 @@ internal class ElevateMdbRatings(
         return found
     }
 
+    /** Resolve an anime external ID using Simkl's documented 301 Location mapping. */
+    private suspend fun resolveAnimeId(source: String, id: String, movie: Boolean, hash: Int): Key? {
+        if (source !in setOf("mal", "kitsu", "anilist") ||
+            id.toLongOrNull()?.let { it > 0 } != true) return null
+        val lookup = listOf(source, id, movie, hash).joinToString("|")
+        val now = System.currentTimeMillis()
+        synchronized(simklMappings) {
+            simklMappings[lookup]?.takeIf {
+                now - it.first < if (it.second == null) 300_000L else 3_600_000L
+            }?.let { return it.second }
+        }
+        val found = try {
+            withTimeoutOrNull(28_000L) {
+                semaphore.withPermit {
+                    val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }?.authData()
+                    val headers = auth?.let { SimklApi.getHeaders(it.token) }
+                    val clientId = headers?.get("simkl-api-key")
+                    if (headers == null || clientId.isNullOrBlank()) null else {
+                        val params = mapOf("client_id" to clientId)
+                        val redirect = app.get("https://api.simkl.com/redirect",
+                            params = params + ("to" to "simkl") + (source to id),
+                            headers = headers, allowRedirects = false, timeout = 12L)
+                        val location = try {
+                            if (redirect.code == 301) redirect.headers["Location"]
+                                ?: redirect.headers["location"] else null
+                        } finally { redirect.okhttpResponse.close() }
+                        val uri = location?.let(android.net.Uri::parse)
+                        val parts = uri?.pathSegments.orEmpty()
+                        val simklId = parts.getOrNull(1)?.takeIf {
+                            it.toLongOrNull()?.let { n -> n > 0 } == true
+                        }
+                        if (uri?.host != "simkl.com" || parts.firstOrNull() != "anime" ||
+                            simklId == null) null else {
+                            val detail = JSONObject(app.get("https://api.simkl.com/anime/" + simklId,
+                                params = params, headers = headers, timeout = 12L).text)
+                            val ids = detail.optJSONObject("ids")
+                            if (ids == null || ids.optString("simkl") != simklId ||
+                                ids.optString(source).let { it.isNotBlank() && it != id } ||
+                                detail.optString("anime_type").equals("movie", true) != movie) null
+                            else {
+                                val imdb = ids.optString("imdb").takeIf(imdbPattern::matches)
+                                val tmdb = ids.optString("tmdb").takeIf {
+                                    it.toLongOrNull()?.let { n -> n > 0 } == true
+                                }
+                                when {
+                                    imdb != null -> Key("imdb", imdb, movie, hash)
+                                    tmdb != null -> Key("tmdb", tmdb, movie, hash)
+                                    else -> null
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: CancellationException) { throw e }
+          catch (_: Exception) { null }
+        synchronized(simklMappings) {
+            simklMappings[lookup] = System.currentTimeMillis() to found
+            if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
+        }
+        return found
+    }
+
+    /** Keep all native anime ID candidates; never guess by title. */
+    private fun otherIds(page: ResultData, model: ResultViewModel2): List<Pair<String, String>> {
+        val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
+            ?.takeIf { it.url == page.url }
+        val saved = readIdFromString(page.syncData["simkl"])
+        val ids = linkedMapOf<String, String>()
+        fun add(source: String, value: String?) {
+            val number = value?.removePrefix(source + ":")?.toLongOrNull()
+            if (number != null && number > 0L) ids.putIfAbsent(source, number.toString())
+        }
+        add("mal", response?.getMalId())
+        add("kitsu", response?.getKitsuId())
+        add("anilist", response?.getAniListId())
+        add("mal", saved[SimklSyncServices.Mal])
+        add("anilist", saved[SimklSyncServices.AniList])
+        for (source in listOf("mal", "kitsu", "anilist")) {
+            add(source, response?.syncData?.get(source))
+            add(source, page.syncData[source])
+        }
+        val animeId = Regex("^(mal|kitsu|anilist):([0-9]+)(?::.*)?$")
+        for (candidate in listOf(page.url, response?.url.orEmpty())) {
+            val meta = metaId.find(candidate)?.groupValues?.getOrNull(1)
+                ?.let(android.net.Uri::decode)
+            for (raw in listOfNotNull(meta, candidate)) animeId.matchEntire(raw)?.let {
+                add(it.groupValues[1], it.groupValues[2])
+            }
+            val json = runCatching { JSONObject(candidate) }.getOrNull()
+            for ((source, names) in mapOf(
+                "mal" to listOf("malId", "mal_id"),
+                "kitsu" to listOf("kitsuId", "kitsu_id"),
+                "anilist" to listOf("anilistId", "anilist_id", "aniListId")
+            )) for (name in names) add(source, json?.optString(name))
+        }
+        add("simkl", saved[SimklSyncServices.Simkl])
+        add("simkl", page.syncData["simkl"])
+        add("simkl", response?.syncData?.get("simkl"))
+        return ids.map { it.key to it.value }
+    }
+
+    private suspend fun resolveOther(
+        candidates: List<Pair<String, String>>, movie: Boolean, hash: Int
+    ): Key? {
+        for ((source, id) in candidates) {
+            val found = if (source == "simkl") resolveSimkl(id, movie, hash)
+                else resolveAnimeId(source, id, movie, hash)
+            if (found != null) return found
+        }
+        return null
+    }
+
+
     private fun ids(page: ResultData, model: ResultViewModel2): Pair<Key?, String?> {
         val apiKey = preferences.getString("MDB_RATINGS_API_KEY", "").orEmpty().trim()
         if (apiKey.isBlank()) return null to null
@@ -373,27 +487,22 @@ internal class ElevateMdbRatings(
         fun update(data: ResultData) {
             if (!active || fragment.view !== root) return
             val (key, apiKey) = ids(data, model)
-            val simkl = if (key == null) {
-                val saved = readIdFromString(data.syncData["simkl"])
-                saved[SimklSyncServices.Simkl] ?: data.syncData["simkl"]?.takeIf {
-                    it.toLongOrNull()?.let { num -> num > 0 } == true
-                }
-            } else null
+            val candidates = if (key == null) otherIds(data, model) else emptyList()
             val movie = key?.movie ?: (data.url.contains("/meta/movie/") ||
                 runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                     ?.type in setOf(TvType.Movie, TvType.AnimeMovie))
-            val selected = key?.toString() ?: if (simkl != null && !apiKey.isNullOrBlank())
-                listOf("simkl", simkl, movie, apiKey.hashCode()).joinToString(":") else ""
+            val selected = key?.toString() ?: if (candidates.isNotEmpty() && !apiKey.isNullOrBlank())
+                listOf(candidates.joinToString("|"), movie, apiKey.hashCode()).joinToString(":") else ""
             if (selected == identity) { render(); return }
             identity = selected
             generation++
             current = key
             values = null
             render()
-            if (apiKey.isNullOrBlank() || (key == null && simkl == null)) return
+            if (apiKey.isNullOrBlank() || (key == null && candidates.isEmpty())) return
             val requested = generation
             io.launch {
-                val target = key ?: resolveSimkl(simkl!!, movie, apiKey.hashCode())
+                val target = key ?: resolveOther(candidates, movie, apiKey.hashCode())
                     ?: return@launch
                 val found = try { get(target, apiKey) }
                     catch (e: CancellationException) { return@launch }
@@ -495,9 +604,16 @@ internal class ElevateMdbRatings(
         val description = dialog.findViewById<TextView>(id) ?: return
         val model = previewModel ?: return
         val (key, apiKey) = ids(data, model)
-        if (key == null || apiKey.isNullOrBlank()) return
+        if (apiKey.isNullOrBlank()) return
+        val candidates = if (key == null) otherIds(data, model) else emptyList()
+        if (key == null && candidates.isEmpty()) return
+        val movie = data.url.contains("/meta/movie/") ||
+            runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
+                ?.type in setOf(TvType.Movie, TvType.AnimeMovie)
         io.launch {
-            val values = try { get(key, apiKey) }
+            val target = key ?: resolveOther(candidates, movie, apiKey.hashCode())
+                ?: return@launch
+            val values = try { get(target, apiKey) }
                 catch (e: CancellationException) { return@launch }
             if (values.isEmpty()) return@launch
             main.post {

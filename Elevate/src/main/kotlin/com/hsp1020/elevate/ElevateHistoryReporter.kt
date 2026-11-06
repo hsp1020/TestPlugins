@@ -120,6 +120,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         saved[SimklSyncServices.Imdb]?.let { ids["imdb"] = it }
         saved[SimklSyncServices.Tmdb]?.let { ids["tmdb"] = it }
         saved[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
+        saved[SimklSyncServices.Mal]?.let { ids["mal"] = it }
+        saved[SimklSyncServices.AniList]?.let { ids["anilist"] = it }
         response.getImdbId()?.let { ids["imdb"] = it }
         response.getTMDbId()?.let { ids["tmdb"] = it }
         response.getKitsuId()?.let { ids["kitsu"] = it }
@@ -731,6 +733,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             parsed[SimklSyncServices.Imdb]?.let { ids.putIfAbsent("imdb", it) }
             parsed[SimklSyncServices.Tmdb]?.let { ids.putIfAbsent("tmdb", it) }
             parsed[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
+            parsed[SimklSyncServices.Mal]?.let { ids["mal"] = it }
+            parsed[SimklSyncServices.AniList]?.let { ids["anilist"] = it }
             saved.takeIf { it.all(Char::isDigit) }?.let { ids["simkl"] = it }
         }
         if (detail == null || ids.isEmpty()) {
@@ -790,7 +794,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
         val tmdb = ids["tmdb"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val kitsu = ids["kitsu"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
-        val mal = ids["mal"]?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        val mal = ids["mal"]?.removePrefix("mal:")
+            ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+        val anilist = ids["anilist"]?.removePrefix("anilist:")
+            ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val anime = item.anime || overrides["_anime"] == "true"
         val base = when {
             item.stremioProvider != null && anime && kitsu != null -> "kitsu:" + kitsu
@@ -799,21 +806,22 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             tmdb != null -> "tmdb:" + tmdb
             kitsu != null -> "kitsu:" + kitsu
             mal != null -> "mal:" + mal
+            anilist != null -> "anilist:" + anilist
             else -> item.urlId?.takeIf {
-                it.matches(Regex("tt[0-9]+|(?:tmdb|kitsu|mal):[0-9]+"))
+                it.matches(Regex("tt[0-9]+|(?:tmdb|kitsu|mal|anilist):[0-9]+"))
             } ?: run {
                 return
             }
         }
-        val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
+        val season = if (base.startsWith("kitsu:") || base.startsWith("mal:") || base.startsWith("anilist:")) 1
             else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 }
                 ?: item.cineKitsu?.first ?: item.season
-        val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:")) item.episode
+        val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:") || base.startsWith("anilist:")) item.episode
             else overrides["_episode"]?.toIntOrNull()?.takeIf { it > 0 }
                 ?: item.cineKitsu?.second ?: item.episode
         val videoId = if (item.movie) base else {
             if (episode == null || episode <= 0 || season == null || season <= 0) return
-            if (base.startsWith("kitsu:") || base.startsWith("mal:")) base + ":" + episode
+            if (base.startsWith("kitsu:") || base.startsWith("mal:") || base.startsWith("anilist:")) base + ":" + episode
             else base + ":" + season + ":" + episode
         }
         val body = JSONObject()
