@@ -171,15 +171,6 @@
                             android:text="Metadata"
                             android:textSize="16sp"
                             android:textStyle="bold" />
-                        <TextView
-                            android:id="@+id/summaryMetadata"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="API key required"
-                            android:textSize="12sp"
-                            android:tag="stremioc_secondary"
-                            android:singleLine="true"
-                            android:ellipsize="end" />
                     </LinearLayout>
                     <TextView
                         android:layout_width="24dp"
@@ -296,20 +287,23 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
+                        android:layout_gravity="top"
+                        android:paddingTop="8dp"
                         android:orientation="vertical">
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="TMDB Language"
-                            android:textSize="13sp"
-                            android:textStyle="bold" />
+                            android:textSize="12sp"
+                            android:includeFontPadding="false"
+                            android:tag="stremioc_secondary" />
                         <TextView
                             android:id="@+id/summaryLanguage"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="en-US"
-                            android:textSize="12sp"
-                            android:tag="stremioc_secondary"
+                            android:textSize="14sp"
+                            android:includeFontPadding="false"
                             android:singleLine="true"
                             android:ellipsize="end" />
                     </LinearLayout>
@@ -331,7 +325,7 @@
                     android:id="@+id/layoutHistorySyncUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="8dp"
                     android:orientation="vertical">
                     <TextView
                         android:layout_width="match_parent"
@@ -345,7 +339,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:paddingStart="12dp"
-                        android:text="Sync metadata and recommendation posters for enabled catalogs via AIOMetadata."
+                        android:text="Sync metadata for enabled catalogs via AIOMetadata."
                         android:textSize="12sp"
                         android:includeFontPadding="false"
                         android:tag="stremioc_secondary" />

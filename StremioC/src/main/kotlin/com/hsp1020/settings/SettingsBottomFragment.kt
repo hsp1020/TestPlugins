@@ -1646,7 +1646,6 @@ class SettingsBottomFragment(
             val code = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
             val names = LANGUAGES.filter { it.second == code }
             (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
-            (view.optional("summaryMetadata") as? TextView)?.text = code
             listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
