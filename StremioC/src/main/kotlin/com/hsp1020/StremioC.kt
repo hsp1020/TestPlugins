@@ -1780,8 +1780,11 @@ open class StremioC(
         private val homeJsonFlights = mutableMapOf<String, Deferred<String>>()
 
         private suspend fun fetchHomeJson(url: String): String {
+            val traceKey = StremioCMetaPerf.key(url)
+            var joined = false
             val task = synchronized(homeJsonFlights) {
-                homeJsonFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                homeJsonFlights[url]?.also { joined = true }
+                    ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
                         val body = fetchHomeJsonUnshared(url)
                         body
@@ -1795,7 +1798,18 @@ open class StremioC(
                     it.start()
                 }
             }
-            return task.await()
+            val waitAt = StremioCMetaPerf.now()
+            return try {
+                task.await().also {
+                    StremioCMetaPerf.log("CATALOG_FLIGHT", traceKey,
+                        "joined=$joined waitMs=${StremioCMetaPerf.now() - waitAt}")
+                }
+            } catch (error: Throwable) {
+                StremioCMetaPerf.log("CATALOG_FLIGHT_FAIL", traceKey,
+                    "joined=$joined waitMs=${StremioCMetaPerf.now() - waitAt} " +
+                        "reason=${error.javaClass.simpleName}")
+                throw error
+            }
         }
 
         private suspend fun fetchHomeJsonUnshared(url: String): String {
@@ -1810,14 +1824,27 @@ open class StremioC(
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
             return suspendCancellableCoroutine { continuation ->
+                val traceKey = StremioCMetaPerf.key(url)
+                val started = StremioCMetaPerf.now()
                 val call = homeForegroundClient.newCall(request)
+                StremioCMetaPerf.log("CATALOG_HTTP_START", traceKey,
+                    "queued=${homeForegroundClient.dispatcher.queuedCallsCount()} " +
+                        "running=${homeForegroundClient.dispatcher.runningCallsCount()}")
                 continuation.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : okhttp3.Callback {
                     override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                        StremioCMetaPerf.log("CATALOG_HTTP_FAIL", traceKey,
+                            "elapsedMs=${StremioCMetaPerf.now() - started} " +
+                                "cancelled=${call.isCanceled()} reason=${e.javaClass.simpleName}")
                         if (continuation.isActive) continuation.resumeWith(Result.failure(e))
                     }
 
                     override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                        val headerMs = StremioCMetaPerf.now() - started
+                        StremioCMetaPerf.log("CATALOG_HTTP_HEADERS", traceKey,
+                            "status=${response.code} headerMs=$headerMs protocol=${response.protocol} " +
+                                "cfCache=${response.header("CF-Cache-Status") ?: "-"} " +
+                                "serverTiming=${response.header("Server-Timing")?.take(96)?.replace(' ', '_') ?: "-"}")
                         val outcome = runCatching {
                             response.use { res ->
                                 if (res.code == 429) {
@@ -1839,6 +1866,11 @@ open class StremioC(
                                 res.body?.string() ?: throw IllegalStateException("Empty catalog response body")
                             }
                         }
+                        StremioCMetaPerf.log("CATALOG_HTTP_BODY", traceKey,
+                            "totalMs=${StremioCMetaPerf.now() - started} " +
+                                "bodyMs=${StremioCMetaPerf.now() - started - headerMs} " +
+                                "bytes=${outcome.getOrNull()?.length ?: 0} " +
+                                "success=${outcome.isSuccess}")
                         if (continuation.isActive) continuation.resumeWith(outcome)
                     }
                 })
@@ -2439,12 +2471,20 @@ open class StremioC(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (!isAddonEnabled()) return newHomePageResponse(
             listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
+        val traceKey = StremioCMetaPerf.key("$mainUrl|${request.data}|$page")
+        val pageAt = StremioCMetaPerf.now()
+        StremioCMetaPerf.log("HOME_PAGE_BEGIN", traceKey, "page=$page")
         return try {
-            executeMainPage(page, request)
+            executeMainPage(page, request).also {
+                StremioCMetaPerf.log("HOME_PAGE_END", traceKey,
+                    "page=$page elapsedMs=${StremioCMetaPerf.now() - pageAt}")
+            }
         } catch (e: CancellationException) {
 
             throw e
         } catch (t: Throwable) {
+            StremioCMetaPerf.log("HOME_PAGE_FAIL", traceKey,
+                "page=$page elapsedMs=${StremioCMetaPerf.now() - pageAt} reason=${t.javaClass.simpleName}")
             newHomePageResponse(listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
         }
     }
@@ -2550,15 +2590,31 @@ open class StremioC(
         }
     }
 
-    private suspend fun fetchCatalogItems(path: String, fallbackType: String = "movie"): Pair<List<SearchResponse>, Int> {
+    private suspend fun fetchCatalogItems(
+        path: String, fallbackType: String = "movie", origin: String = "home"
+    ): Pair<List<SearchResponse>, Int> {
         val cacheKey = "$mainUrl|$fallbackType|$path"
+        val traceKey = StremioCMetaPerf.key(cacheKey)
+        val began = StremioCMetaPerf.now()
         synchronized(recentHomeResults) {
             recentHomeResults[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
-        }?.let { return it }
+        }?.let {
+            StremioCMetaPerf.log("CATALOG_CACHE", traceKey,
+                "origin=$origin source=RAM elapsedMs=${StremioCMetaPerf.now() - began} count=${it.first.size}")
+            return it
+        }
+        StremioCMetaPerf.log("CATALOG_CACHE", traceKey, "origin=$origin source=NETWORK")
+        val queuedAt = StremioCMetaPerf.now()
         return homeForegroundSemaphore.withPermit {
+            StremioCMetaPerf.log("CATALOG_SEMAPHORE", traceKey,
+                "origin=$origin waitMs=${StremioCMetaPerf.now() - queuedAt}")
+            val networkAt = StremioCMetaPerf.now()
             val json = fetchHomeJson(buildUrl(path))
+            StremioCMetaPerf.log("CATALOG_JSON_READY", traceKey,
+                "origin=$origin networkMs=${StremioCMetaPerf.now() - networkAt} bytes=${json.length}")
+            val parseAt = StremioCMetaPerf.now()
             val metas = parseJson<HomeCatalogResponse>(json).metas
                 ?: throw IllegalStateException("Catalog response is missing metas")
             val items = metas.mapNotNull { meta ->
@@ -2570,12 +2626,17 @@ open class StremioC(
                 rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
+            StremioCMetaPerf.log("CATALOG_PARSED", traceKey,
+                "origin=$origin parseMs=${StremioCMetaPerf.now() - parseAt} raw=${metas.size} " +
+                    "cards=${items.size} xrdb=${items.count { it.posterUrl?.contains("xrdb.", true) == true }}")
             val result = items to metas.size
             if (items.isNotEmpty() && items.size <= 80) {
                 synchronized(recentHomeResults) {
                     recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())
                 }
             }
+            StremioCMetaPerf.log("CATALOG_RETURN", traceKey,
+                "origin=$origin totalMs=${StremioCMetaPerf.now() - began} count=${items.size}")
             result
         }
     }
@@ -2593,7 +2654,7 @@ open class StremioC(
 
     internal suspend fun browsePage(catalog: Catalog, genre: String?, offset: Int): Pair<List<SearchResponse>, Int> =
         if (!isAddonEnabled()) emptyList<SearchResponse>() to 0
-        else fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type))
+        else fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type), "browser")
 
     override suspend fun search(query: String): List<SearchResponse>? {
 

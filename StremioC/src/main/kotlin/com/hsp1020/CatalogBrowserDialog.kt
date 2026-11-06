@@ -710,6 +710,7 @@ internal class CatalogBrowserDialog(
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
     private val grid = AutofitRecyclerView(activity)
+    private val posterProbe = CatalogPosterProbe(grid, "browser") { items }
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
@@ -1497,6 +1498,7 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.BOTTOM
         })
         grid.adapter = adapter
+        posterProbe.start()
         grid.addItemDecoration(catalogEndDecoration)
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (pageSkeleton.visibility == View.VISIBLE) grid.post { updatePageSkeleton() }
@@ -1557,6 +1559,7 @@ internal class CatalogBrowserDialog(
             activity.findViewById<View>(R.id.nav_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
+            posterProbe.stop()
             grid.adapter = null
             onDismiss()
             (homeTitleFocus ?: tvOriginFocus)?.takeIf { it.isAttachedToWindow }?.let { focus ->
@@ -1825,13 +1828,17 @@ internal class CatalogBrowserDialog(
         }
         pendingHome = null
         if (home != null) {
-
+            val snapshotAt = StremioCMetaPerf.now()
+            StremioCMetaPerf.log("BROWSER_SNAPSHOT", StremioCMetaPerf.key(next.url),
+                "origin=home reuse=${home.items.size} genre=none")
             items.addAll(home.items)
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
             adapter.submitList(items.toList()) {
                 if (!closed) {
+                    StremioCMetaPerf.log("BROWSER_LIST_COMMIT", StremioCMetaPerf.key(next.url),
+                        "origin=home elapsedMs=${StremioCMetaPerf.now() - snapshotAt} cards=${items.size}")
                     initialProgress(false)
                     updateCatalogResultState()
                 }
@@ -1962,6 +1969,12 @@ internal class CatalogBrowserDialog(
         val ticket = generation
         val selectedGenre = genre
         val requestedOffset = offset
+        val perfKey = StremioCMetaPerf.key(
+            "${selectedProvider.mainUrl}|${selectedCatalog.type}|${selectedCatalog.id}|${selectedGenre}|$requestedOffset"
+        )
+        val perfStarted = StremioCMetaPerf.now()
+        StremioCMetaPerf.log("BROWSER_PAGE_BEGIN", perfKey,
+            "offset=$requestedOffset genre=${selectedGenre != null} ticket=$ticket")
         loading = true
         updateCatalogResultState()
         val firstPage = items.isEmpty()
@@ -1972,6 +1985,9 @@ internal class CatalogBrowserDialog(
                 val (page, rawCount) = withContext(Dispatchers.IO) {
                     selectedProvider.browsePage(selectedCatalog, selectedGenre, requestedOffset)
                 }
+                StremioCMetaPerf.log("BROWSER_PAGE_RESULT", perfKey,
+                    "fetchMs=${StremioCMetaPerf.now() - perfStarted} raw=$rawCount cards=${page.size} " +
+                        "stale=${ticket != generation}")
                 if (ticket != generation) {
                     return@launch
                 }
@@ -1980,8 +1996,14 @@ internal class CatalogBrowserDialog(
                 items.addAll(fresh)
                 offset += rawCount 
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
+                val submitAt = StremioCMetaPerf.now()
+                StremioCMetaPerf.log("BROWSER_LIST_SUBMIT", perfKey,
+                    "elapsedMs=${submitAt - perfStarted} new=${fresh.size} total=${items.size}")
                 adapter.submitList(items.toList()) {
                     if (ticket == generation && !closed) {
+                        StremioCMetaPerf.log("BROWSER_LIST_COMMIT", perfKey,
+                            "submitMs=${StremioCMetaPerf.now() - submitAt} " +
+                                "totalMs=${StremioCMetaPerf.now() - perfStarted} cards=${items.size}")
                         if (firstPage) initialProgress(false)
                         updateCatalogResultState()
                     }
@@ -1998,6 +2020,9 @@ internal class CatalogBrowserDialog(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                StremioCMetaPerf.log("BROWSER_PAGE_FAIL", perfKey,
+                    "elapsedMs=${StremioCMetaPerf.now() - perfStarted} " +
+                        "reason=${e.javaClass.simpleName}")
                 if (ticket == generation) {
                     Toast.makeText(activity, "Unable to load catalog. Please retry.", Toast.LENGTH_SHORT).show()
                     retry.visibility = View.VISIBLE
@@ -2021,6 +2046,110 @@ internal data class CatalogHomeSnapshot(
     val nextSkip: Int,
     val hasNext: Boolean
 )
+
+
+/**
+ * Diagnostic-only observer of attached cards. It does not issue image requests,
+ * alter image binding or gate offscreen items. Drawable changes are NOT cache-source proof.
+ */
+internal class CatalogPosterProbe(
+    private val list: RecyclerView,
+    private val surface: String,
+    private val cards: () -> List<SearchResponse>
+) {
+    private data class Observation(
+        val cardKey: String,
+        val image: ImageView?,
+        var drawable: android.graphics.drawable.Drawable?,
+        val firstAt: Long,
+        var shown: Boolean = false
+    )
+    private val seen = java.util.IdentityHashMap<View, Observation>()
+    private var active = false
+    private var lastAt = 0L
+    private val surfaceKey = System.identityHashCode(list).toUInt().toString(16)
+
+    private fun posterImage(card: View): ImageView? {
+        val base = card.findViewById<View>(R.id.background_card) ?: return null
+        if (base is ImageView) return base
+        fun findImage(view: View): ImageView? {
+            if (view is ImageView) return view
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) {
+                    findImage(view.getChildAt(index))?.let { return it }
+                }
+            }
+            return null
+        }
+        return findImage(base)
+    }
+
+    private fun inspect() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAt < 100L) return
+        lastAt = now
+        val data = cards()
+        val present = HashSet<View>()
+        for (i in 0 until list.childCount) {
+            val card = list.getChildAt(i)
+            val position = list.getChildAdapterPosition(card)
+            if (position == RecyclerView.NO_POSITION) continue
+            val entry = data.getOrNull(position) ?: continue
+            present.add(card)
+            val cardKey = StremioCMetaPerf.key(entry.url)
+            val img = posterImage(card)
+            val existing = seen[card]
+            if (existing == null || existing.cardKey != cardKey || existing.image !== img) {
+                val original = entry.posterUrl
+                val kind = when {
+                    original.isNullOrBlank() -> "none"
+                    original.contains("xrdb.", true) -> "xrdb"
+                    else -> "other"
+                }
+                StremioCMetaPerf.log("CARD_BIND", cardKey,
+                    "surface=$surface surfaceKey=$surfaceKey position=$position " +
+                        "posterKey=${StremioCMetaPerf.key(original)} kind=$kind hasView=${img != null}")
+                seen[card] = Observation(cardKey, img, img?.drawable, now)
+                if (img?.drawable != null) {
+                    StremioCMetaPerf.log("CARD_DRAWABLE", cardKey,
+                        "surface=$surface state=initial sinceBindMs=0 " +
+                            "size=${img.drawable.intrinsicWidth}x${img.drawable.intrinsicHeight}")
+                }
+            }
+            val state = seen[card] ?: continue
+            val image = state.image ?: continue
+            val drawable = image.drawable
+            if (state.drawable !== drawable) {
+                state.drawable = drawable
+                StremioCMetaPerf.log("CARD_DRAWABLE", cardKey,
+                    "surface=$surface state=changed sinceBindMs=${now - state.firstAt} " +
+                        "hasDrawable=${drawable != null} " +
+                        "size=${drawable?.intrinsicWidth ?: 0}x${drawable?.intrinsicHeight ?: 0}")
+            }
+            if (!state.shown && drawable != null && image.isShown &&
+                image.alpha > 0f && image.width > 0 && image.height > 0) {
+                state.shown = true
+                StremioCMetaPerf.log("CARD_FIRST_VISIBLE", cardKey,
+                    "surface=$surface sinceBindMs=${now - state.firstAt} " +
+                        "size=${drawable.intrinsicWidth}x${drawable.intrinsicHeight} " +
+                        "note=drawable_may_be_placeholder")
+            }
+        }
+        seen.keys.retainAll(present)
+    }
+    private val preDraw = ViewTreeObserver.OnPreDrawListener { inspect(); true }
+    fun start() {
+        if (active) return
+        active = true
+        list.viewTreeObserver.addOnPreDrawListener(preDraw)
+    }
+    fun stop() {
+        if (!active) return
+        active = false
+        list.viewTreeObserver.let { if (it.isAlive) it.removeOnPreDrawListener(preDraw) }
+        seen.clear()
+    }
+}
 
 internal class CatalogHomeEntryHook(
     private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit,
@@ -2098,6 +2227,7 @@ internal class CatalogHomeEntryHook(
     }
 
     private inner class Row(val view: View, private val child: RecyclerView, val adapter: HomeChildItemAdapter) {
+        private val posterProbe = CatalogPosterProbe(child, "home") { adapter.immutableCurrentList }
         private val title = view.findViewById<View>(R.id.home_child_more_info)
         private val originalFocusable = title?.isFocusable == true
         private val originalForeground = title?.foreground
@@ -2139,6 +2269,7 @@ internal class CatalogHomeEntryHook(
 
         fun install() {
             adapter.registerAdapterDataObserver(observer)
+            posterProbe.start()
             refreshFocus()
             val control = title ?: return
             if (isLayout(TV)) control.foreground = themedPressedForeground(control)
@@ -2194,6 +2325,7 @@ internal class CatalogHomeEntryHook(
 
         fun dispose() {
             adapter.unregisterAdapterDataObserver(observer)
+            posterProbe.stop()
             title?.apply {
                 setOnTouchListener(null)
                 setOnKeyListener(null)
