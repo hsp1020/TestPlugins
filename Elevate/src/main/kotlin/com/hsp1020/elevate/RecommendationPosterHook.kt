@@ -71,7 +71,7 @@ internal class RecommendationPosterHook(private val application: Application) :
     private var revision = 0
     private val unavailable = mutableSetOf<String>()
     private val simklLimiter = Semaphore(2)
-    private val detailLimiter = Semaphore(2)
+    private val detailLimiter = Semaphore(5)
     private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
     private val detailMappings = LinkedHashMap<String, Pair<Long, DetailIds?>>()
     private val simklMappings = LinkedHashMap<String, Pair<Long, PosterIds?>>()
@@ -456,12 +456,13 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
         val found = try {
             withContext(Dispatchers.IO) {
-                withTimeoutOrNull(18_000L) {
-                    detailLimiter.withPermit {
+                detailLimiter.withPermit {
+                    // Limit the metadata fetch itself, not time spent waiting for a slot.
+                    withTimeoutOrNull(8_000L) {
                         val provider = APIHolder.getApiFromNameNull(card.apiName)
                             ?: APIHolder.getApiFromUrlNull(card.url)
-                            ?: return@withPermit null
-                        val response = provider.load(card.url) ?: return@withPermit null
+                            ?: return@withTimeoutOrNull null
+                        val response = provider.load(card.url) ?: return@withTimeoutOrNull null
                         val saved = readIdFromString(response.syncData["simkl"])
                         fun valid(value: String?): String? = value?.substringAfterLast(':')
                             ?.toLongOrNull()?.takeIf { it > 0 }?.toString()
@@ -486,7 +487,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                         val simkl = firstId(saved[SimklSyncServices.Simkl],
                             response.syncData["simkl"],
                             SIMKL.find(response.url)?.groupValues?.get(1))
-                        if (!ids.available && simkl == null) return@withPermit null
+                        if (!ids.available && simkl == null) return@withTimeoutOrNull null
                         DetailIds(ids, simkl, when (response.type) {
                             TvType.Others -> card.type in setOf(TvType.Movie, TvType.AnimeMovie)
                             else -> response.type in setOf(TvType.Movie, TvType.AnimeMovie)
