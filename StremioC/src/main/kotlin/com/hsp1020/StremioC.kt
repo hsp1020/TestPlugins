@@ -806,7 +806,35 @@ open class StremioC(
         // A separate supervisor prevents the parent detail load from joining background requests.
         private val simklSuggestionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val simklSuggestionSemaphore = Semaphore(3)
-        private const val SIMKL_RECOMMENDATION_WAIT_MS = 1000L
+        private const val SIMKL_RECOMMENDATION_WAIT_MS = 150L
+        internal data class RecommendationUpdate(val url: String, val cards: List<SearchResponse>)
+        internal val recommendationUpdates = androidx.lifecycle.MutableLiveData<RecommendationUpdate>()
+        private val recentRecommendations = lruCacheMap<String, List<SearchResponse>>(100)
+        internal fun latestRecommendationFor(url: String): RecommendationUpdate? =
+            recentRecommendations[url]?.let { RecommendationUpdate(url, it) }
+        private fun publishRecommendations(url: String, cards: List<SearchResponse>) {
+            recentRecommendations[url] = cards
+            recommendationUpdates.postValue(RecommendationUpdate(url, cards))
+        }
+        private data class RelationArtwork(val poster: String?, val mal: String?, val kitsu: String?)
+        private val relationArtCache = lruCacheMap<String, RelationArtwork>(200)
+        private val relationArtSemaphore = Semaphore(3)
+        private fun cachedRelationArt(url: String): RelationArtwork? = relationArtCache[url]
+        private suspend fun loadRelationArt(url: String) = relationArtSemaphore.withPermit {
+            if (relationArtCache.containsKey(url)) return@withPermit
+            val artwork = withTimeoutOrNull(5_000L) {
+                runSuspendCatching {
+                    val json = parseJson<JsonNode>(fetchAddonMetaText(url))
+                    val meta = json.get("meta") ?: json
+                    fun id(key: String) = meta.get(key)?.asText()?.trim()?.takeIf { it.isNotBlank() }
+                    RelationArtwork(
+                        id("poster")?.takeIf { it.startsWith("https://") || it.startsWith("http://") },
+                        id("_malId") ?: id("mal_id"), id("_kitsuId")
+                    )
+                }.getOrNull()
+            }
+            if (artwork != null) relationArtCache[url] = artwork
+        }
         private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
         private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
         private const val SIMKL_RECOMMENDATION_ERROR_TTL_MS = 30_000L
@@ -819,14 +847,15 @@ open class StremioC(
 
         private fun simklSuggestionsFromDetail(text: String): List<SimklSuggestion> {
             val detail = parseJson<JsonNode>(text)
-            val userSuggestions = detail.get("users_recommendations")
-            val rows = if (userSuggestions != null && userSuggestions.isArray && userSuggestions.size() > 0)
-                userSuggestions else detail.get("similar")
-            if (rows == null || !rows.isArray) return emptyList()
-            return rows.take(30).mapIndexedNotNull { index, row ->
+            val rows = buildList<JsonNode> {
+                detail.get("users_recommendations")?.takeIf { it.isArray }?.take(30)?.let { addAll(it) }
+                detail.get("similar")?.takeIf { it.isArray }?.take(30)?.let { addAll(it) }
+            }
+            return rows.mapIndexedNotNull { index, row ->
                 val ids = row.get("ids") ?: return@mapIndexedNotNull null
                 val tmdb = ids.get("tmdb")?.asInt(0)?.takeIf { it > 0 }
                 val mal = ids.get("mal")?.asInt(0)?.takeIf { it > 0 }
+                val kitsu = ids.get("kitsu")?.asInt(0)?.takeIf { it > 0 }
                 val imdb = ids.get("imdb")?.asText()?.takeIf { IMDB_ID_REGEX.matches(it) }
                 val originalType = row.get("type")?.asText()?.lowercase()
                 val isAnime = originalType == "anime"
@@ -835,7 +864,8 @@ open class StremioC(
                 val type = if (movie) "movie" else "series"
                 val id = if (isAnime && mal != null) "mal:$mal"
                     else tmdb?.let { "tmdb:$it" }
-                        ?: imdb ?: mal?.let { "mal:$it" } ?: return@mapIndexedNotNull null
+                        ?: imdb ?: mal?.let { "mal:$it" }
+                        ?: kitsu?.let { "kitsu:$it" } ?: return@mapIndexedNotNull null
                 val title = listOf("en_title", "title", "name")
                     .firstNotNullOfOrNull { row.get(it).textOrNull()?.trim()?.takeIf(String::isNotBlank) }
                     ?: return@mapIndexedNotNull null
@@ -847,7 +877,7 @@ open class StremioC(
         }
 
         private fun cachedSimklTitle(
-            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?
+            userId: String, type: String, tmdbId: String?, imdbId: String?, malId: Int?
         ): Pair<String, String>? {
                 val now = System.currentTimeMillis()
             var index = simklTitleIndex?.takeIf {
@@ -891,13 +921,13 @@ open class StremioC(
             val entries = index!!.byExternalId
             val hit = malId?.let { entries["mal:$it"] }
                 ?: imdbId?.let { entries["imdb:$it"] }
-                ?: entries["tmdb:$type:$tmdbId"]
+                ?: tmdbId?.let { entries["tmdb:$type:$it"] }
             
             return hit
         }
 
         private suspend fun loadSimklSuggestions(
-            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?,
+            userId: String, type: String, tmdbId: String?, imdbId: String?, malId: Int?,
             headers: Map<String, String>, clientId: String, key: String
         ): List<SimklSuggestion>? {
             return simklSuggestionSemaphore.withPermit {
@@ -919,7 +949,7 @@ open class StremioC(
                 val lookups = mutableListOf<Pair<String, String>>()
                 malId?.takeIf { it > 0 }?.let { lookups += "mal" to it.toString() }
                 imdbId?.takeIf { IMDB_ID_REGEX.matches(it) }?.let { lookups += "imdb" to it }
-                lookups += "tmdb" to tmdbId
+                tmdbId?.toIntOrNull()?.takeIf { it > 0 }?.let { lookups += "tmdb" to it.toString() }
                 val paramsBase = mapOf(
                     "client_id" to clientId,
                     "app-name" to "stremioc",
@@ -1049,12 +1079,11 @@ open class StremioC(
         }
 
         private fun requestSimklSuggestions(
-            type: String, tmdbId: String, imdbId: String?, malId: Int?
+            type: String, tmdbId: String?, imdbId: String?, malId: Int?
         ): Deferred<List<SimklSuggestion>>? {
-            if (tmdbId.toIntOrNull()?.let { it > 0 } != true) {
-                
-                return null
-            }
+            if (tmdbId?.toIntOrNull()?.let { it > 0 } != true &&
+                imdbId?.let { IMDB_ID_REGEX.matches(it) } != true &&
+                malId?.let { it > 0 } != true) return null
             val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
                 ?.authData()
             if (auth == null) {
@@ -1067,7 +1096,7 @@ open class StremioC(
                 
                 return null
             }
-            val key = listOf(type, tmdbId, imdbId.orEmpty(), malId?.toString().orEmpty()).joinToString("|")
+            val key = listOf(type, tmdbId.orEmpty(), imdbId.orEmpty(), malId?.toString().orEmpty()).joinToString("|")
             val cached = simklSuggestionCache[key]
             val now = System.currentTimeMillis()
             if (cached != null && now >= cached.at &&
@@ -4305,10 +4334,11 @@ open class StremioC(
     )
 
     private data class Link(
-        @JsonProperty("name") val name: String? = null, 
-        @JsonProperty("category") val category: String? = null, 
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("category") val category: String? = null,
         @JsonProperty("url") val url: String? = null
     )
+    private data class RelationSuggestion(val type: String, val id: String, val name: String, val url: String)
 
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
@@ -4379,6 +4409,91 @@ open class StremioC(
             }
         }
 
+        private fun relatedTitles(provider: StremioC, detail: CatalogEntry): List<RelationSuggestion> =
+            (detail.links.orEmpty() + links.orEmpty()).mapNotNull { link ->
+                if (!link.category.equals("prequel", true) && !link.category.equals("sequel", true))
+                    return@mapNotNull null
+                val target = runCatching { android.net.Uri.parse(link.url ?: "") }.getOrNull()
+                    ?: return@mapNotNull null
+                val parts = target.pathSegments
+                if (target.scheme != "stremio" || target.host != null || parts.size != 3 ||
+                    parts[0] != "detail" || parts[1] !in listOf("movie", "series"))
+                    return@mapNotNull null
+                val id = parts[2]
+                if (id.substringBefore(':').lowercase() !in setOf("kitsu", "mal") ||
+                    id.substringAfter(':', "").toIntOrNull()?.let { it > 0 } != true ||
+                    id == this.id || id == detail.id) return@mapNotNull null
+                RelationSuggestion(parts[1], id, link.name?.takeIf { it.isNotBlank() } ?: id,
+                    provider.getUnifiedMetaUrl(parts[1], id))
+            }.distinctBy { it.type to it.id }.take(12).sortedBy { relation ->
+                if ((detail.links.orEmpty() + links.orEmpty()).any {
+                    it.category.equals("prequel", true) && it.url?.endsWith(relation.id) == true
+                }) 0 else 1
+            }
+
+        private fun mergeRecommendations(
+            provider: StremioC, relations: List<RelationSuggestion>,
+            original: List<SearchResponse>?, simklRows: List<SimklSuggestion>
+        ): List<SearchResponse> {
+            val cards = ArrayList<SearchResponse>(50)
+            val seen = HashSet<String>()
+            val aliases = HashSet<String>()
+            for (relation in relations) {
+                val art = StremioC.cachedRelationArt(relation.url)
+                art?.mal?.let { aliases.add("mal:$it") }
+                art?.kitsu?.let { aliases.add("kitsu:$it") }
+                if (!seen.add(relation.type + ":" + relation.id)) continue
+                cards += provider.newMovieSearchResponse(relation.name, relation.url,
+                    if (relation.type == "movie") TvType.AnimeMovie else TvType.Anime
+                ) { posterUrl = art?.poster ?: TRANSPARENT_PIXEL }
+            }
+            fun add(card: SearchResponse, id: String, type: String) {
+                if (id in aliases || !seen.add(type + ":" + id)) return
+                if (cards.size < 50) cards += card
+            }
+            original.orEmpty().forEach { card ->
+                val data = runCatching { parseJson<LoadData>(card.url) }.getOrNull()
+                add(card, data?.id ?: card.url, data?.type ?: "series")
+            }
+            simklRows.forEach { rec ->
+                if (cards.size >= 50) return@forEach
+                val canonical = rec.tmdbId?.let { "tmdb:$it" } ?: rec.id
+                if (rec.id in aliases || canonical in aliases ||
+                    rec.type + ":" + canonical in seen || rec.type + ":" + rec.id in seen)
+                    return@forEach
+                val data = LoadData(id = rec.id, type = rec.type, addonUrl = provider.mainUrl)
+                val card = provider.newMovieSearchResponse(rec.name, data.toJson(),
+                    if (rec.type == "movie") TvType.Movie else TvType.TvSeries
+                ) { posterUrl = rec.poster ?: TRANSPARENT_PIXEL }
+                add(card, canonical, rec.type)
+                seen.add(rec.type + ":" + rec.id)
+            }
+            return cards.take(50)
+        }
+
+        private fun scheduleRecommendationRefresh(
+            provider: StremioC, url: String, relations: List<RelationSuggestion>,
+            original: List<SearchResponse>?, simklJob: Deferred<List<SimklSuggestion>>?
+        ) {
+            if (simklJob != null) StremioC.simklSuggestionScope.launch {
+                val rows = try { simklJob.await() } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) { emptyList() }
+                StremioC.publishRecommendations(url, mergeRecommendations(provider, relations, original, rows))
+            }
+            if (relations.any { StremioC.cachedRelationArt(it.url) == null }) {
+                StremioC.simklSuggestionScope.launch {
+                    relations.map { relation -> async { StremioC.loadRelationArt(relation.url) } }.awaitAll()
+                    val rows = if (simklJob?.isCompleted == true) {
+                        try { simklJob.await() } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) { emptyList() }
+                    } else emptyList()
+                    StremioC.publishRecommendations(url, mergeRecommendations(provider, relations, original, rows))
+                }
+            }
+        }
+
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
@@ -4388,7 +4503,8 @@ open class StremioC(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
             preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
-            recommendationMalId: Int? = null
+            recommendationMalId: Int? = null,
+            earlySimklJob: Deferred<List<SimklSuggestion>>? = null
         ): FetchedTmdbData {
             
             var fetchedRecommendations: List<SearchResponse>? = null
@@ -4428,8 +4544,8 @@ open class StremioC(
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
             }
 
-            val simklJob = StremioC.requestSimklSuggestions(
-                tmdbMediaType, tmdbIdStr,
+            val simklJob = earlySimklJob ?: StremioC.requestSimklSuggestions(
+                if (tmdbMediaType == "movie") "movie" else "series", tmdbIdStr,
                 finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) }
                     ?: detailRes.external_ids?.imdb_id,
                 recommendationMalId
@@ -4832,6 +4948,15 @@ open class StremioC(
                     provider.fetchTmdbFindForLoad(finalImdbId, tmdbType)
                 }
             } else null
+            val recommendationMalId = fetchedMalId ?: detailedEntry.malIdExt?.toIntOrNull()
+                ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
+                    ?.substringAfter(':')?.toIntOrNull()
+            val simklJob = StremioC.requestSimklSuggestions(
+                if (tmdbType == "movie") "movie" else "series",
+                tmdbIdStr, finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) },
+                recommendationMalId
+            )
+            val relations = relatedTitles(provider, detailedEntry)
 
             var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
@@ -4905,8 +5030,7 @@ open class StremioC(
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                            fetchedMalId ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
-                                ?.substringAfter(':')?.toIntOrNull())
+                            recommendationMalId, simklJob)
                     }
                 } catch (e: Exception) {
                 }
@@ -4990,6 +5114,15 @@ open class StremioC(
                 }
             }
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
+            val tmdbRecommendations = tmdbData?.fetchedRecommendations
+            val readySimklRows = if (tmdbData == null && simklJob?.isCompleted == true) {
+                try { simklJob.await() } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) { emptyList() }
+            } else emptyList()
+            val recommendationsForPage = mergeRecommendations(
+                provider, relations, tmdbRecommendations, readySimklRows
+            )
 
             resolvedIdHolder?.let {
                 it[0] = cleanImdbId
@@ -5091,7 +5224,7 @@ open class StremioC(
                     this.plot = finalDescription
                     this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
-                    this.recommendations = tmdbData?.fetchedRecommendations 
+                    this.recommendations = recommendationsForPage
                     this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
                         ?: finalVideos?.singleOrNull()?.runtime?.let(::stremioRuntimeMinutes)
                         ?: tmdbData?.fetchedRuntime
@@ -5104,6 +5237,7 @@ open class StremioC(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
+                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, simklJob)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
 
             } else {
@@ -5152,7 +5286,7 @@ open class StremioC(
                     this.plot = finalDescription
                     this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
-                    this.recommendations = tmdbData?.fetchedRecommendations
+                    this.recommendations = recommendationsForPage
                     this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
@@ -5162,8 +5296,9 @@ open class StremioC(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
+                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, simklJob)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
-            }           
+            }
         }
     }
 

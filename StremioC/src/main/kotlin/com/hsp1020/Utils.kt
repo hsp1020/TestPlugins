@@ -86,6 +86,7 @@ import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
@@ -2530,6 +2531,21 @@ internal class RatingPlotImageHook(
         }
         fun start() {
             actorInformation.start()
+            val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+            fun applyRecommendation(update: StremioC.RecommendationUpdate) {
+                val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
+                if (page.url != update.url) return
+                @Suppress("UNCHECKED_CAST")
+                (model.recommendations as? androidx.lifecycle.MutableLiveData<List<SearchResponse>>)
+                    ?.value = update.cards
+            }
+            model.page.observe(fragment.viewLifecycleOwner) { value ->
+                val page = (value as? Resource.Success<ResultData>)?.value ?: return@observe
+                StremioC.latestRecommendationFor(page.url)?.let(::applyRecommendation)
+            }
+            StremioC.recommendationUpdates.observe(fragment.viewLifecycleOwner) { update ->
+                update?.let(::applyRecommendation)
+            }
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
             view.addTextChangedListener(this)
