@@ -827,8 +827,8 @@ internal object ActorInformation {
             val result = provider.newMovieSearchResponse(
                 credit.title, payload.toJson(), if (movie) TvType.Movie else TvType.TvSeries
             ) {
-                this.posterUrl = currentOrigin?.let { posterFor(providerUrl, it, credit) }
-                    ?: credit.poster?.let { "https://image.tmdb.org/t/p/w500" + it }
+                this.posterUrl = credit.poster?.takeIf { it.startsWith("/") }
+                    ?.let { "https://image.tmdb.org/t/p/w500$it" }
             }
             scroll?.let { save() }
             val covered = detailHandoff?.begin() == true
