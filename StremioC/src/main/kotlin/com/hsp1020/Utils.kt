@@ -2533,11 +2533,36 @@ internal class RatingPlotImageHook(
             actorInformation.start()
             val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             fun applyRecommendation(update: StremioC.Companion.RecommendationUpdate) {
-                val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
-                if (page.url != update.url) return
+                val key = Integer.toHexString(update.url.hashCode())
+                val page = (model.page.value as? Resource.Success<ResultData>)?.value
+                if (page?.url != update.url) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "APPLY_SKIP page=$key phase=${update.phase} reason=page_mismatch " +
+                            "active=${page?.url?.let { Integer.toHexString(it.hashCode()) }}")
+                    return
+                }
                 @Suppress("UNCHECKED_CAST")
-                (model.recommendations as? androidx.lifecycle.MutableLiveData<List<SearchResponse>>)
-                    ?.value = update.cards
+                val target = model.recommendations as? androidx.lifecycle.MutableLiveData<List<SearchResponse>>
+                if (target == null) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "APPLY_SKIP page=$key phase=${update.phase} reason=immutable_model")
+                    return
+                }
+                target.value = update.cards
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "APPLY page=$key phase=${update.phase} count=${update.cards.size}")
+            }
+            model.recommendations.observe(fragment.viewLifecycleOwner) { current ->
+                val active = (model.page.value as? Resource.Success<ResultData>)?.value
+                val page = active?.url?.let { Integer.toHexString(it.hashCode()) } ?: "unknown"
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "MODEL_LIST page=$page count=${current.orEmpty().size}")
+                current.orEmpty().forEachIndexed { index, card ->
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MODEL_RANK page=$page rank=${index + 1} " +
+                            "cardKey=${Integer.toHexString(card.url.hashCode())} " +
+                            "title=${recommendationTraceTitle(card.name)}")
+                }
             }
             model.page.observe(fragment.viewLifecycleOwner) { value ->
                 val page = (value as? Resource.Success<ResultData>)?.value ?: return@observe

@@ -90,6 +90,15 @@ internal data class SeasonTrackerIds(
 )
 
 
+internal const val STREMIO_REC_RANK_TAG = "StremioRecRank"
+
+internal fun recommendationTraceTitle(value: String?): String =
+    value.orEmpty().replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').take(90)
+
+internal fun recommendationTraceId(value: String): String =
+    if (value.length > 90 || "://" in value || "{" in value)
+        "hash:" + Integer.toHexString(value.hashCode()) else value
+
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
 private val stremioRuntimePattern = Regex("""(?i)^(?:(\d+)\s*h(?:ours?|rs?)?\s*)?(?:(\d+)\s*m(?:in(?:utes?)?)?\s*)?$""")
@@ -807,14 +816,18 @@ open class StremioC(
         private val simklSuggestionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val simklSuggestionSemaphore = Semaphore(3)
         private const val SIMKL_RECOMMENDATION_WAIT_MS = 150L
-        internal data class RecommendationUpdate(val url: String, val cards: List<SearchResponse>)
+        internal data class RecommendationUpdate(
+            val url: String, val cards: List<SearchResponse>, val phase: String = "cached"
+        )
         internal val recommendationUpdates = androidx.lifecycle.MutableLiveData<RecommendationUpdate>()
         private val recentRecommendations = lruCacheMap<String, List<SearchResponse>>(100)
         internal fun latestRecommendationFor(url: String): RecommendationUpdate? =
             recentRecommendations[url]?.let { RecommendationUpdate(url, it) }
-        private fun publishRecommendations(url: String, cards: List<SearchResponse>) {
+        private fun publishRecommendations(url: String, cards: List<SearchResponse>, phase: String) {
+            android.util.Log.d(STREMIO_REC_RANK_TAG,
+                "PUBLISH page=${Integer.toHexString(url.hashCode())} phase=$phase count=${cards.size}")
             recentRecommendations[url] = cards
-            recommendationUpdates.postValue(RecommendationUpdate(url, cards))
+            recommendationUpdates.postValue(RecommendationUpdate(url, cards, phase))
         }
         private data class RelationArtwork(val poster: String?, val mal: String?, val kitsu: String?)
         private val relationArtCache = lruCacheMap<String, RelationArtwork>(200)
@@ -4338,7 +4351,7 @@ open class StremioC(
         @JsonProperty("category") val category: String? = null,
         @JsonProperty("url") val url: String? = null
     )
-    private data class RelationSuggestion(val type: String, val id: String, val name: String, val url: String)
+    private data class RelationSuggestion(val type: String, val id: String, val name: String, val url: String, val kind: String)
 
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
@@ -4424,7 +4437,8 @@ open class StremioC(
                     id.substringAfter(':', "").toIntOrNull()?.let { it > 0 } != true ||
                     id == this.id || id == detail.id) return@mapNotNull null
                 RelationSuggestion(parts[1], id, link.name?.takeIf { it.isNotBlank() } ?: id,
-                    provider.getUnifiedMetaUrl(parts[1], id))
+                    provider.getUnifiedMetaUrl(parts[1], id),
+                    if (link.category.equals("prequel", true)) "prequel" else "sequel")
             }.distinctBy { it.type to it.id }.take(12).sortedBy { relation ->
                 if ((detail.links.orEmpty() + links.orEmpty()).any {
                     it.category.equals("prequel", true) && it.url?.endsWith(relation.id) == true
@@ -4433,41 +4447,87 @@ open class StremioC(
 
         private fun mergeRecommendations(
             provider: StremioC, relations: List<RelationSuggestion>,
-            original: List<SearchResponse>?, simklRows: List<SimklSuggestion>
+            original: List<SearchResponse>?, simklRows: List<SimklSuggestion>,
+            traceUrl: String, phase: String
         ): List<SearchResponse> {
+            val page = Integer.toHexString(traceUrl.hashCode())
             val cards = ArrayList<SearchResponse>(50)
+            val sources = ArrayList<String>(50)
+            val cardIds = ArrayList<String>(50)
             val seen = HashSet<String>()
             val aliases = HashSet<String>()
+            android.util.Log.d(STREMIO_REC_RANK_TAG,
+                "MERGE_BEGIN page=$page phase=$phase detail=${this.id} " +
+                    "relation=${relations.size} scored=${original?.size ?: 0} simkl=${simklRows.size}")
             for (relation in relations) {
                 val art = StremioC.cachedRelationArt(relation.url)
                 art?.mal?.let { aliases.add("mal:$it") }
                 art?.kitsu?.let { aliases.add("kitsu:$it") }
-                if (!seen.add(relation.type + ":" + relation.id)) continue
+                if (!seen.add(relation.type + ":" + relation.id)) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=duplicate_relation id=${relation.id}")
+                    continue
+                }
                 cards += provider.newMovieSearchResponse(relation.name, relation.url,
                     if (relation.type == "movie") TvType.AnimeMovie else TvType.Anime
                 ) { posterUrl = art?.poster ?: TRANSPARENT_PIXEL }
+                sources += "relation_${relation.kind}:forced_priority"
+                cardIds += relation.id
             }
-            fun add(card: SearchResponse, id: String, type: String) {
-                if (id in aliases || !seen.add(type + ":" + id)) return
-                if (cards.size < 50) cards += card
+            fun add(card: SearchResponse, id: String, type: String, source: String) {
+                if (id in aliases) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=relation_alias source=$source id=${recommendationTraceId(id)}")
+                    return
+                }
+                if (!seen.add(type + ":" + id)) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=duplicate source=$source id=${recommendationTraceId(id)}")
+                    return
+                }
+                if (cards.size < 50) {
+                    cards += card
+                    sources += source
+                    cardIds += id
+                } else {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=limit50 source=$source id=${recommendationTraceId(id)}")
+                }
             }
-            original.orEmpty().forEach { card ->
+            original.orEmpty().forEachIndexed { index, card ->
                 val data = runCatching { parseJson<LoadData>(card.url) }.getOrNull()
-                add(card, data?.id ?: card.url, data?.type ?: "series")
+                add(card, data?.id ?: card.url, data?.type ?: "series",
+                    "weighted_sort:rank=${index + 1}")
             }
             simklRows.forEach { rec ->
-                if (cards.size >= 50) return@forEach
+                if (cards.size >= 50) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=limit50 source=simkl_append id=${rec.id}")
+                    return@forEach
+                }
                 val canonical = rec.tmdbId?.let { "tmdb:$it" } ?: rec.id
                 if (rec.id in aliases || canonical in aliases ||
-                    rec.type + ":" + canonical in seen || rec.type + ":" + rec.id in seen)
+                    rec.type + ":" + canonical in seen || rec.type + ":" + rec.id in seen) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "MERGE_DROP page=$page phase=$phase reason=relation_or_scored_duplicate " +
+                            "source=simkl_append id=${rec.id} canonical=$canonical")
                     return@forEach
+                }
                 val data = LoadData(id = rec.id, type = rec.type, addonUrl = provider.mainUrl)
                 val card = provider.newMovieSearchResponse(rec.name, data.toJson(),
                     if (rec.type == "movie") TvType.Movie else TvType.TvSeries
                 ) { posterUrl = rec.poster ?: TRANSPARENT_PIXEL }
-                add(card, canonical, rec.type)
+                add(card, canonical, rec.type, "simkl_append:rank=${rec.rank + 1}:not_rescored")
                 seen.add(rec.type + ":" + rec.id)
             }
+            cards.forEachIndexed { index, card ->
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "DISPLAY_RANK page=$page phase=$phase rank=${index + 1} source=${sources[index]} " +
+                        "id=${recommendationTraceId(cardIds[index])} cardKey=${Integer.toHexString(card.url.hashCode())} " +
+                        "title=${recommendationTraceTitle(card.name)}")
+            }
+            android.util.Log.d(STREMIO_REC_RANK_TAG,
+                "MERGE_END page=$page phase=$phase count=${cards.size} aliases=${aliases.size}")
             return cards.take(50)
         }
 
@@ -4475,21 +4535,41 @@ open class StremioC(
             provider: StremioC, url: String, relations: List<RelationSuggestion>,
             original: List<SearchResponse>?, simklJob: Deferred<List<SimklSuggestion>>?
         ) {
+            val page = Integer.toHexString(url.hashCode())
+            android.util.Log.d(STREMIO_REC_RANK_TAG,
+                "REFRESH_SCHEDULE page=$page simklJob=${simklJob != null} " +
+                    "missingRelationArt=${relations.count { StremioC.cachedRelationArt(it.url) == null }}")
             if (simklJob != null) StremioC.simklSuggestionScope.launch {
                 val rows = try { simklJob.await() } catch (e: CancellationException) {
                     throw e
-                } catch (_: Exception) { emptyList() }
-                StremioC.publishRecommendations(url, mergeRecommendations(provider, relations, original, rows))
+                } catch (e: Exception) {
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "REFRESH_ERROR page=$page phase=simkl_complete error=${e.javaClass.simpleName}")
+                    emptyList()
+                }
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "REFRESH_READY page=$page phase=simkl_complete simklRows=${rows.size}")
+                val cards = mergeRecommendations(provider, relations, original, rows, url, "simkl_complete")
+                StremioC.publishRecommendations(url, cards, "simkl_complete")
             }
             if (relations.any { StremioC.cachedRelationArt(it.url) == null }) {
                 StremioC.simklSuggestionScope.launch {
                     relations.map { relation -> async { StremioC.loadRelationArt(relation.url) } }.awaitAll()
-                    val rows = if (simklJob?.isCompleted == true) {
-                        try { simklJob.await() } catch (e: CancellationException) {
+                    val ready = simklJob?.isCompleted == true
+                    val rows = if (ready) {
+                        try { simklJob?.await().orEmpty() } catch (e: CancellationException) {
                             throw e
-                        } catch (_: Exception) { emptyList() }
+                        } catch (e: Exception) {
+                            android.util.Log.d(STREMIO_REC_RANK_TAG,
+                                "REFRESH_ERROR page=$page phase=relation_art error=${e.javaClass.simpleName}")
+                            emptyList()
+                        }
                     } else emptyList()
-                    StremioC.publishRecommendations(url, mergeRecommendations(provider, relations, original, rows))
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "REFRESH_READY page=$page phase=relation_art simklReady=$ready " +
+                            "simklRows=${rows.size}")
+                    val cards = mergeRecommendations(provider, relations, original, rows, url, "relation_art")
+                    StremioC.publishRecommendations(url, cards, "relation_art")
                 }
             }
         }
@@ -4666,6 +4746,7 @@ open class StremioC(
                 detailRes.recommendations?.results.orEmpty().forEachIndexed { idx, media ->
                     addTmdb(media, null, idx)
                 }
+                val simklWaitStarted = SystemClock.elapsedRealtime()
                 val awaitedSimklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
                     try {
                         simklJob?.await() ?: emptyList()
@@ -4677,6 +4758,11 @@ open class StremioC(
                     }
                 }
                 val simklRows = awaitedSimklRows.orEmpty()
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "SIMKL_WAIT detail=${this@CatalogEntry.id} tmdb=$tmdbIdStr " +
+                        "status=${if (simklJob == null) "no_job" else if (awaitedSimklRows == null) "timeout" else "completed"} " +
+                        "jobCompleted=${simklJob?.isCompleted} waitMs=${SystemClock.elapsedRealtime() - simklWaitStarted} " +
+                        "budgetMs=${StremioC.SIMKL_RECOMMENDATION_WAIT_MS} rows=${simklRows.size}")
                 
                 simklRows.forEach { rec ->
                     if (rec.tmdbId?.toString() == tmdbIdStr) return@forEach
@@ -4687,7 +4773,7 @@ open class StremioC(
                     card.simklRank = rec.rank
                     card.fallbackPoster = rec.poster
                 }
-                val ordered = candidates.values.sortedWith(
+                val ranked = candidates.values.sortedWith(
                     compareByDescending<SuggestedCard> { it.collectionIndex != null }
                         .thenBy { it.collectionDate ?: "" }
                         .thenByDescending {
@@ -4699,7 +4785,32 @@ open class StremioC(
                         }
                         .thenBy { it.collectionIndex ?: Int.MAX_VALUE }
                         .thenBy { it.tmdbRank ?: it.simklRank ?: Int.MAX_VALUE }
-                ).take(50)
+                )
+                val ordered = ranked.take(50)
+                android.util.Log.d(STREMIO_REC_RANK_TAG,
+                    "SORT_BEGIN detail=${this@CatalogEntry.id} tmdb=$tmdbIdStr type=$tmdbMediaType " +
+                        "collectionRows=${collectionParts.size} tmdbRows=${detailRes.recommendations?.results?.size ?: 0} " +
+                        "simklRows=${simklRows.size} candidates=${ranked.size} selected=${ordered.size}")
+                ranked.forEachIndexed { index, rec ->
+                    val simklBase = if (rec.simklRank != null) 2.0 else 0.0
+                    val tmdbBase = if (rec.tmdbRank != null) 1.7 else 0.0
+                    val sameOriginBonus = if (rec.sameOrigin) 0.5 else 0.0
+                    val simklRankBonus =
+                        rec.simklRank?.let { (30 - it.coerceAtMost(30)) / 300.0 } ?: 0.0
+                    val tmdbRankBonus =
+                        rec.tmdbRank?.let { (30 - it.coerceAtMost(30)) / 300.0 } ?: 0.0
+                    val score = simklBase + tmdbBase + sameOriginBonus +
+                        simklRankBonus + tmdbRankBonus
+                    android.util.Log.d(STREMIO_REC_RANK_TAG,
+                        "SORT_RANK detail=${this@CatalogEntry.id} tmdb=$tmdbIdStr rank=${index + 1} " +
+                            "kept=${index < 50} bucket=${if (rec.collectionIndex != null) "collection_first" else "weighted"} " +
+                            "score=$score simklBase=$simklBase tmdbBase=$tmdbBase " +
+                            "sameOriginBonus=$sameOriginBonus simklRankBonus=$simklRankBonus " +
+                            "tmdbRankBonus=$tmdbRankBonus simklRank=${rec.simklRank?.plus(1)} " +
+                            "tmdbRank=${rec.tmdbRank?.plus(1)} collectionIndex=${rec.collectionIndex?.plus(1)} " +
+                            "collectionDate=${rec.collectionDate} sameOrigin=${rec.sameOrigin} " +
+                            "id=${rec.id} type=${rec.type} title=${recommendationTraceTitle(rec.name)}")
+                }
                 fetchedRecommendations = ordered.map { rec ->
                     val poster = rec.poster ?: rec.fallbackPoster ?: TRANSPARENT_PIXEL
                     val thinData = LoadData(id = rec.id, type = rec.type, addonUrl = provider.mainUrl)
@@ -5121,7 +5232,7 @@ open class StremioC(
                 } catch (_: Exception) { emptyList() }
             } else emptyList()
             val recommendationsForPage = mergeRecommendations(
-                provider, relations, tmdbRecommendations, readySimklRows
+                provider, relations, tmdbRecommendations, readySimklRows, metaUrl, "initial"
             )
 
             resolvedIdHolder?.let {
