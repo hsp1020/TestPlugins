@@ -5288,8 +5288,8 @@ open class StremioC(
             val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
-            val finalLogo = addonLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
-                ?: fallbackAddonLogo
+            val finalLogo = addonLogo ?: fallbackAddonLogo
+                ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
 
             // Keep TMDB's preferred-language/English selection for the title
             // fallback even when a custom AIOMetadata logo is displayed.
