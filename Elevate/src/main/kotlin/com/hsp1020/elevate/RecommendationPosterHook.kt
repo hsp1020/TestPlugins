@@ -22,7 +22,15 @@ import androidx.fragment.app.FragmentManager
 import androidx.recyclerview.widget.RecyclerView
 import coil3.request.crossfade
 import coil3.request.placeholder
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
+import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
+import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
@@ -63,6 +71,9 @@ internal class RecommendationPosterHook(private val application: Application) :
     private var revision = 0
     private val unavailable = mutableSetOf<String>()
     private val simklLimiter = Semaphore(2)
+    private val detailLimiter = Semaphore(2)
+    private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
+    private val detailMappings = LinkedHashMap<String, Pair<Long, DetailIds?>>()
     private val simklMappings = LinkedHashMap<String, Pair<Long, PosterIds?>>()
 
     private val preferences = application.getSharedPreferences(LibraryPosterPrefs.FILE, Context.MODE_PRIVATE)
@@ -82,14 +93,17 @@ internal class RecommendationPosterHook(private val application: Application) :
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
-        ) = attach(f, v)
+        ) {
+            attach(f, v)
+            v.post { if (f.view === v) attach(f, v) }
+        }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             screens.remove(f)?.close()
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
-            screens[f]?.schedule()
+            screens[f]?.schedule() ?: f.view?.let { attach(f, it) }
         }
     }
 
@@ -106,6 +120,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         scope.cancel()
         unavailable.clear()
         synchronized(simklMappings) { simklMappings.clear() }
+        synchronized(detailMappings) { detailMappings.clear() }
     }
 
     private fun use(activity: FragmentActivity) {
@@ -387,20 +402,30 @@ internal class RecommendationPosterHook(private val application: Application) :
             val current = Cover(key, revision, card.posterUrl, card.posterHeaders)
             covers[image] = current
             val (ids, simkl) = directIds(card)
-            if (!ids.available && simkl == null) {
-                current.failed = true
-                return
-            }
             val config = setting
-            val movie = card.type == TvType.Movie || card.type == TvType.AnimeMovie
+            // Some providers label every search card as Movie but keep the real
+            // media type in the card URL (for example TMDB recommendations).
+            val mediaType = runCatching { JSONObject(card.url).optString("type") }
+                .getOrNull()?.lowercase()
+            val movie = when (mediaType) {
+                "movie" -> true
+                "tv", "series" -> false
+                else -> card.type == TvType.Movie || card.type == TvType.AnimeMovie
+            }
             pending[image] = scope.launch {
                 try {
-                    val mapped = if (ids.imdb != null || ids.tmdb != null ||
-                        config.service == PosterService.XRDB && ids.available) ids
+                    // Other providers often expose their IDs only in LoadResponse.syncData,
+                    // never in the recommendation SearchResponse URL.
+                    val detail = if (!ids.available && simkl == null) detailIds(card) else null
+                    val resolvedIds = detail?.ids ?: ids
+                    val resolvedSimkl = detail?.simkl ?: simkl
+                    val resolvedMovie = detail?.movie ?: movie
+                    val mapped = if (resolvedIds.imdb != null || resolvedIds.tmdb != null ||
+                        config.service == PosterService.XRDB && resolvedIds.available) resolvedIds
                     else withContext(Dispatchers.IO) {
-                        animeIds(ids) ?: simkl?.let { simklIds(it, movie) }
+                        animeIds(resolvedIds) ?: resolvedSimkl?.let { simklIds(it, resolvedMovie) }
                     }
-                    val poster = mapped?.let { config.image(it, movie) }
+                    val poster = mapped?.let { config.image(it, resolvedMovie) }
                     if (covers[image] !== current || revision != current.generation ||
                         !image.isAttachedToWindow || view.parent !== list) return@launch
                     if (poster == null || poster in unavailable) {
@@ -418,6 +443,69 @@ internal class RecommendationPosterHook(private val application: Application) :
                 }
             }
         }
+    }
+
+    /** Resolve exactly the same load-time IDs that History Sync and MDB Ratings use. */
+    private suspend fun detailIds(card: SearchResponse): DetailIds? {
+        val key = card.apiName + "|" + card.url + "|" + card.type
+        val now = System.currentTimeMillis()
+        synchronized(detailMappings) {
+            detailMappings[key]?.takeIf {
+                now - it.first < if (it.second == null) 120_000L else 1_800_000L
+            }?.let { return it.second }
+        }
+        val found = try {
+            withContext(Dispatchers.IO) {
+                withTimeoutOrNull(18_000L) {
+                    detailLimiter.withPermit {
+                        val provider = APIHolder.getApiFromNameNull(card.apiName)
+                            ?: APIHolder.getApiFromUrlNull(card.url)
+                            ?: return@withPermit null
+                        val response = provider.load(card.url) ?: return@withPermit null
+                        val saved = readIdFromString(response.syncData["simkl"])
+                        fun valid(value: String?): String? = value?.substringAfterLast(':')
+                            ?.toLongOrNull()?.takeIf { it > 0 }?.toString()
+                        fun firstId(vararg candidates: String?): String? =
+                            candidates.firstNotNullOfOrNull { valid(it) }
+                        val ids = PosterIds(
+                            imdb = listOf(response.getImdbId(), response.syncData["imdb"],
+                                saved[SimklSyncServices.Imdb], IMDB.find(response.url)?.value)
+                                .firstNotNullOfOrNull { it?.takeIf(IMDB_EXACT::matches) },
+                            tmdb = firstId(response.getTMDbId(), response.syncData["tmdb"],
+                                saved[SimklSyncServices.Tmdb],
+                                TMDB.find(response.url)?.groupValues?.get(1)),
+                            mal = firstId(response.getMalId(), response.syncData["mal"],
+                                saved[SimklSyncServices.Mal],
+                                MAL.find(response.url)?.groupValues?.get(1)),
+                            anilist = firstId(response.getAniListId(),
+                                response.syncData["anilist"], saved[SimklSyncServices.AniList],
+                                ANILIST.find(response.url)?.groupValues?.get(1)),
+                            kitsu = firstId(response.getKitsuId(), response.syncData["kitsu"],
+                                KITSU.find(response.url)?.groupValues?.get(1))
+                        )
+                        val simkl = firstId(saved[SimklSyncServices.Simkl],
+                            response.syncData["simkl"],
+                            SIMKL.find(response.url)?.groupValues?.get(1))
+                        if (!ids.available && simkl == null) return@withPermit null
+                        DetailIds(ids, simkl, when (response.type) {
+                            TvType.Others -> card.type in setOf(TvType.Movie, TvType.AnimeMovie)
+                            else -> response.type in setOf(TvType.Movie, TvType.AnimeMovie)
+                        })
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: NotImplementedError) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+        synchronized(detailMappings) {
+            detailMappings[key] = System.currentTimeMillis() to found
+            if (detailMappings.size > 160) detailMappings.remove(detailMappings.keys.first())
+        }
+        return found
     }
 
     private suspend fun animeIds(ids: PosterIds): PosterIds? {
@@ -560,6 +648,18 @@ internal class RecommendationPosterHook(private val application: Application) :
         }
         read(card.url)
         read(card.posterUrl)
+        // A numeric JSON "id" is only a TMDB ID when the provider itself
+        // declares a TMDB origin. Never guess numeric IDs on scraper sites.
+        if (tmdb == null) {
+            val json = runCatching { JSONObject(card.url) }.getOrNull()
+            val candidate = if (json?.optString("type") in setOf("movie", "tv", "series"))
+                positive(json?.optString("id")) else null
+            if (candidate != null) {
+                val source = APIHolder.getApiFromNameNull(card.apiName)?.mainUrl.orEmpty()
+                val host = runCatching { Uri.parse(source).host?.removePrefix("www.") }.getOrNull()
+                if (host == "themoviedb.org") tmdb = candidate
+            }
+        }
         return PosterIds(imdb, tmdb, mal, anilist, kitsu) to simkl
     }
 
