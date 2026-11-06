@@ -2867,7 +2867,8 @@ open class StremioC(
             directTmdbFromRes ?: validatedFindResult?.first else null
         val targetTmdbMediaType = authoritativeMediaType
         val speculativeTmdbDetail = acceptedTmdbSpec?.takeIf {
-            targetTmdbId != null && it.matchesDirect(targetTmdbId, targetTmdbMediaType)
+            targetTmdbId != null && targetTmdbMediaType != null &&
+                it.matchesDirect(targetTmdbId, targetTmdbMediaType)
         }?.detail
 
         val normalTmdbDeferred: Deferred<TmdbDetailResponse?>? = if (
@@ -4925,7 +4926,7 @@ open class StremioC(
             }
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            val tmdbType = detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
+            val tmdbType = provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
             if (tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true &&
                 preFetchedFind?.second == tmdbType && preFetchedFindImdbId == finalImdbId) {
                 tmdbIdStr = preFetchedFind.first
@@ -4996,7 +4997,7 @@ open class StremioC(
 
             if (findApiDeferred != null) {
                 val findResult = run { findApiDeferred.await() }
-                if (findResult?.second == tmdbType) tmdbIdStr = findResult.first
+                if (findResult != null && findResult.second == tmdbType) tmdbIdStr = findResult.first
             }
 
             var tmdbData: FetchedTmdbData? = null
