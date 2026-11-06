@@ -157,6 +157,12 @@ internal class ElevatePlayerPanel(
     private val list = ListView(ctx).apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
+        if (tvControls) {
+            isFocusable = true
+            isFocusableInTouchMode = true
+            setSelector(R.drawable.outline_drawable_forced)
+            setDrawSelectorOnTop(true)
+        }
     }
     private fun scheduleRefreshRebind(url: String) {
         pendingRefreshRebindUrl = url
@@ -1130,6 +1136,8 @@ internal class ElevatePlayerPanel(
                     maxWidth = dp(164)
                 }, LinearLayout.LayoutParams(-2, -2))
                 minimumHeight = dp(36)
+                // Balance the 20dp leading checkmark so the label sits at the focus box center.
+                setPadding(0, 0, dp(20), 0)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
                 enableTvFocus()
