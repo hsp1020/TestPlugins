@@ -1121,11 +1121,6 @@ internal class ElevatePlayerPanel(
             val item = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(ImageView(ctx).apply {
-                    setImageResource(R.drawable.ic_baseline_check_24_listview)
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    visibility = if (value == filter) View.VISIBLE else View.INVISIBLE
-                }, LinearLayout.LayoutParams(dp(20), dp(20)))
                 addView((LayoutInflater.from(ctx).inflate(
                     R.layout.sort_bottom_single_choice, this, false
                 ) as TextView).apply {
@@ -1136,8 +1131,6 @@ internal class ElevatePlayerPanel(
                     maxWidth = dp(164)
                 }, LinearLayout.LayoutParams(-2, -2))
                 minimumHeight = dp(36)
-                // Balance the 20dp leading checkmark so the label sits at the focus box center.
-                setPadding(0, 0, dp(20), 0)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
                 enableTvFocus()
