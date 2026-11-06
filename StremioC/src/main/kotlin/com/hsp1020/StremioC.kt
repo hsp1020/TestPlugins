@@ -5231,8 +5231,14 @@ open class StremioC(
                     throw e
                 } catch (_: Exception) { emptyList() }
             } else emptyList()
+            val recommendationPageUrl = provider.getUnifiedMetaUrl(
+                finalType ?: if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos))
+                    "movie" else "series",
+                this@CatalogEntry.id ?: ""
+            )
             val recommendationsForPage = mergeRecommendations(
-                provider, relations, tmdbRecommendations, readySimklRows, metaUrl, "initial"
+                provider, relations, tmdbRecommendations, readySimklRows,
+                recommendationPageUrl, "initial"
             )
 
             resolvedIdHolder?.let {
