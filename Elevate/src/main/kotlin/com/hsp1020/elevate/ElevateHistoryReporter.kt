@@ -25,7 +25,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.ViewTreeObserver
-import android.widget.TextView
 import androidx.annotation.OptIn
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
@@ -45,7 +44,6 @@ import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
 import com.lagradost.cloudstream3.mvvm.Resource
-import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.secondsToReadable
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.DataStore.getKey
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
@@ -149,9 +147,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
-        val expectedDurationMs = (response as? MovieLoadResponse)?.duration
-            ?.takeIf { movie && it > 0 }?.toLong()?.times(60_000L)
-            ?: episode.runTime?.takeIf { it > 0 }?.toLong()?.times(1_000L)
+        val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
+            ?: episode.runTime else episode.runTime
         // CineStream Kitsu titles use season 1 locally, but carry IMDb season mapping.
         val cineKitsu = if (!movie && response.apiName.equals("CineStream", true))
             runCatching {
@@ -164,7 +161,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             if (movie) null else episode.season, if (movie) null else episode.episode,
             episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
             stremio, if (stremio != null) episode.data else null, ids, cineKitsu, urlId,
-            expectedDurationMs)
+            expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L))
     }
 
     private fun playbackBase(): String? {
@@ -459,8 +456,13 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val result = ViewModelProvider(fragment)[ResultViewModel2::class.java]
         val sync = ViewModelProvider(fragment)[SyncViewModel::class.java]
         val responseField = runCatching {
-            ResultViewModel2::class.java.getDeclaredField("currentResponse").apply { isAccessible = true }
-        }.getOrNull() ?: return
+            ResultViewModel2::class.java.declaredFields.firstOrNull {
+                com.lagradost.cloudstream3.LoadResponse::class.java.isAssignableFrom(it.type)
+            }?.apply { isAccessible = true }
+        }.getOrNull() ?: run {
+            Log.w("ElevateHistory", "stage=MAL_RUNTIME_FIELD_UNAVAILABLE")
+            return
+        }
         val observer = Observer<Resource<ResultData>?> { page ->
             if (page !is Resource.Success) return@Observer
             val meta = (sync.metadata.value as? Resource.Success)?.value ?: return@Observer
@@ -475,12 +477,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             val minutes = (seconds / 60).coerceAtLeast(1)
             if (minutes == seconds) return@Observer
             response.duration = minutes
-            val root = fragment.view ?: return@Observer
-            val id = root.resources.getIdentifier("result_meta_duration", "id", root.context.packageName)
-            if (id != 0) {
-                (root.findViewById<android.view.View>(id) as? TextView)?.text =
-                    secondsToReadable(minutes * 60, "0 mins")
-            }
+            result.setMeta(meta.copy(duration = minutes), sync.getSyncs())
+            Log.i("ElevateHistory", "stage=MAL_RUNTIME_CORRECTED seconds=$seconds minutes=$minutes")
         }
         resultObservers[fragment] = result to observer
         result.page.observe(fragment.viewLifecycleOwner, observer)
