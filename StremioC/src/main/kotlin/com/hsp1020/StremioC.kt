@@ -1944,8 +1944,12 @@ open class StremioC(
         fun asFindResult(): Pair<String, String>? = if (viaFind) tmdbId to mediaType else null
     }
 
-    private fun detailMediaType(type: String?): String =
-        if (canonicalDetailType(type) == "movie") "movie" else "tv"
+    /** Only Stremio movies and series have corresponding TMDB detail endpoints. */
+    private fun detailMediaType(type: String?): String? = when (type?.lowercase()) {
+        "movie" -> "movie"
+        "series" -> "tv"
+        else -> null
+    }
 
     private fun isKitsuOrMalId(id: String?): Boolean =
         id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true
@@ -1959,7 +1963,9 @@ open class StremioC(
         mediaType: String
     ): Boolean {
         if (imdbId.isNullOrBlank() || tmdbId.isNullOrBlank()) return false
-        val cached = stremioCacheMemoryRead(tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: return false
+        val cached = stremioCacheMemoryRead(tmdbFindCache["${imdbId}|${mediaType}"], METADATA_CACHE_TTL)
+            ?: stremioCacheMemoryRead(tmdbFindCache[imdbId], METADATA_CACHE_TTL)
+            ?: return false
         return cached.first?.first == tmdbId && cached.first?.second == mediaType
     }
 
@@ -1992,13 +1998,15 @@ open class StremioC(
     }
 
     private suspend fun fetchTmdbFindForLoad(
-        imdbId: String
+        imdbId: String, mediaType: String
     ): Pair<String, String>? {
-        val cachedFind = stremioCacheMemoryRead(tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("find", imdbId)?.let { (encoded, stamp) ->
+        if (mediaType != "movie" && mediaType != "tv") return null
+        val cacheKey = "${imdbId}|${mediaType}"
+        val cachedFind = stremioCacheMemoryRead(tmdbFindCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("find", cacheKey)?.let { (encoded, stamp) ->
             val parts = encoded.split('|')
             if (parts.size == 2 && parts[0].toIntOrNull() != null && parts[1] in listOf("tv", "movie")) {
                 Pair(Pair(parts[0], parts[1]), stamp).also {
-                    tmdbFindCache[imdbId] = it
+                    tmdbFindCache[cacheKey] = it
                 }
             } else null
         }
@@ -2012,16 +2020,14 @@ open class StremioC(
                 val findRes = run {
                     if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
                 }
-                val movieMatch = findRes?.movie_results?.firstOrNull()
-                if (movieMatch?.id != null) {
-                    Pair(movieMatch.id.toString(), "movie")
-                } else {
-                    findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") }
-                }
+                if (mediaType == "movie") findRes?.movie_results?.firstOrNull()?.id
+                    ?.let { it.toString() to "movie" }
+                else findRes?.tv_results?.firstOrNull()?.id
+                    ?.let { it.toString() to "tv" }
             }.getOrNull()
             if (fetchedFind != null) {
-                tmdbFindCache[imdbId] = Pair(fetchedFind, System.currentTimeMillis())
-                MetadataDiskCache.write("find", imdbId, "${fetchedFind.first}|${fetchedFind.second}")
+                tmdbFindCache[cacheKey] = Pair(fetchedFind, System.currentTimeMillis())
+                MetadataDiskCache.write("find", cacheKey, "${fetchedFind.first}|${fetchedFind.second}")
             } else {
             }
             fetchedFind
@@ -2703,29 +2709,33 @@ open class StremioC(
         }
 
         val speculativeTmdbDeferred: Deferred<SpeculativeTmdbChain?>? = when {
+            hintMediaType == null -> null
             !urlHint?.tmdbId.isNullOrBlank() -> {
                 val hintedTmdbId = urlHint?.tmdbId ?: ""
                 async(Dispatchers.IO) {
-                    val detail = run { fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType) }
-                    SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, hintMediaType, false, detail)
+                    val mediaType = hintMediaType ?: return@async null
+                    val detail = run { fetchTmdbDetailForLoad(hintedTmdbId, mediaType) }
+                    SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, mediaType, false, detail)
                 }
             }
 
             urlHint?.id?.startsWith("tmdb:") == true -> {
                 val tmdbId = urlHint.id.removePrefix("tmdb:")
                 async(Dispatchers.IO) {
-                    val detail = run { fetchTmdbDetailForLoad(tmdbId, hintMediaType) }
-                    SpeculativeTmdbChain(null, tmdbId, hintMediaType, false, detail)
+                    val mediaType = hintMediaType ?: return@async null
+                    val detail = run { fetchTmdbDetailForLoad(tmdbId, mediaType) }
+                    SpeculativeTmdbChain(null, tmdbId, mediaType, false, detail)
                 }
             }
             speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
+                val mediaType = hintMediaType ?: return@async null
                 val resolved = run { speculativeAnimeDeferred.await() } ?: return@async null
                 val tmdbId = resolved.tmdbId?.toString()
                 if (!tmdbId.isNullOrBlank()) {
-                    val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
-                    SpeculativeTmdbChain(resolved.imdbId, tmdbId, hintMediaType, false, detail)
+                    val detail = fetchTmdbDetailForLoad(tmdbId, mediaType)
+                    SpeculativeTmdbChain(resolved.imdbId, tmdbId, mediaType, false, detail)
                 } else if (!resolved.imdbId.isNullOrBlank()) {
-                    val find = fetchTmdbFindForLoad(resolved.imdbId) ?: return@async null
+                    val find = fetchTmdbFindForLoad(resolved.imdbId, mediaType) ?: return@async null
                     val detail = fetchTmdbDetailForLoad(find.first, find.second)
                     SpeculativeTmdbChain(resolved.imdbId, find.first, find.second, true, detail)
                 } else {
@@ -2823,10 +2833,13 @@ open class StremioC(
             else -> null
         }
         val authoritativeMediaType = detailMediaType(res.type)
+        if (authoritativeMediaType == null) speculativeTmdbDeferred?.cancel()
 
         var acceptedTmdbSpec: SpeculativeTmdbChain? = null
 
-        if ((hintMatchesAuthoritative || (originalMappingId != null && !resolvedTmdbId.isNullOrBlank())) && speculativeTmdbDeferred != null) {
+        if (authoritativeMediaType != null &&
+            (hintMatchesAuthoritative || (originalMappingId != null && !resolvedTmdbId.isNullOrBlank())) &&
+            speculativeTmdbDeferred != null) {
             val hintedImdb = resolvedImdbId ?: urlHint?.id?.takeIf { it.startsWith("tt") }
             val authoritativeHint = !urlHint?.tmdbId.isNullOrBlank() &&
                 directTmdbFromRes != null && urlHint?.tmdbId == directTmdbFromRes &&
@@ -2846,15 +2859,19 @@ open class StremioC(
         }
 
         val validatedFindResult = acceptedTmdbSpec?.asFindResult()
-        val validatedFindImdbId = acceptedTmdbSpec?.takeIf { it.viaFind }?.sourceImdbId
-        val targetTmdbId = directTmdbFromRes ?: validatedFindResult?.first
-        val targetTmdbMediaType = validatedFindResult?.second ?: authoritativeMediaType
+            ?.takeIf { it.second == authoritativeMediaType }
+        val validatedFindImdbId = acceptedTmdbSpec?.takeIf {
+            it.viaFind && it.mediaType == authoritativeMediaType
+        }?.sourceImdbId
+        val targetTmdbId = if (authoritativeMediaType != null)
+            directTmdbFromRes ?: validatedFindResult?.first else null
+        val targetTmdbMediaType = authoritativeMediaType
         val speculativeTmdbDetail = acceptedTmdbSpec?.takeIf {
             targetTmdbId != null && it.matchesDirect(targetTmdbId, targetTmdbMediaType)
         }?.detail
 
         val normalTmdbDeferred: Deferred<TmdbDetailResponse?>? = if (
-            targetTmdbId != null && speculativeTmdbDetail == null
+            targetTmdbId != null && targetTmdbMediaType != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
                 run {
@@ -4523,7 +4540,8 @@ open class StremioC(
             val metadataHost = provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
 
             coroutineScope {
-                val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
+                val shouldFocusEpisodes = stremioType == "series" &&
+                    tmdbMediaType == "tv" && targetVideos.isNullOrEmpty()
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -4907,15 +4925,16 @@ open class StremioC(
             }
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-
-            var foundMediaType: String? = null
-            if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true && preFetchedFind != null && preFetchedFindImdbId == finalImdbId) {
+            val tmdbType = detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
+            if (tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true &&
+                preFetchedFind?.second == tmdbType && preFetchedFindImdbId == finalImdbId) {
                 tmdbIdStr = preFetchedFind.first
-                foundMediaType = preFetchedFind.second
             }
-            val findApiDeferred: Deferred<Pair<String, String>?>? = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
+            val findApiDeferred: Deferred<Pair<String, String>?>? = if (
+                tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true
+            ) {
                 async(Dispatchers.IO) {
-                    provider.fetchTmdbFindForLoad(finalImdbId)
+                    provider.fetchTmdbFindForLoad(finalImdbId, tmdbType)
                 }
             } else null
 
@@ -4977,13 +4996,13 @@ open class StremioC(
 
             if (findApiDeferred != null) {
                 val findResult = run { findApiDeferred.await() }
-                if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
+                if (findResult?.second == tmdbType) tmdbIdStr = findResult.first
             }
 
             var tmdbData: FetchedTmdbData? = null
-            if (tmdbIdStr != null) {
+            if (tmdbType != null && tmdbIdStr != null) {
                 try {
-                    val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
+                    val refinedMediaType = tmdbType
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
