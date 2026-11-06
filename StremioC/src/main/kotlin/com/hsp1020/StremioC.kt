@@ -5278,19 +5278,27 @@ open class StremioC(
             val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() }
-            // AIOMetadata already resolves Logo URL Pattern placeholders (including language)
-            // and returns the final URL as meta.logo. Do not reconstruct provider-specific URLs.
-            val isSyncedMetadata = syncedEntry != null && provider.metadataPosterAddonBaseUrl() != null
-            val metadataLogo = detailedEntry.logo?.takeIf { logo ->
+            // AIOMetadata's logo art proxy carries the resolved Logo URL Pattern in
+            // its "url" parameter. Ordinary AIOMetadata logos must not outrank TMDB.
+            val metadataHosts = listOfNotNull(
+                provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host,
+                provider.mainUrl.toHttpUrlOrNull()?.host
+            )
+            val customLogo = detailedEntry.logo?.takeIf { logo ->
                 val parsed = logo.toHttpUrlOrNull()
-                parsed != null && (isSyncedMetadata ||
-                    parsed.pathSegments.take(3) == listOf("poster-cache", "proxy", "logo"))
+                parsed != null && parsed.host in metadataHosts &&
+                    parsed.pathSegments.size == 5 &&
+                    parsed.pathSegments.take(3) == listOf("poster-cache", "proxy", "logo") &&
+                    parsed.pathSegments[3] in listOf("movie", "series") &&
+                    !parsed.queryParameter("url").isNullOrBlank()
             }
-            val finalLogo = metadataLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
+            val finalLogo = customLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
 
+            // Keep TMDB's preferred-language/English selection for the title
+            // fallback even when a custom AIOMetadata logo is displayed.
             val finalLogoFallback = when {
-                metadataLogo != null -> false
-                tmdbData?.fetchedLogo.isNullOrBlank() -> finalLogo != null
+                finalLogo == null -> false
+                tmdbData?.fetchedLogo.isNullOrBlank() -> true
                 else -> tmdbData?.fetchedLogoFallback == true
             }
 
