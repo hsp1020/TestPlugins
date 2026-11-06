@@ -21,10 +21,17 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.CachePolicy
 import okhttp3.Call
 import okhttp3.Dispatcher
+import okhttp3.Connection
+import okhttp3.Handshake
+import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.util.concurrent.atomic.AtomicLong
 import coil3.request.ImageResult
 import coil3.asDrawable
@@ -84,7 +91,7 @@ internal object PosterWipe {
         val dispatcher = Dispatcher().apply {
             // Increase per-host concurrency from OkHttp's default of five.
             // Keep the global dispatcher limit unchanged.
-            maxRequestsPerHost = 12
+            maxRequestsPerHost = 24
         }
         val client = OkHttpClient.Builder().dispatcher(dispatcher).eventListenerFactory { call ->
             val key = call.request().url.toString().hashCode().toUInt().toString(16)
@@ -95,22 +102,114 @@ internal object PosterWipe {
                 private var bodyBytes = -1L
                 private var lastId = 0L
                 private var enqueuedAt = 0L
+                private var firstIoAt = 0L
+                private var dnsStartedAt = 0L
+                private var dnsMs = 0L
+                private var dnsCount = 0
+                private var connectStartedAt = 0L
+                private var connectMs = 0L
+                private var connectCount = 0
+                private var tlsStartedAt = 0L
+                private var tlsMs = 0L
+                private var connections = 0
+                private var headersEndedAt = 0L
+                private var responseStartedAt = 0L
+                private var responseBodyStartedAt = 0L
+                private var responseBodyEndedAt = 0L
+
+                private fun now() = SystemClock.elapsedRealtime()
+                private fun elapsed(from: Long, to: Long): Long =
+                    if (from > 0L && to >= from) to - from else -1L
+
+                private fun markIo() {
+                    if (firstIoAt == 0L) firstIoAt = now()
+                }
+
+                private fun timing(outcome: String, reason: String = "") {
+                    val end = now()
+                    // preIoMs includes dispatcher queue and interceptor preparation;
+                    // it is NOT an exact dispatcher queue duration.
+                    Log.d("ElevatePoster",
+                        "event=HTTP_TIMING urlKey=$key id=$lastId outcome=$outcome " +
+                            "status=$status attempts=$attempts bytes=$bodyBytes " +
+                            "preIoMs=${elapsed(enqueuedAt, firstIoAt)} " +
+                            "setupMs=${elapsed(firstIoAt, started)} " +
+                            "preHeaderMs=${elapsed(enqueuedAt, started)} " +
+                            "dnsMs=$dnsMs dnsCount=$dnsCount " +
+                            "connectMs=$connectMs connectCount=$connectCount tlsMs=$tlsMs " +
+                            "connections=$connections reused=${connections > 0 && connectCount == 0} " +
+                            "serverWaitMs=${elapsed(headersEndedAt, responseStartedAt)} " +
+                            "bodyMs=${elapsed(responseBodyStartedAt, responseBodyEndedAt)} " +
+                            "callMs=${elapsed(enqueuedAt, end)} " +
+                            "queued=${dispatcher.queuedCallsCount()} running=${dispatcher.runningCallsCount()} " +
+                            "reason=$reason")
+                }
 
                 override fun callStart(call: Call) {
-                    enqueuedAt = SystemClock.elapsedRealtime()
+                    enqueuedAt = now()
                     Log.d("ElevatePoster",
                         "event=HTTP_CALL_START urlKey=$key queued=${dispatcher.queuedCallsCount()} " +
-                            "running=${dispatcher.runningCallsCount()}")
+                            "running=${dispatcher.runningCallsCount()} limitHost=${dispatcher.maxRequestsPerHost}")
+                }
+
+                override fun dnsStart(call: Call, domainName: String) {
+                    markIo()
+                    dnsStartedAt = now()
+                    dnsCount++
+                }
+
+                override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
+                    val elapsed = elapsed(dnsStartedAt, now())
+                    if (elapsed >= 0L) dnsMs += elapsed
+                    dnsStartedAt = 0L
+                }
+
+                override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
+                    markIo()
+                    connectStartedAt = now()
+                    connectCount++
+                }
+
+                override fun secureConnectStart(call: Call) {
+                    tlsStartedAt = now()
+                }
+
+                override fun secureConnectEnd(call: Call, handshake: Handshake?) {
+                    val elapsed = elapsed(tlsStartedAt, now())
+                    if (elapsed >= 0L) tlsMs += elapsed
+                    tlsStartedAt = 0L
+                }
+
+                override fun connectEnd(
+                    call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?
+                ) {
+                    val elapsed = elapsed(connectStartedAt, now())
+                    if (elapsed >= 0L) connectMs += elapsed
+                    connectStartedAt = 0L
+                }
+
+                override fun connectionAcquired(call: Call, connection: Connection) {
+                    markIo()
+                    connections++
                 }
 
                 override fun requestHeadersStart(call: Call) {
+                    markIo()
                     lastId = httpAttempts.incrementAndGet()
                     attempts++
-                    if (started == 0L) started = SystemClock.elapsedRealtime()
+                    if (started == 0L) started = now()
                     Log.d("ElevatePoster",
                         "event=HTTP_START urlKey=$key id=$lastId attempt=$attempts " +
-                            "preHeaderMs=${SystemClock.elapsedRealtime() - enqueuedAt} " +
+                            "preHeaderMs=${elapsed(enqueuedAt, now())} " +
                             "queued=${dispatcher.queuedCallsCount()} running=${dispatcher.runningCallsCount()}")
+                }
+
+                override fun requestHeadersEnd(call: Call, request: Request) {
+                    headersEndedAt = now()
+                }
+
+                override fun responseHeadersStart(call: Call) {
+                    responseStartedAt = now()
                 }
 
                 override fun responseHeadersEnd(call: Call, response: Response) {
@@ -119,21 +218,28 @@ internal object PosterWipe {
                         "event=HTTP_RESPONSE urlKey=$key id=$lastId status=$status")
                 }
 
+                override fun responseBodyStart(call: Call) {
+                    responseBodyStartedAt = now()
+                }
+
                 override fun responseBodyEnd(call: Call, byteCount: Long) {
                     bodyBytes = byteCount
+                    responseBodyEndedAt = now()
                 }
 
                 override fun callEnd(call: Call) {
                     Log.d("ElevatePoster",
                         "event=HTTP_END urlKey=$key id=$lastId status=$status " +
                             "attempts=$attempts bytes=$bodyBytes " +
-                            "elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                            "elapsedMs=${elapsed(started, now())}")
+                    timing("success")
                 }
 
                 override fun callFailed(call: Call, ioe: IOException) {
                     Log.d("ElevatePoster",
                         "event=HTTP_FAIL urlKey=$key id=$lastId attempts=$attempts " +
                             "reason=${ioe.javaClass.simpleName}")
+                    timing("failed", ioe.javaClass.simpleName)
                 }
             }
         }.build()
