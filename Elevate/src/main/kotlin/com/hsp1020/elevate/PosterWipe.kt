@@ -13,6 +13,18 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.ImageView
 import coil3.SingletonImageLoader
+import coil3.network.NetworkClient
+import coil3.network.NetworkFetcher
+import coil3.network.NetworkRequest
+import coil3.network.NetworkResponse
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.CachePolicy
+import okhttp3.Call
+import okhttp3.EventListener
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 import coil3.request.ImageResult
 import coil3.asDrawable
 import coil3.dispose
@@ -53,6 +65,64 @@ internal object PosterWipe {
     // the same URL's fetch, allowing Coil to reuse its disk cache before decoding.
     private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val urlGates = HashMap<String, UrlGate>()
+    private val httpAttempts = AtomicLong()
+
+    // A cache probe can never trigger an HTTP call. Only use it when another
+    // size for the same URL is already filling the cache.
+    private val cacheOnlyFetcher = NetworkFetcher.Factory(networkClient = {
+        object : NetworkClient {
+            override suspend fun <T> executeRequest(
+                request: NetworkRequest, block: suspend (NetworkResponse) -> T
+            ): T = throw IOException("Cache miss")
+        }
+    })
+
+    // Preserve Coil's default OkHttp fetching and its shared image/disk caches,
+    // but log *actual request headers sent* rather than Coil NETWORK results.
+    private val measuredFetcher by lazy {
+        val client = OkHttpClient.Builder().eventListenerFactory { call ->
+            val key = call.request().url.toString().hashCode().toUInt().toString(16)
+            object : EventListener() {
+                private var started = 0L
+                private var attempts = 0
+                private var status = 0
+                private var bodyBytes = -1L
+                private var lastId = 0L
+
+                override fun requestHeadersStart(call: Call) {
+                    lastId = httpAttempts.incrementAndGet()
+                    attempts++
+                    if (started == 0L) started = SystemClock.elapsedRealtime()
+                    Log.d("ElevatePoster",
+                        "event=HTTP_START urlKey=$key id=$lastId attempt=$attempts")
+                }
+
+                override fun responseHeadersEnd(call: Call, response: Response) {
+                    status = response.code
+                    Log.d("ElevatePoster",
+                        "event=HTTP_RESPONSE urlKey=$key id=$lastId status=$status")
+                }
+
+                override fun responseBodyEnd(call: Call, byteCount: Long) {
+                    bodyBytes = byteCount
+                }
+
+                override fun callEnd(call: Call) {
+                    Log.d("ElevatePoster",
+                        "event=HTTP_END urlKey=$key id=$lastId status=$status " +
+                            "attempts=$attempts bytes=$bodyBytes " +
+                            "elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                }
+
+                override fun callFailed(call: Call, ioe: IOException) {
+                    Log.d("ElevatePoster",
+                        "event=HTTP_FAIL urlKey=$key id=$lastId attempts=$attempts " +
+                            "reason=${ioe.javaClass.simpleName}")
+                }
+            }
+        }.build()
+        OkHttpNetworkFetcherFactory(client)
+    }
 
     private fun trace(url: String, event: String, info: String) {
         Log.d("ElevatePoster", "event=$event urlKey=${url.hashCode().toUInt().toString(16)} $info")
@@ -65,15 +135,30 @@ internal object PosterWipe {
             urlGates.getOrPut(url) { UrlGate() }.also { it.users++ }
         }
         try {
-            if (gate.mutex.isLocked) trace(url, "IMAGE_WAIT", "size=$size")
+            val loader = SingletonImageLoader.get(context.applicationContext)
+            val request = ImageRequest.Builder(context.applicationContext).data(url)
+                .size(size).scale(scale).precision(Precision.INEXACT)
+                .httpHeaders(NetworkHeaders.Builder().apply {
+                    this["User-Agent"] = USER_AGENT
+                }.build())
+            if (gate.mutex.isLocked) {
+                // Do not wait behind a slow network request when Coil can
+                // immediately serve a previously decoded or cached image.
+                val cached = loader.execute(request
+                    .networkCachePolicy(CachePolicy.DISABLED)
+                    .fetcherFactory(cacheOnlyFetcher).build())
+                if (cached is SuccessResult) {
+                    trace(url, "IMAGE_CACHE_BYPASS",
+                        "source=${cached.dataSource.name} size=$size")
+                    return cached
+                }
+                trace(url, "IMAGE_WAIT", "size=$size")
+            }
             gate.mutex.lock()
             try {
-                val request = ImageRequest.Builder(context.applicationContext).data(url)
-                    .size(size).scale(scale).precision(Precision.INEXACT)
-                    .httpHeaders(NetworkHeaders.Builder().apply {
-                        this["User-Agent"] = USER_AGENT
-                    }.build()).build()
-                return SingletonImageLoader.get(context.applicationContext).execute(request)
+                return loader.execute(request
+                    .networkCachePolicy(CachePolicy.ENABLED)
+                    .fetcherFactory(measuredFetcher).build())
             } finally {
                 gate.mutex.unlock()
             }
