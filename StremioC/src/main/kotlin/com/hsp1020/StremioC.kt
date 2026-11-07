@@ -1893,10 +1893,10 @@ open class StremioC(
     }
 
     private suspend fun fetchTmdbFindForLoad(
-        imdbId: String, mediaType: String
+        imdbId: String, mediaType: String?
     ): Pair<String, String>? {
-        if (mediaType != "movie" && mediaType != "tv") return null
-        val cacheKey = "${imdbId}|${mediaType}"
+        if (mediaType != null && mediaType != "movie" && mediaType != "tv") return null
+        val cacheKey = "${imdbId}|${mediaType ?: "any"}"
         val fromRam = stremioCacheMemoryRead(tmdbFindCache[cacheKey], METADATA_CACHE_TTL)
         val cachedFind = fromRam ?: MetadataDiskCache.read("find", cacheKey)?.let { (encoded, stamp) ->
             val parts = encoded.split('|')
@@ -1916,10 +1916,16 @@ open class StremioC(
                 val findRes = run {
                     if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
                 }
-                if (mediaType == "movie") findRes?.movie_results?.firstOrNull()?.id
-                    ?.let { it.toString() to "movie" }
-                else findRes?.tv_results?.firstOrNull()?.id
-                    ?.let { it.toString() to "tv" }
+                when (mediaType) {
+                    "movie" -> findRes?.movie_results?.firstOrNull()?.id
+                        ?.let { it.toString() to "movie" }
+                    "tv" -> findRes?.tv_results?.firstOrNull()?.id
+                        ?.let { it.toString() to "tv" }
+                    else -> findRes?.movie_results?.firstOrNull()?.id
+                        ?.let { it.toString() to "movie" }
+                        ?: findRes?.tv_results?.firstOrNull()?.id
+                            ?.let { it.toString() to "tv" }
+                }
             }.getOrNull()
             if (fetchedFind != null) {
                 tmdbFindCache[cacheKey] = Pair(fetchedFind, System.currentTimeMillis())
@@ -4578,8 +4584,9 @@ open class StremioC(
             val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
 
             coroutineScope {
-                val shouldFocusEpisodes = stremioType == "series" &&
-                    tmdbMediaType == "tv" && targetVideos.isNullOrEmpty()
+                val shouldFocusEpisodes = tmdbMediaType == "tv" &&
+                    ((stremioType == "series" && targetVideos.isNullOrEmpty()) ||
+                        (stremioType != "movie" && stremioType != "series"))
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -4889,8 +4896,19 @@ open class StremioC(
         ): LoadResponse = coroutineScope {
             val syncedEntry = run { addonDeferred?.await() }
             val detailedEntry = syncedEntry ?: this@CatalogEntry
+            val nonstandardType =
+                provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type) == null
             val originalAnimeId = requestedAnimeId
                 ?: this@CatalogEntry.id?.takeIf { provider.isLibraryAnimeId(it) }
+                ?: if (nonstandardType) {
+                    detailedEntry.id?.takeIf { provider.isLibraryAnimeId(it) }
+                        ?: detailedEntry.kitsuIdExt?.toIntOrNull()?.takeIf { it > 0 }?.let { "kitsu:$it" }
+                        ?: detailedEntry.malIdExt?.toIntOrNull()?.takeIf { it > 0 }?.let { "mal:$it" }
+                } else null
+            val extraAnimeMapping = if (nonstandardType && originalAnimeId != null &&
+                originalAnimeId != requestedAnimeId && originalAnimeId != this@CatalogEntry.id) {
+                provider.resolveAnimeIdForLoad(originalAnimeId)
+            } else null
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || provider.isLibraryAnimeId(it) }
@@ -4901,28 +4919,37 @@ open class StremioC(
             if (finalImdbId == null) {
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
+            if (nonstandardType && finalImdbId == null) finalImdbId = extraAnimeMapping?.imdbId
 
-            var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            val tmdbType = provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
+            var tmdbIdStr: String? = resolvedTmdbId ?: extraAnimeMapping?.tmdbId?.toString()
+                ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true)
+                    this@CatalogEntry.id.removePrefix("tmdb:")
+                else this@CatalogEntry.moviedb_id?.toString()
+                    ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
+                    ?: detailedEntry.id?.takeIf { nonstandardType && it.startsWith("tmdb:") }
+                        ?.removePrefix("tmdb:")
+            var tmdbType = provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
             if (tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true &&
                 preFetchedFind?.second == tmdbType && preFetchedFindImdbId == finalImdbId) {
                 tmdbIdStr = preFetchedFind.first
             }
+            val lookupImdbId = finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) }
+            val lookupMediaType = tmdbType
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (
-                tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true
+                (tmdbIdStr == null || nonstandardType) && lookupImdbId != null
             ) {
                 async(Dispatchers.IO) {
-                    provider.fetchTmdbFindForLoad(finalImdbId, tmdbType)
+                    provider.fetchTmdbFindForLoad(lookupImdbId, lookupMediaType)
                 }
             } else null
             val recommendationMalId = fetchedMalId ?: detailedEntry.malIdExt?.toIntOrNull()
                 ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
                     ?.substringAfter(':')?.toIntOrNull()
-            val simklJob = StremioC.requestSimklSuggestions(
+            val simklJob = if (!nonstandardType) StremioC.requestSimklSuggestions(
                 if (tmdbType == "movie") "movie" else "series",
                 tmdbIdStr, finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) },
                 recommendationMalId
-            )
+            ) else null
             val relations = relatedTitles(provider, detailedEntry)
 
             var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
@@ -4983,8 +5010,21 @@ open class StremioC(
 
             if (findApiDeferred != null) {
                 val findResult = run { findApiDeferred.await() }
-                if (findResult != null && findResult.second == tmdbType) tmdbIdStr = findResult.first
+                if (findResult != null && (tmdbType == null || findResult.second == tmdbType)) {
+                    if (tmdbIdStr == null) tmdbIdStr = findResult.first
+                    if (tmdbType == null && tmdbIdStr == findResult.first) tmdbType = findResult.second
+                }
             }
+            if (nonstandardType && tmdbType == null && tmdbIdStr != null) {
+                // No IMDb match: retain the legacy single-movie/episodic fallback.
+                tmdbType = if (isSingleMovie(finalType, finalVideos) || finalVideos.isNullOrEmpty())
+                    "movie" else "tv"
+            }
+            val resolvedSimklJob = simklJob ?: if (nonstandardType) StremioC.requestSimklSuggestions(
+                if (tmdbType == "movie") "movie" else "series",
+                tmdbIdStr, finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) },
+                recommendationMalId
+            ) else null
 
             var tmdbData: FetchedTmdbData? = null
             if (tmdbType != null && tmdbIdStr != null) {
@@ -4997,7 +5037,7 @@ open class StremioC(
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                            recommendationMalId, simklJob)
+                            recommendationMalId, resolvedSimklJob)
                     }
                 } catch (e: Exception) {
                 }
@@ -5006,7 +5046,9 @@ open class StremioC(
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
             val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
                 .firstOrNull { !it.isNullOrBlank() }
-            var finalDescription = finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
+            var finalDescription = if (nonstandardType)
+                tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalAddonDescription
+            else finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
 
             if (tmdbData != null) {
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
@@ -5083,8 +5125,8 @@ open class StremioC(
             }
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
             val tmdbRecommendations = tmdbData?.fetchedRecommendations
-            val readySimklRows = if (simklJob?.isCompleted == true) {
-                try { simklJob.await() } catch (e: CancellationException) {
+            val readySimklRows = if (resolvedSimklJob?.isCompleted == true) {
+                try { resolvedSimklJob.await() } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) { emptyList() }
             } else emptyList()
@@ -5117,7 +5159,9 @@ open class StremioC(
             val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
-            val finalLogo = addonLogo ?: fallbackAddonLogo
+            val finalLogo = if (nonstandardType)
+                tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo ?: fallbackAddonLogo
+            else addonLogo ?: fallbackAddonLogo
                 ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
 
             // Keep TMDB's preferred-language/English selection for the title
@@ -5203,7 +5247,7 @@ open class StremioC(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
-                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, simklJob, tmdbIdStr)
+                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, resolvedSimklJob, tmdbIdStr)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
 
             } else {
@@ -5259,7 +5303,7 @@ open class StremioC(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
                     )
                 }
-                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, simklJob, tmdbIdStr)
+                scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, resolvedSimklJob, tmdbIdStr)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
             }
         }
