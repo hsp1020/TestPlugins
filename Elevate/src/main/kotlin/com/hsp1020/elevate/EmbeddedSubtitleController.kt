@@ -499,11 +499,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (!markActive(f, embedded)) return
         if (manualOverride || selectionDialog?.isShowing == true) return
         val language = preferredLanguage?.takeIf { it.isNotEmpty() } ?: return
-        val match = embedded.firstNotNullOfOrNull { subtitle ->
-            if (!subtitle.matchesLanguageCode(language)) return@firstNotNullOfOrNull null
-            available[subtitle.url]?.takeIf { (group, index) -> group.isTrackSupported(index) }
-        } ?: return
-        val (group, index) = match
+        val match = embedded.asSequence().filter { it.matchesLanguageCode(language) }
+            .mapNotNull { subtitle ->
+                val (group, index) = available[subtitle.url] ?: return@mapNotNull null
+                if (!group.isTrackSupported(index)) return@mapNotNull null
+                Triple(SubtitleLanguageNormalizer.subtitlePriority(subtitle, tracks, null), group, index)
+            }.minByOrNull { it.first } ?: return
+        val (_, group, index) = match
         if (group.isTrackSelected(index)) return
         runCatching {
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()

@@ -1272,13 +1272,17 @@ internal class ElevatePlayerPanel(
         pendingSubtitleUrl?.takeIf { pendingSubtitleInstance == vm.state.instance }
             ?: fragment.player.getCurrentPreferredSubtitle()?.url
 
-    private fun orderedOptions(group: List<SubtitleData>): List<SubtitleData> =
-        group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
+    private fun orderedOptions(
+        group: List<SubtitleData>, ranks: Map<*, *>?
+    ): List<SubtitleData> {
+        val tracks = fragment.playerView?.player?.currentTracks
+        return group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
             .withIndex().sortedWith(
                 compareBy<IndexedValue<SubtitleData>> {
-                    if (it.value.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) -1 else 40_000
+                    SubtitleLanguageNormalizer.subtitlePriority(it.value, tracks, ranks)
                 }.thenBy { it.index }
             ).map { it.value }
+    }
 
     private val trackLanguageWord = Regex("""[\p{L}\p{M}]+""")
     private val languageAliases by lazy(LazyThreadSafetyMode.NONE) {
@@ -1330,8 +1334,9 @@ internal class ElevatePlayerPanel(
         val current = fragment.player.getCurrentPreferredSubtitle()
         val all = sortSubs(vm.state.subtitles)
             .filter { SubtitleLanguageNormalizer.isSelectable(it) }
+        val ranks = SubtitleLanguageNormalizer.activeStremioRanks(vm)
         subtitleGroups = all.groupBy(::subtitleDisplayName)
-            .map { (name, subtitles) -> name to orderedOptions(subtitles) }
+            .map { (name, subtitles) -> name to orderedOptions(subtitles, ranks) }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
         if (!browsingSubtitleGroup) {

@@ -3,6 +3,8 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.net.Uri
+import androidx.media3.common.C
+import androidx.media3.common.Tracks
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -112,6 +114,43 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     // Share original extractor descriptions through the existing URL metadata cache,
     // without modifying nameSuffix, which is part of the native track identity.
     companion object {
+        private val embeddedSdhLabel = Regex("""(?i)\b(?:SDH|CC|HOH|HI)\b|hearing[\s-]*impaired""")
+        private val embeddedForcedLabel = Regex("""(?i)\bforced?\b|강제""")
+        private val embeddedTrackPrefix = Regex("""^\d+:""")
+
+        /** Display-only priority. Never rewrite SubtitleData or its Media3 track ID. */
+        internal fun subtitlePriority(
+            sub: SubtitleData, tracks: Tracks?, stremioRanks: Map<*, *>?
+        ): Int {
+            if (sub.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) {
+                return (stremioRanks?.get(sub.url) as? Number)?.toInt() ?: 40_000
+            }
+            val format = tracks?.groups?.asSequence()
+                ?.filter { it.type == C.TRACK_TYPE_TEXT }
+                ?.flatMap { group -> (0 until group.length).asSequence().map(group::getTrackFormat) }
+                ?.firstOrNull { it.id?.replace(embeddedTrackPrefix, "") == sub.url }
+            val description = listOfNotNull(sub.nameSuffix, format?.label).joinToString(" ")
+            val sdh = (format?.roleFlags?.and(
+                C.ROLE_FLAG_CAPTION or C.ROLE_FLAG_DESCRIBES_MUSIC_AND_SOUND
+            ) ?: 0) != 0 || embeddedSdhLabel.containsMatchIn(description)
+            val forced = (format?.selectionFlags?.and(C.SELECTION_FLAG_FORCED) ?: 0) != 0 ||
+                embeddedForcedLabel.containsMatchIn(description)
+            return when {
+                sdh -> 2
+                forced -> 1
+                else -> 0
+            }
+        }
+
+        /** StremioC's saved URL ranks are meaningful only for its playback. */
+        internal fun activeStremioRanks(vm: PlayerGeneratorViewModel): Map<*, *>? {
+            val api = vm.state.generatorState?.response?.apiName ?: return null
+            val isStremio = api.equals("StremioC", true) || APIHolder.allProviders.any {
+                it.name == api && it.javaClass.name == "com.hsp1020.StremioC"
+            }
+            return if (isStremio) stremioRanks() else null
+        }
+
         internal fun isSelectableLabel(raw: String): Boolean {
             val language = raw.substringBefore(" · ").substringBefore(" — ")
                 .substringBefore(" (").trim().replace(Regex("""\s+\d+$"""), "").trim()

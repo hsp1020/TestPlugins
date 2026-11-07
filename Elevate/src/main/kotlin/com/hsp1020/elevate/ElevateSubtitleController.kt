@@ -423,12 +423,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         }
         val starts = langs.withIndex().groupBy({ it.value }, { it.index })
             .mapValues { (_, positions) -> positions.first() }
+        val activeRanks = model?.let { SubtitleLanguageNormalizer.activeStremioRanks(it) }
+        val mediaTracks = fragment?.playerView?.player?.currentTracks
         val ranks = grouped.map { sameName ->
             sameName.minOf { sub ->
-                when {
-                    sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO -> -1
-                    else -> 40_000
-                }
+                SubtitleLanguageNormalizer.subtitlePriority(sub, mediaTracks, activeRanks)
             }
         }
         val order = grouped.indices.sortedWith(
@@ -479,10 +478,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         // Keep the native adapter and Apply button's option indices unchanged.
         // Only reorder visible rows, and translate interactions back to native indices.
         val nativeOptions = groups.map { it.sortedBy { sub -> sub.nameSuffix.toIntOrNull() ?: 0 } }
+        val activeRanks = model?.let { SubtitleLanguageNormalizer.activeStremioRanks(it) }
+        val mediaTracks = fragment?.playerView?.player?.currentTracks
         val visibleOptions = nativeOptions.map { items ->
             items.indices.sortedWith(compareBy<Int> { index ->
-                val sub = items[index]
-                if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) -1 else 40_000
+                SubtitleLanguageNormalizer.subtitlePriority(items[index], mediaTracks, activeRanks)
             }.thenBy { it })
         }
         fun optionOrder(): List<Int> {
