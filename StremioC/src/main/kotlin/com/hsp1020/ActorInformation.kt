@@ -1016,7 +1016,12 @@ internal object ActorInformation {
                                 val strip = TracedCreditsScrollView(activity) { event, detail ->
                                     traceScroll(title, event, detail)
                                 }
-                                val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+                                val row = LinearLayout(activity).apply {
+                                    orientation = LinearLayout.HORIZONTAL
+                                    // HorizontalScrollView measures its child with UNSPECIFIED width:
+                                    // LayoutParams.width is ignored, but minimumWidth is honored.
+                                    minimumWidth = entries.size * dp(124)
+                                }
                                 var shown = 0
                                 lateinit var requestMore: () -> Unit
                                 fun appendCredits(count: Int) {
@@ -1100,10 +1105,8 @@ internal object ActorInformation {
                                     }
                                 }
                                 preloadSections.add { preparePosters(entries, shown) }
-                                // Reserve the full credit range before the first fling.
-                                // Appending cards must not change the scroller's maximum X.
-                                strip.addView(row, FrameLayout.LayoutParams(
-                                    entries.size * dp(124), ViewGroup.LayoutParams.WRAP_CONTENT))
+                                // Fixed row minimum width keeps fling bounds stable as cards append.
+                                strip.addView(row)
                                 strip.mark("RESTORE_POST", "requestedX=" + (creditScroll[title] ?: 0))
                                 strip.post {
                                     if (dialog === windowDialog) {
