@@ -1488,6 +1488,9 @@ internal class RatingPlotImageHook(
             val isAnime = StremioC.animeAudioByUrl[url]
                 ?: detailUrl?.let { StremioC.animeAudioByUrl[it] }
             val multi = seasonNumbers.size > 1
+            val sourceSeason = StremioC.seasonalAnimeByUrl[url]
+                ?: detailUrl?.let { StremioC.seasonalAnimeByUrl[it] }
+            val seasonAwareAnime = isAnime == true && (multi || sourceSeason != null)
             val generalSimkl = isAnime != true && multi && rawSyncs.containsKey("simkl")
             if (isAnime != true && !generalSimkl) {
                 reset()
@@ -1500,13 +1503,15 @@ internal class RatingPlotImageHook(
             // transition. Create it only if a matched sync provider exists.
             fetchJob = scope.launch {
                 var mappedSeason: SeasonTrackerIds? = null
-                val ids = if (!multi) rawSyncs.filterKeys { it in allowed }
+                val ids = if (!multi && !seasonAwareAnime) rawSyncs.filterKeys { it in allowed }
                     else if (generalSimkl) rawSyncs.filterKeys { it == "simkl" } else {
                     val imdb = IMDb.find(url)?.value ?: IMDb.find(detailUrl.orEmpty())?.value
+                        ?: sourceSeason?.first
                     val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
                         .firstOrNull { it.name == fragment.arguments?.getString("apiName") }
                         ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
-                    if (imdb == null || provider == null) {
+                    if (imdb == null || provider == null ||
+                        sn == sourceSeason?.second) {
                         emptyMap()
                     } else {
                         val mapping = try { withContext(Dispatchers.IO) {
@@ -1536,7 +1541,7 @@ internal class RatingPlotImageHook(
                 else emptyList()
                 val animeId = if (isAnime == true && castEnabled()) {
                     ids["anilist"]?.toIntOrNull()?.takeIf { it > 0 } ?: run {
-                        if (multi) null else {
+                        if (seasonAwareAnime) null else {
                             val source = listOf("mal", "kitsu").firstNotNullOfOrNull { kind ->
                                 ids[kind]?.toIntOrNull()?.takeIf { it > 0 }?.let { "${kind}:${it}" }
                             }
@@ -1553,7 +1558,7 @@ internal class RatingPlotImageHook(
                     }
                 } else null
                 val castNeeded = isAnime == true &&
-                    (multi || syncModel == null || ids["anilist"] == null)
+                    (seasonAwareAnime || syncModel == null || ids["anilist"] == null)
                 if (castNeeded) {
                     if (animeId == null) {
                         // Mapping has completed without an AniList ID.
@@ -1619,15 +1624,15 @@ internal class RatingPlotImageHook(
                             simklSeasonRead(repo, id, sn) else null
                         if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
                             simklSeasonReplies["simkl"] = simklExact
-                        val animeExact = if (multi && isAnime == true &&
+                        val animeExact = if (seasonAwareAnime &&
                             repo.idPrefix == "simkl" && mappedSeason != null) {
                             simklAnimeRead(repo, mappedSeason!!, sn)
                         } else null
-                        if (multi && isAnime == true && repo.idPrefix == "simkl" &&
+                        if (seasonAwareAnime && repo.idPrefix == "simkl" &&
                             animeExact != null) simklAnimeReplies["simkl"] = animeExact
                         var total = when {
                             generalSimkl && repo.idPrefix == "simkl" -> simklExact?.available?.size
-                            multi && isAnime == true && repo.idPrefix == "simkl" ->
+                            seasonAwareAnime && repo.idPrefix == "simkl" ->
                                 animeExact?.mapped?.size
                             else -> meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
                                 ?: remote?.maxEpisodes?.takeIf { it > 0 }
@@ -1670,7 +1675,7 @@ internal class RatingPlotImageHook(
                             } catch (e: Exception) {
                             }
                         }
-                        val fields = if (multi && isAnime == true &&
+                        val fields = if (seasonAwareAnime &&
                             repo.idPrefix == "simkl") animeExact?.let {
                             val watched=it.watched.size
                             val projected=animeSeasonDisplayStatus(it)
@@ -1718,7 +1723,7 @@ internal class RatingPlotImageHook(
                     target.writeBlocked = when {
                         generalSimkl && prefix == "simkl" && target.simklSeason == null ->
                             "simkl-season-episodes-unverified"
-                        multi && isAnime == true && prefix == "simkl" &&
+                        seasonAwareAnime && prefix == "simkl" &&
                             target.simklAnime == null -> "simkl-anime-episode-map-unverified"
                         else -> null
                     }

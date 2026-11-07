@@ -30,6 +30,7 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.Score
+import com.lagradost.cloudstream3.SeasonData
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
@@ -1246,6 +1247,8 @@ open class StremioC(
         // Distinguish an episode-based result awaiting native season selection
         // from a movie, which has no native seasonSelections event.
         internal val episodeBasedByUrl = lruCacheMap<String, Boolean>(200)
+        // IMDb mapping identity and the last native season used for season-zero specials.
+        internal val seasonalAnimeByUrl = lruCacheMap<String, Pair<String?, Int?>>(200)
         internal val animeFallbackActorsByUrl = lruCacheMap<String, List<ActorData>>(100)
 
         // Successful AniList cast survives result-view recreation. No negative
@@ -2568,6 +2571,7 @@ open class StremioC(
                         for (source in listOf(metaUrl, response.url)) {
                             animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
                             episodeBasedByUrl[source]?.let { episodeBasedByUrl[url] = it }
+                            seasonalAnimeByUrl[source]?.let { seasonalAnimeByUrl[url] = it }
             seasonEpisodeCountsByUrl[source]?.let { seasonEpisodeCountsByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
                         }
@@ -5028,7 +5032,8 @@ open class StremioC(
             val isMovieForSync = finalType == "movie" || isSingleMovie(finalType ?: "", finalVideos)
 
             val canSyncAnimeTrackers = isMovieForSync ||
-                ((finalType == "series" || finalType == "tv") && videoSeasons.singleOrNull() == 1)
+                ((finalType == "series" || finalType == "tv" || eligibleNonstandardId) &&
+                    videoSeasons.singleOrNull() == 1)
             val useImdbSyncMapping = (originalAnimeId == null ||
                 (originalAnimeId.startsWith("anilist:") &&
                     fetchedAniListId == null && fetchedMalId == null && fetchedKitsuId == null)) &&
@@ -5243,6 +5248,7 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = false
+                StremioC.seasonalAnimeByUrl.remove(metaUrl)
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
                     StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
                 } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
@@ -5328,6 +5334,16 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true
+                val specialsSeason = finalVideos.orEmpty().takeIf { videos ->
+                    videos.any { it.seasonNumber == 0 }
+                }?.let { videos ->
+                    (videos.mapNotNull { it.seasonNumber?.takeIf { n -> n > 0 } }.maxOrNull() ?: 0) + 1
+                }
+                if (eligibleNonstandardId && isAnimeMedia &&
+                    finalVideos.orEmpty().any { it.seasonNumber != null }) {
+                    StremioC.seasonalAnimeByUrl[metaUrl] =
+                        cleanImdbId?.takeIf { IMDB_ID_REGEX.matches(it) } to specialsSeason
+                } else StremioC.seasonalAnimeByUrl.remove(metaUrl)
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
                     StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
                 } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
@@ -5340,7 +5356,10 @@ open class StremioC(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
-                    this.showStatus = tmdbData?.fetchedStatus 
+                    this.showStatus = tmdbData?.fetchedStatus
+                    if (nonstandardType && specialsSeason != null) {
+                        this.seasonNames = listOf(SeasonData(specialsSeason, "Specials", 0))
+                    }
                     this.plot = finalDescription
                     this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
