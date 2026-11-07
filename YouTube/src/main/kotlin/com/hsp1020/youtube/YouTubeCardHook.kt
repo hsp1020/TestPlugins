@@ -135,6 +135,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var pendingTimeSeek: PendingTimeSeek? = null
     private var seekPlayer: Media3Player? = null
     private var seekListener: Media3Player.Listener? = null
+    private var timeSeekPrimedPlayer: Media3Player? = null
     private var seekHostView: Any? = null
     private var seekHostOriginalCallback: Any? = null
     private var seekHostCallbackProxy: Any? = null
@@ -230,6 +231,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
         detachTimeSeekListener()
         restoreTimeSeekHostCallback()
+        timeSeekPrimedPlayer = null
         pendingTimeSeek = null
     }
 
@@ -266,7 +268,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val target = if (duration > 0) current.positionMs.coerceAtMost(
                 (duration - 1_000L).coerceAtLeast(0L)
             ) else current.positionMs
-            logTimeSeek("seek_call", "positionMs=$target")
+            if (timeSeekPrimedPlayer === mediaPlayer &&
+                kotlin.math.abs(mediaPlayer.currentPosition - target) <= 1_500L) {
+                logTimeSeek("seek_primed_confirmed",
+                    "positionMs=$target currentMs=${mediaPlayer.currentPosition}")
+                clearPendingTimeSeek("applied_before_prepare")
+                return
+            }
+            logTimeSeek("seek_call",
+                "positionMs=$target reason=${if (timeSeekPrimedPlayer === mediaPlayer) "prime_deviated" else "not_primed"}")
             mediaPlayer.seekTo(target)
             logTimeSeek("seek_returned", "currentMs=${mediaPlayer.currentPosition}")
             clearPendingTimeSeek("applied")
@@ -287,6 +297,26 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (seekPlayer !== mediaPlayer) {
                 detachTimeSeekListener()
                 seekPlayer = mediaPlayer
+                // PlayerAttachedEvent is dispatched before CS3IPlayer calls prepare().
+                // Seek the already-set media source in STATE_IDLE, before any first frame.
+                val current = pendingTimeSeek
+                val meta = model.state.generatorState?.meta as? ResultEpisode
+                if (current != null && mediaPlayer.playbackState == Media3Player.STATE_IDLE &&
+                    mediaPlayer.mediaItemCount > 0 && meta?.apiName == "YouTube" &&
+                    YoutubeUtils.extractYoutubeId(meta.data) == current.videoId) {
+                    runCatching {
+                        mediaPlayer.seekTo(current.positionMs.coerceAtLeast(0L))
+                        timeSeekPrimedPlayer = mediaPlayer
+                        logTimeSeek("seek_primed",
+                            "positionMs=${current.positionMs} beforePrepare=true currentMs=${mediaPlayer.currentPosition}")
+                    }.onFailure {
+                        Log.w("YouTubeTimestamp", "event=seek_prime_failed", it)
+                    }
+                } else if (current != null) {
+                    logTimeSeek("seek_prime_skipped",
+                        "state=${mediaPlayer.playbackState} items=${mediaPlayer.mediaItemCount} " +
+                            "meta=${meta?.apiName} matched=${meta?.data?.let { YoutubeUtils.extractYoutubeId(it) } == current.videoId}")
+                }
                 // Media3 listener defaults differ between plugin compile and app runtime.
                 // A runtime proxy handles all callbacks without missing abstract methods.
                 val listener = java.lang.reflect.Proxy.newProxyInstance(
@@ -1186,10 +1216,16 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 logTimeSeek("click_blocked", "reason=invalid_video_url")
                 return
             }
-            val currentPlayer = playerFragment as? GeneratorPlayer
+            val currentPlayer = (playerFragment as? GeneratorPlayer)
+                ?.takeIf { it.isAdded && !it.isDetached }
             val currentMeta = currentPlayer?.let {
-                ViewModelProvider(it)[PlayerGeneratorViewModel::class.java]
-                    .state.generatorState?.meta as? ResultEpisode
+                runCatching {
+                    ViewModelProvider(it)[PlayerGeneratorViewModel::class.java]
+                        .state.generatorState?.meta as? ResultEpisode
+                }.onFailure { error ->
+                    logTimeSeek("stale_player_ignored",
+                        "reason=${error.javaClass.simpleName}")
+                }.getOrNull()
             }
             val media = currentPlayer?.playerView?.player
             if (currentMeta?.apiName == "YouTube" &&
@@ -1455,6 +1491,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         private inner class Watcher(private val list: RecyclerView, private val role: Role) {
             private val modified = IdentityHashMap<View, CardState>()
+            private val thumbnailTraceKeys = IdentityHashMap<View, String>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private var homeAdapter: HomeChildItemAdapter? = null
@@ -1682,6 +1719,41 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
 
+            private fun traceRecommendationLayout(
+                view: View, card: View, image: ImageView, item: SearchResponse
+            ) {
+                val stamp = "${item.url}|${item.posterUrl}"
+                if (thumbnailTraceKeys[view] == stamp) return
+                thumbnailTraceKeys[view] = stamp
+                val videoId = YoutubeUtils.extractYoutubeId(item.url).orEmpty()
+                fun report(phase: String) {
+                    val drawable = image.drawable
+                    Log.i("YouTubeThumbTrace",
+                        "event=RENDER_$phase videoId=$videoId url=${item.posterUrl} " +
+                            "cell=${view.width}x${view.height} card=${card.width}x${card.height} " +
+                            "cardLp=${card.layoutParams.width}x${card.layoutParams.height} " +
+                            "image=${image.width}x${image.height} " +
+                            "imageLp=${image.layoutParams.width}x${image.layoutParams.height} " +
+                            "drawable=${drawable?.intrinsicWidth}x${drawable?.intrinsicHeight} scale=${image.scaleType}")
+                }
+                report("BIND")
+                var frames = 0
+                val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        val stop = thumbnailTraceKeys[view] != stamp ||
+                            !image.isAttachedToWindow || image.drawable != null || ++frames >= 120
+                        if (stop) {
+                            if (image.viewTreeObserver.isAlive) {
+                                image.viewTreeObserver.removeOnPreDrawListener(this)
+                            }
+                            if (thumbnailTraceKeys[view] == stamp) report("DRAW")
+                        }
+                        return true
+                    }
+                }
+                image.viewTreeObserver.addOnPreDrawListener(listener)
+            }
+
             private fun apply(view: View) {
                 if (isParent) {
                     view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
@@ -1753,6 +1825,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     } else baseWidth
                     state.setCardWidth(width)
                     state.setImageHeight((width * (if (shorts) 16f / 9f else 9f / 16f)).roundToInt())
+                    if (role == Role.DETAIL_RECOMMENDATIONS && video) {
+                        traceRecommendationLayout(view, card, image, item)
+                    }
                 } else {
                     val wide = HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 } ?: dp(180)
                     val narrow = HomeChildItemAdapter.minPosterSize.takeIf { it > 0 } ?: dp(114)

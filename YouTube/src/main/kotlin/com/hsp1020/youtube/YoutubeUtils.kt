@@ -104,30 +104,6 @@ object YoutubeUtils {
         }
     }
 
-    /** Choose a true 16:9 source for ordinary video recommendations only. */
-    fun getWideThumbnail(thumbData: Any?, videoId: String): String {
-        val thumbs = when (thumbData) {
-            is Map<*, *> -> (thumbData["thumbnails"] as? List<*>)
-                ?: (thumbData["sources"] as? List<*>)
-            is List<*> -> thumbData
-            else -> null
-        }
-        val wideUrl = thumbs?.asSequence()?.mapNotNull { item ->
-            val thumb = item as? Map<*, *> ?: return@mapNotNull null
-            val url = (thumb["url"] as? String)?.takeIf { it.isNotBlank() }
-                ?: return@mapNotNull null
-            val width = (thumb["width"] as? Number)?.toInt() ?: 0
-            val height = (thumb["height"] as? Number)?.toInt() ?: 0
-            val file = url.substringBefore("?").substringAfterLast("/").lowercase()
-            val isWide = (height > 0 && width.toFloat() / height in 1.70f..1.84f) ||
-                file in setOf("mqdefault.jpg", "hq720.jpg", "maxresdefault.jpg",
-                    "hq1080.jpg", "mqdefault.webp", "hq720.webp", "maxresdefault.webp")
-            if (isWide) url else null
-        }?.lastOrNull()
-        return wideUrl?.let { if (it.startsWith("//")) "https:$it" else it }
-            ?: "https://i.ytimg.com/vi/$videoId/mqdefault.jpg"
-    }
-
     fun buildThumbnailFromId(videoId: String?): String? {
         if (videoId.isNullOrBlank()) return null
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
