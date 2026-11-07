@@ -50,6 +50,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
@@ -106,7 +107,7 @@ internal class ElevateMdbRatings(
         bindings.values.toList().forEach { binding ->
             (binding.model.page.value as? Resource.Success<ResultData>)?.value?.let(binding::update)
         }
-        homeBinding?.schedule()
+        homeBinding?.onApiKeyChanged()
     }
     private val keyListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "MDB_RATINGS_API_KEY") {
@@ -636,8 +637,12 @@ internal class ElevateMdbRatings(
         private var decoratedTv: String? = null
         private var selected: LoadResponse? = null
         private var identity = ""
-        private var generation = 0
         private var ratings: List<String>? = null
+        private var batch = 0
+        private var homeSource = model.apiName.value
+        private val prefetchSlots = Semaphore(2)
+        private val requests = mutableMapOf<String, Pair<Job, Boolean>>()
+        private val results = mutableMapOf<String, List<String>>()
         private var queued = false
         private var shown = false
         private var editing = false
@@ -654,7 +659,23 @@ internal class ElevateMdbRatings(
             }
         }
         private val previewObserver =
-            Observer<Resource<Pair<Boolean, List<LoadResponse>>>> { schedule() }
+            Observer<Resource<Pair<Boolean, List<LoadResponse>>>> { state ->
+                when (state) {
+                    is Resource.Success -> {
+                        bindHeader()
+                        preload(state.value.second)
+                    }
+                    else -> clearRequests()
+                }
+                schedule()
+            }
+        private val sourceObserver = Observer<String> { source ->
+            if (homeSource != source) {
+                homeSource = source
+                clearRequests()
+            }
+            schedule()
+        }
         private val selectedPage = object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) = schedule()
         }
@@ -688,8 +709,83 @@ internal class ElevateMdbRatings(
         fun start() {
             master?.addOnChildAttachStateChangeListener(children)
             master?.viewTreeObserver?.takeIf { it.isAlive }?.addOnGlobalLayoutListener(layout)
+            model.apiName.observe(fragment.viewLifecycleOwner, sourceObserver)
             model.preview.observe(fragment.viewLifecycleOwner, previewObserver)
             schedule()
+        }
+
+        fun onApiKeyChanged() {
+            clearRequests()
+            (model.preview.value as? Resource.Success<Pair<Boolean, List<LoadResponse>>>)
+                ?.value?.second?.let {
+                    bindHeader()
+                    preload(it)
+                }
+            schedule()
+        }
+
+        private fun ratingId(item: LoadResponse, apiKey: String): String =
+            listOf(item.apiName, item.url, item.type, apiKey.hashCode()).joinToString("|")
+
+        private fun clearRequests() {
+            batch++
+            requests.values.forEach { it.first.cancel() }
+            requests.clear()
+            results.clear()
+            restoreTv()
+            clearPhone()
+            selected = null
+            identity = ""
+            ratings = null
+        }
+
+        private suspend fun fetchHero(item: LoadResponse, apiKey: String): List<String> {
+            val (direct, other) = heroIds(item, apiKey.hashCode())
+            val target = direct ?: resolveOther(other, heroMovie(item), apiKey.hashCode())
+                ?: return emptyList()
+            return get(target, apiKey)
+        }
+
+        private fun requestHero(item: LoadResponse, apiKey: String, foreground: Boolean) {
+            val key = ratingId(item, apiKey)
+            if (results.containsKey(key)) return
+            requests[key]?.let { (job, background) ->
+                if (!foreground || !background) return
+                // Promote a queued prefetch without starting a second MDB network request.
+                job.cancel()
+                requests.remove(key)
+            }
+            val ticket = batch
+            val job = io.launch {
+                val values = try {
+                    if (foreground) fetchHero(item, apiKey)
+                    else prefetchSlots.withPermit { fetchHero(item, apiKey) }
+                } catch (e: CancellationException) { return@launch }
+                  catch (_: Exception) { emptyList() }
+                val runningJob = coroutineContext[Job]
+                main.post {
+                    if (homeBinding === this@HomeBinding && batch == ticket &&
+                        requests[key]?.first === runningJob) {
+                        requests.remove(key)
+                        results[key] = values
+                        if (identity == key) {
+                            ratings = values
+                            schedule()
+                        }
+                    }
+                }
+            }
+            requests[key] = job to !foreground
+        }
+
+        private fun preload(items: List<LoadResponse>) {
+            val apiKey = preferences.getString("MDB_RATINGS_API_KEY", "").orEmpty().trim()
+            if (apiKey.isEmpty() || items.isEmpty()) return
+            val current = pager?.currentItem?.takeIf { it in items.indices } ?: 0
+            requestHero(items[current], apiKey, foreground = true)
+            items.forEachIndexed { index, item ->
+                if (index != current) requestHero(item, apiKey, foreground = false)
+            }
         }
         private fun bindHeader() {
             val list = master ?: return
@@ -842,37 +938,22 @@ internal class ElevateMdbRatings(
                 ?.getOrNull(viewPager.currentItem)
             val apiKey = preferences.getString("MDB_RATINGS_API_KEY", "").orEmpty().trim()
             val next = if (current == null || apiKey.isEmpty()) "" else
-                listOf(current.apiName, current.url, current.type, apiKey.hashCode())
-                    .joinToString("|")
+                ratingId(current, apiKey)
             if (next != identity) {
                 selected = current
                 restoreTv()
                 clearPhone()
                 identity = next
-                ratings = null
-                val token = ++generation
-                if (next.isNotEmpty() && current != null) io.launch {
-                    val values = try {
-                        val (direct, other) = heroIds(current, apiKey.hashCode())
-                        val target = direct ?: resolveOther(other, heroMovie(current),
-                            apiKey.hashCode()) ?: return@launch
-                        get(target, apiKey)
-                    } catch (e: CancellationException) { return@launch }
-                      catch (_: Exception) { emptyList() }
-                    main.post {
-                        if (homeBinding === this@HomeBinding && generation == token &&
-                            identity == next) {
-                            ratings = values
-                            schedule()
-                        }
-                    }
-                }
+                ratings = results[next]
             }
+            if (next.isNotEmpty() && current != null)
+                requestHero(current, apiKey, foreground = true)
             if (description != null) renderTv() else renderPhone()
         }
         fun stop() {
-            ++generation
+            clearRequests()
             main.removeCallbacks(refresh)
+            model.apiName.removeObserver(sourceObserver)
             model.preview.removeObserver(previewObserver)
             master?.removeOnChildAttachStateChangeListener(children)
             master?.viewTreeObserver?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
