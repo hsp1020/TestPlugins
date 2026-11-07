@@ -56,16 +56,28 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import kotlin.math.max
 
 /** Keep the native cover visible until Coil finishes; only the decoded artwork wipes in. */
 internal object PosterWipe {
     internal data class Result(val success: Boolean, val source: String = "", val error: String = "")
-    private data class Running(val animator: ValueAnimator, val overlay: WipeDrawable)
+    private data class Running(val url: String, val animator: ValueAnimator, val overlay: WipeDrawable)
+    private data class Displayed(val url: String, val drawable: WeakReference<Drawable>)
     private val active = WeakHashMap<ImageView, Running>()
+    private val displayed = WeakHashMap<ImageView, Displayed>()
     private const val DURATION_MS = 500L
-    private data class RequestKey(val url: String, val size: Size, val scale: Scale)
+
+    private fun alreadyDisplayed(image: ImageView, url: String): Boolean =
+        displayed[image]?.let { it.url == url && it.drawable.get() === image.drawable } == true
+
+    private fun markDisplayed(image: ImageView, url: String, drawable: Drawable) {
+        displayed[image] = Displayed(url, WeakReference(drawable))
+    }
+    private data class RequestKey(
+        val url: String, val size: Size, val scale: Scale, val diskWarm: Boolean
+    )
     private class Flight(val request: Deferred<ImageResult>, var subscribers: Int = 0)
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val imageFlights = HashMap<RequestKey, Flight>()
@@ -322,7 +334,7 @@ internal object PosterWipe {
     }
 
     private suspend fun executeImage(
-        context: Context, url: String, size: Size, scale: Scale
+        context: Context, url: String, size: Size, scale: Scale, diskWarm: Boolean
     ): ImageResult {
         val gate = synchronized(urlGates) {
             urlGates.getOrPut(url) { UrlGate() }.also { it.users++ }
@@ -334,6 +346,7 @@ internal object PosterWipe {
                 .httpHeaders(NetworkHeaders.Builder().apply {
                     this["User-Agent"] = USER_AGENT
                 }.build())
+            if (diskWarm) request.memoryCachePolicy(CachePolicy.DISABLED)
             if (gate.mutex.isLocked) {
                 // Do not wait behind a slow network request when Coil can
                 // immediately serve a previously decoded or cached image.
@@ -365,14 +378,15 @@ internal object PosterWipe {
 
     // Never share a decoded image across distinct output dimensions.
     private suspend fun loadSharedImage(
-        context: Context, url: String, size: Size, scale: Scale, origin: String
+        context: Context, url: String, size: Size, scale: Scale, origin: String,
+        diskWarm: Boolean = false
     ): ImageResult {
-        val key = RequestKey(url, size, scale)
+        val key = RequestKey(url, size, scale, diskWarm)
         var joined = false
         val flight = synchronized(imageFlights) {
             (imageFlights[key]?.also { joined = true } ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
-                    executeImage(context, url, size, scale)
+                    executeImage(context, url, size, scale, diskWarm)
                 }
                 Flight(job).also { created ->
                     imageFlights[key] = created
@@ -466,7 +480,9 @@ internal object PosterWipe {
                 headers?.forEach { (key, value) -> this[key] = value }
             }.build()
             val request = ImageRequest.Builder(context.applicationContext).data(url)
-                .size(Size(width, height)).scale(Scale.FILL).precision(Precision.INEXACT)
+                .size(Size(minOf(width, 40), minOf(height, 60)))
+                .scale(Scale.FILL).precision(Precision.INEXACT)
+                .memoryCachePolicy(CachePolicy.DISABLED)
                 .httpHeaders(networkHeaders).build()
             SingletonImageLoader.get(context.applicationContext).execute(request)
         } catch (cancelled: CancellationException) {
@@ -486,8 +502,12 @@ internal object PosterWipe {
         context: Context, url: String, width: Int, height: Int,
         origin: String = "actor_prefetch"
     ): Result {
+        val diskWarm = origin == "recommendation_prefetch" ||
+            origin == "library_prefetch"
+        val size = if (diskWarm) Size(minOf(width, 40), minOf(height, 60))
+            else Size(width, height)
         val outcome = try {
-            loadSharedImage(context, url, Size(width, height), Scale.FILL, origin)
+            loadSharedImage(context, url, size, Scale.FILL, origin, diskWarm)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -504,7 +524,11 @@ internal object PosterWipe {
         // Match the native ImageView's size/scale to reuse Coil cache entries.
         // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
         val outcome = try {
-            if (!image.isAttachedToWindow) return Result(false, error = "stale")
+            if (!image.isAttachedToWindow || !valid()) return Result(false, error = "stale")
+            if (alreadyDisplayed(image, url) || active[image]?.url == url) {
+                trace(url, "WIPE_SKIP", "origin=$origin reason=already_displayed")
+                return Result(true, source = "UNCHANGED")
+            }
             val scale = when (image.scaleType) {
                 ImageView.ScaleType.CENTER_CROP, ImageView.ScaleType.FIT_XY -> Scale.FILL
                 else -> Scale.FIT
@@ -525,14 +549,20 @@ internal object PosterWipe {
         if (outcome is ErrorResult)
             return Result(false, error = outcome.throwable.javaClass.simpleName)
         val success = outcome as? SuccessResult ?: return Result(false, error = "no_image")
+        if (alreadyDisplayed(image, url) || active[image]?.url == url) {
+            trace(url, "WIPE_SKIP", "origin=$origin reason=already_displayed_after_load")
+            return Result(true, source = success.dataSource.name)
+        }
         val custom = success.image.asDrawable(image.resources).mutate()
         cancel(image)
         val previous = image.drawable
         // Only now cancel a possibly still-running native request; never before decoding.
         image.dispose()
-        // Cached artwork is already available: avoid a redundant 500ms transition.
-        if (success.dataSource.name != "NETWORK" || image.width <= 0 || image.height <= 0) {
+        // Cache hits also wipe when the current drawable is a different poster.
+        if (image.width <= 0 || image.height <= 0) {
             image.setImageDrawable(custom)
+            markDisplayed(image, url, custom)
+            trace(url, "WIPE_DIRECT", "origin=$origin reason=unmeasured")
             return Result(true, source = success.dataSource.name)
         }
         image.setImageDrawable(previous ?: image.context.getDrawable(R.drawable.default_cover))
@@ -540,8 +570,10 @@ internal object PosterWipe {
         wipe.bounds = Rect(0, 0, image.width, image.height)
         image.overlay.add(wipe)
         val animation = ValueAnimator.ofFloat(0f, 1f).apply { duration = DURATION_MS }
-        val running = Running(animation, wipe)
+        val running = Running(url, animation, wipe)
         active[image] = running
+        trace(url, "WIPE_START",
+            "origin=$origin source=${success.dataSource.name} durationMs=$DURATION_MS")
         animation.addUpdateListener {
             if (active[image] === running) wipe.progress = it.animatedValue as Float
         }
@@ -551,6 +583,8 @@ internal object PosterWipe {
                     active.remove(image)
                     image.overlay.remove(wipe)
                     image.setImageDrawable(custom)
+                    markDisplayed(image, url, custom)
+                    trace(url, "WIPE_DONE", "origin=$origin")
                 }
             }
         })

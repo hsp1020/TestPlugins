@@ -619,6 +619,9 @@ internal class RecommendationPosterHook(private val application: Application) :
             val position = list.getChildAdapterPosition(view)
             if (position == RecyclerView.NO_POSITION) return
             val card = native.getItemOrNull(position) as? SearchResponse ?: return
+            val preloadId = card.apiName + "|" + card.url + "|" + card.posterUrl
+            preloaded.add(preloadId)
+            preloadJobs.remove(preloadId)?.cancel()
             val image = view.findViewById<ImageView>(R.id.imageView) ?: return
             if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) return
             val key = card.apiName + "|" + card.url + "|" + card.name + "|" +

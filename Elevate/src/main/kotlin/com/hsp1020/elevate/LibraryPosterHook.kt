@@ -236,6 +236,10 @@ internal class LibraryPosterHook(private val appContext: Application) :
     }
 
     private inner class PageWatch(private val recycler: RecyclerView) {
+        private fun preloadKey(card: SyncAPI.LibraryItem): String =
+            card.apiName + ":" + card.syncId + ":" + card.url + ":" +
+                card.name + ":" + card.posterUrl + ":" + card.posterHeaders.hashCode()
+
         private var adapter: RecyclerView.Adapter<*>? = null
         private var preloadRevision = revision
         private val preloaded = HashSet<String>()
@@ -382,6 +386,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
             if (position == RecyclerView.NO_POSITION) return
             val card = native.getItemOrNull(position) ?: return
             if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) return
+            val key = preloadKey(card)
+            preloaded.add(key)
+            preloadJobs.remove(key)?.cancel()
             val image = view.findViewById<ImageView>(R.id.imageView) ?: return
             update(image, card)
         }
@@ -418,8 +425,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
             var scheduled = 0
             for (position in first until end) {
                 val card = native.getItemOrNull(position) ?: continue
-                val key = card.apiName + ":" + card.syncId + ":" + card.url + ":" +
-                    card.name + ":" + card.posterUrl + ":" + card.posterHeaders.hashCode()
+                val key = preloadKey(card)
                 needed.add(key)
                 if (position <= last || !preloaded.add(key)) continue
                 scheduled++
