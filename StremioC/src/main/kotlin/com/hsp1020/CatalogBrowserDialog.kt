@@ -714,10 +714,7 @@ internal class CatalogBrowserDialog(
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
     private val grid = AutofitRecyclerView(activity)
-    private val posterPreloader = CatalogPosterPreloader("browser")
-    private val posterProbe = CatalogPosterProbe(grid, "browser", { items }) {
-        posterPreloader.nativeBound(it)
-    }
+    private val posterProbe = CatalogPosterProbe(grid, "browser") { items }
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
@@ -1568,7 +1565,6 @@ internal class CatalogBrowserDialog(
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
             posterProbe.stop()
-            posterPreloader.close()
             BrowserPosterTrace.stop()
             grid.adapter = null
             onDismiss()
@@ -1640,7 +1636,6 @@ internal class CatalogBrowserDialog(
         offset = 0
         autoFillCount = 0
         items.clear()
-        posterPreloader.reset()
         BrowserPosterTrace.clearCards()
         seen.clear()
         pageSignatures.clear()
@@ -1850,7 +1845,6 @@ internal class CatalogBrowserDialog(
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
             adapter.submitList(items.toList()) {
                 if (!closed) {
-                    posterPreloader.enqueue(activity, home.items)
                     StremioCMetaPerf.log("BROWSER_LIST_COMMIT", StremioCMetaPerf.key(next.url),
                         "origin=home elapsedMs=${StremioCMetaPerf.now() - snapshotAt} cards=${items.size}")
                     initialProgress(false)
@@ -2016,7 +2010,6 @@ internal class CatalogBrowserDialog(
                     "elapsedMs=${submitAt - perfStarted} new=${fresh.size} total=${items.size}")
                 adapter.submitList(items.toList()) {
                     if (ticket == generation && !closed) {
-                        posterPreloader.enqueue(activity, fresh)
                         StremioCMetaPerf.log("BROWSER_LIST_COMMIT", perfKey,
                             "submitMs=${StremioCMetaPerf.now() - submitAt} " +
                                 "totalMs=${StremioCMetaPerf.now() - perfStarted} cards=${items.size}")
@@ -2071,8 +2064,7 @@ internal data class CatalogHomeSnapshot(
 internal class CatalogPosterProbe(
     private val list: RecyclerView,
     private val surface: String,
-    private val cards: () -> List<SearchResponse>,
-    private val onNativeBind: (SearchResponse) -> Unit = {}
+    private val cards: () -> List<SearchResponse>
 ) {
     private data class Observation(
         val cardKey: String,
@@ -2121,7 +2113,6 @@ internal class CatalogPosterProbe(
             val existing = seen[card]
             if (existing == null || existing.cardKey != cardKey || existing.image !== img) {
                 val original = entry.posterUrl
-                onNativeBind(entry)
                 val kind = when {
                     original.isNullOrBlank() -> "none"
                     original.contains("xrdb.", true) -> "xrdb"
@@ -2283,9 +2274,7 @@ internal class CatalogHomeEntryHook(
     }
 
     private inner class Row(val view: View, private val child: RecyclerView, val adapter: HomeChildItemAdapter) {
-        private val posterProbe = CatalogPosterProbe(child, "home", {
-            adapter.immutableCurrentList
-        }) { CatalogPosterPreloads.home.nativeBound(it) }
+        private val posterProbe = CatalogPosterProbe(child, "home") { adapter.immutableCurrentList }
         private val title = view.findViewById<View>(R.id.home_child_more_info)
         private val originalFocusable = title?.isFocusable == true
         private val originalForeground = title?.foreground

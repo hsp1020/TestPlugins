@@ -369,51 +369,9 @@ internal class RecommendationPosterHook(private val application: Application) :
         else -> "none"
     }
 
-    /** Resolve the same artwork identity as on-screen recommendation cards before they bind. */
-    private suspend fun posterForPreload(card: SearchResponse, config: PosterConfig): String? {
-        val (direct, simkl) = directIds(card)
-        val cover = Cover("preload", revision, card.posterUrl, card.posterHeaders,
-            card.apiName, Integer.toHexString(card.url.hashCode()), SystemClock.elapsedRealtime())
-        val detail = if (!direct.available && simkl == null) detailIds(card, cover) else null
-        val ids = detail?.ids ?: direct
-        val simklId = detail?.simkl ?: simkl
-        val mediaType = runCatching { JSONObject(card.url).optString("type") }.getOrNull()?.lowercase()
-        val simklType = runCatching {
-            Uri.parse(card.url).takeIf { it.host?.removePrefix("www.") == "simkl.com" }
-                ?.pathSegments?.firstOrNull()
-        }.getOrNull()
-        val movie = detail?.movie ?: when (mediaType ?: simklType) {
-            "movie", "movies" -> true
-            "tv", "series", "show", "shows", "anime" -> false
-            else -> card.type in setOf(TvType.Movie, TvType.AnimeMovie)
-        }
-        val mapped = if (ids.imdb == null && ids.tmdb == null && simklId != null)
-            simklIds(simklId, movie, simklType) else null
-        val posterIds = mapped?.ids ?: ids
-        val posterMovie = mapped?.movie ?: movie
-        val anime = (posterIds.mal != null || posterIds.anilist != null ||
-            posterIds.kitsu != null) &&
-            (simklType == "anime" || card.type in
-                setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
-                (posterIds.imdb == null && posterIds.tmdb == null))
-        val season = if (anime && config.service != PosterService.XRDB)
-            animeIds(posterIds) else null
-        val resolved = when {
-            season != null -> season
-            anime && config.service == PosterService.XRDB ->
-                posterIds.copy(imdb = null, tmdb = null)
-            else -> posterIds
-        }
-        val primary = if (resolved.tmdb != null) resolved.copy(imdb = null) else resolved
-        return config.image(primary, posterMovie)
-            ?: resolved.imdb?.let { config.image(PosterIds(imdb = it), posterMovie) }
-    }
-
     private inner class Screen(val list: RecyclerView) {
         private val covers = IdentityHashMap<ImageView, Cover>()
         private val pending = IdentityHashMap<ImageView, Job>()
-        private val preloaded = HashSet<String>()
-        private val preloadJobs = mutableMapOf<String, Job>()
         private var adapter: RecyclerView.Adapter<*>? = null
         private var queued = false
         private var rebind = false
@@ -455,7 +413,6 @@ internal class RecommendationPosterHook(private val application: Application) :
             list.removeOnScrollListener(scrolling)
             adapter?.unregisterAdapterDataObserver(observer)
             adapter = null
-            clearPreloads()
             pending.values.toList().forEach { it.cancel() }
             pending.clear()
             covers.forEach { (image, cover) ->
@@ -465,16 +422,9 @@ internal class RecommendationPosterHook(private val application: Application) :
             covers.clear()
         }
 
-        private fun clearPreloads() {
-            preloadJobs.values.toList().forEach { it.cancel() }
-            preloadJobs.clear()
-            preloaded.clear()
-        }
-
         private fun syncAdapter() {
             val next = list.adapter
             if (adapter === next) return
-            clearPreloads()
             adapter?.unregisterAdapterDataObserver(observer)
             adapter = next
             next?.registerAdapterDataObserver(observer)
@@ -492,65 +442,10 @@ internal class RecommendationPosterHook(private val application: Application) :
                 val changed = rebind
                 rebind = false
                 for (index in 0 until list.childCount) apply(list.getChildAt(index), changed)
-                preloadAll()
             }
-        }
-
-        private fun preloadAll() {
-            val native = list.adapter as? SearchAdapter ?: return
-            val visible = HashSet<Int>()
-            for (i in 0 until list.childCount) {
-                val index = list.getChildAdapterPosition(list.getChildAt(i))
-                if (index != RecyclerView.NO_POSITION) visible.add(index)
-            }
-            val image = list.getChildAt(0)?.findViewById<ImageView>(R.id.imageView)
-            val density = list.resources.displayMetrics.density
-            val width = image?.width?.takeIf { it > 0 } ?: (140 * density).toInt()
-            val height = image?.height?.takeIf { it > 0 } ?: (210 * density).toInt()
-            val config = setting
-            val token = revision
-            var scheduled = 0
-            for (position in 0 until native.itemCount) {
-                if (position in visible) continue // The native adapter/overlay already loads these.
-                val card = native.getItemOrNull(position) as? SearchResponse ?: continue
-                val id = card.apiName + "|" + card.url + "|" + card.posterUrl
-                if (!preloaded.add(id)) continue
-                scheduled++
-                preloadJobs[id] = scope.launch {
-                    try {
-                        coroutineScope {
-                            card.posterUrl?.takeIf {
-                                it.startsWith("https://") || it.startsWith("http://")
-                            }?.let { original ->
-                                launch(Dispatchers.IO) {
-                                    PosterWipe.prefetchNative(list.context, original, width, height,
-                                        card.posterHeaders)
-                                }
-                            }
-                            if (config.ready) launch custom@{
-                                val poster = withContext(Dispatchers.IO) {
-                                    posterForPreload(card, config)
-                                } ?: return@custom
-                                if (revision == token && poster !in unavailable)
-                                    PosterWipe.prefetch(list.context, poster, width, height,
-                                        "recommendation_prefetch")
-                            }
-                        }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Native card loading and current custom-poster fallback remain unchanged.
-                    } finally {
-                        preloadJobs.remove(id)
-                    }
-                }
-            }
-            if (scheduled > 0) Log.d("ElevatePoster",
-                "event=RECOMMENDATION_PRELOAD scheduled=$scheduled total=${native.itemCount}")
         }
 
         fun refresh() {
-            clearPreloads()
             pending.values.toList().forEach { it.cancel() }
             pending.clear()
             covers.forEach { (image, cover) ->
@@ -619,9 +514,6 @@ internal class RecommendationPosterHook(private val application: Application) :
             val position = list.getChildAdapterPosition(view)
             if (position == RecyclerView.NO_POSITION) return
             val card = native.getItemOrNull(position) as? SearchResponse ?: return
-            val preloadId = card.apiName + "|" + card.url + "|" + card.posterUrl
-            preloaded.add(preloadId)
-            preloadJobs.remove(preloadId)?.cancel()
             val image = view.findViewById<ImageView>(R.id.imageView) ?: return
             if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) return
             val key = card.apiName + "|" + card.url + "|" + card.name + "|" +

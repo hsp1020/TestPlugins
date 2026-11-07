@@ -84,7 +84,7 @@ internal object BrowserPosterTrace {
                     val beforeGlobal = dispatcher.maxRequests
                     val beforeHost = dispatcher.maxRequestsPerHost
                     dispatcher.maxRequests = 64
-                    dispatcher.maxRequestsPerHost = 64
+                    dispatcher.maxRequestsPerHost = 32
                     updated++
                     log("COIL_DISPATCHER",
                         "client=${System.identityHashCode(client).toUInt().toString(16)} " +
@@ -95,7 +95,7 @@ internal object BrowserPosterTrace {
                     log("COIL_DISPATCHER_SKIP", "reason=${error.javaClass.simpleName}")
                 }
             }
-            log("COIL_DISPATCHER_DONE", "clients=$updated global=64 perHost=64")
+            log("COIL_DISPATCHER_DONE", "clients=$updated global=64 perHost=32")
         } catch (error: Throwable) {
             log("COIL_DISPATCHER_FAIL", "reason=${error.javaClass.simpleName}")
         }

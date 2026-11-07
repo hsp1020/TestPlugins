@@ -17,7 +17,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
-import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -236,14 +235,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
     }
 
     private inner class PageWatch(private val recycler: RecyclerView) {
-        private fun preloadKey(card: SyncAPI.LibraryItem): String =
-            card.apiName + ":" + card.syncId + ":" + card.url + ":" +
-                card.name + ":" + card.posterUrl + ":" + card.posterHeaders.hashCode()
-
         private var adapter: RecyclerView.Adapter<*>? = null
-        private var preloadRevision = revision
-        private val preloaded = HashSet<String>()
-        private val preloadJobs = mutableMapOf<String, Job>()
         private var queued = false
         private var rebinding = false
         private var rebindAll = false
@@ -293,16 +285,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
             queue()
         }
 
-        private fun clearPreloads() {
-            preloadJobs.values.toList().forEach { it.cancel() }
-            preloadJobs.clear()
-            preloaded.clear()
-        }
-
         private fun sync() {
             val next = recycler.adapter
             if (adapter === next) return
-            clearPreloads()
             adapter?.unregisterAdapterDataObserver(changes)
             adapter = next
             next?.registerAdapterDataObserver(changes)
@@ -386,9 +371,6 @@ internal class LibraryPosterHook(private val appContext: Application) :
             if (position == RecyclerView.NO_POSITION) return
             val card = native.getItemOrNull(position) ?: return
             if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) return
-            val key = preloadKey(card)
-            preloaded.add(key)
-            preloadJobs.remove(key)?.cancel()
             val image = view.findViewById<ImageView>(R.id.imageView) ?: return
             update(image, card)
         }
@@ -397,93 +379,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
             sync()
             val native = recycler.adapter as? PageAdapter ?: return
             for (i in 0 until recycler.childCount) scanChild(recycler.getChildAt(i), native)
-            preloadAhead(native)
-        }
-
-        private fun preloadAhead(native: PageAdapter) {
-            if (preloadRevision != revision) {
-                clearPreloads()
-                preloadRevision = revision
-            }
-            var first = Int.MAX_VALUE
-            var last = -1
-            for (i in 0 until recycler.childCount) {
-                val position = recycler.getChildAdapterPosition(recycler.getChildAt(i))
-                if (position == RecyclerView.NO_POSITION) continue
-                first = minOf(first, position)
-                last = maxOf(last, position)
-            }
-            if (last < 0) return
-            val end = minOf(native.itemCount, last + 33) // Last attached card + next 32.
-            val density = recycler.resources.displayMetrics.density
-            val image = recycler.getChildAt(0)?.findViewById<ImageView>(R.id.imageView)
-            val width = image?.width?.takeIf { it > 0 } ?: (140 * density).toInt()
-            val height = image?.height?.takeIf { it > 0 } ?: (210 * density).toInt()
-            val needed = HashSet<String>()
-            val configSnapshot = config
-            val token = revision
-            var scheduled = 0
-            for (position in first until end) {
-                val card = native.getItemOrNull(position) ?: continue
-                val key = preloadKey(card)
-                needed.add(key)
-                if (position <= last || !preloaded.add(key)) continue
-                scheduled++
-                preloadJobs[key] = scope.launch {
-                    try {
-                        kotlinx.coroutines.coroutineScope {
-                            card.posterUrl?.takeIf {
-                                it.startsWith("https://") || it.startsWith("http://")
-                            }?.let { original ->
-                                launch(Dispatchers.IO) {
-                                    PosterWipe.prefetchNative(recycler.context, original, width,
-                                        height, card.posterHeaders)
-                                }
-                            }
-                            if (configSnapshot.ready &&
-                                (configSnapshot.service != PosterService.XRDB ||
-                                    configSnapshot.xrdbProfile.isBlank() || xrdbVersionChecked)) {
-                                launch custom@{
-                                    val ids = withContext(Dispatchers.IO) {
-                                        resolve(card, configSnapshot.service == PosterService.XRDB)
-                                    }
-                                    if (revision != token) return@custom
-                                    val base = ids?.let {
-                                        configSnapshot.image(it, card.type == TvType.Movie)
-                                    } ?: return@custom
-                                    val poster = if (configSnapshot.service == PosterService.XRDB &&
-                                        xrdbVersion != null) {
-                                        Uri.parse(base).buildUpon()
-                                            .appendQueryParameter("v", xrdbVersion)
-                                            .build().toString()
-                                    } else base
-                                    if (poster !in unavailable)
-                                        PosterWipe.prefetch(recycler.context, poster, width, height,
-                                            "library_prefetch")
-                                }
-                            }
-                        }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Native bindings and the existing custom-poster fallback are unchanged.
-                    } finally {
-                        preloadJobs.remove(key)
-                    }
-                }
-            }
-            for (key in preloadJobs.keys.toList()) {
-                if (key !in needed) {
-                    preloadJobs.remove(key)?.cancel()
-                    preloaded.remove(key)
-                }
-            }
-            if (scheduled > 0) Log.d("ElevatePoster",
-                "event=LIBRARY_PRELOAD scheduled=$scheduled from=$first to=${end - 1}")
         }
 
         fun stop() {
-            clearPreloads()
             adapter?.unregisterAdapterDataObserver(changes)
             recycler.removeOnChildAttachStateChangeListener(attachListener)
             for (i in 0 until recycler.childCount) {
