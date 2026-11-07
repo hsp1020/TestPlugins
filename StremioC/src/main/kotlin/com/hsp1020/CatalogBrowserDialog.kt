@@ -928,6 +928,7 @@ internal class CatalogBrowserDialog(
     private var job: Job? = null
     private var offset = 0
     private var loading = false
+    private var pageLoadSequence = 0
     private var hasNext = false
     private var autoFillCount = 0
 
@@ -980,14 +981,6 @@ internal class CatalogBrowserDialog(
         grid.clipToPadding = extra == 0
         if (active) grid.post {
             if (closed || !loading || pageSkeleton.visibility != View.VISIBLE) return@post
-            updatePageSkeleton()
-            val lastView = grid.layoutManager?.findViewByPosition(items.lastIndex)
-            if (lastView != null) {
-                val nextRow = items.size % grid.spanCount.coerceAtLeast(1) == 0
-                val desiredBottom = (if (nextRow) lastView.bottom + lastView.height else lastView.bottom)
-                val overflow = desiredBottom - (grid.height - grid.paddingBottom)
-                if (overflow > 0) grid.scrollBy(0, overflow)
-            }
             updatePageSkeleton()
         }
     }
@@ -1962,12 +1955,14 @@ internal class CatalogBrowserDialog(
         val ticket = generation
         val selectedGenre = genre
         val requestedOffset = offset
+        val pageLoadId = ++pageLoadSequence
         loading = true
         updateCatalogResultState()
         val firstPage = items.isEmpty()
         if (firstPage) initialProgress(true) else pageProgress(true)
         retry.visibility = View.GONE
         job = scope.launch {
+            var listSubmitted = false
             try {
                 val (page, rawCount) = withContext(Dispatchers.IO) {
                     selectedProvider.browsePage(selectedCatalog, selectedGenre, requestedOffset)
@@ -1983,9 +1978,16 @@ internal class CatalogBrowserDialog(
                 adapter.submitList(items.toList()) {
                     if (ticket == generation && !closed) {
                         if (firstPage) initialProgress(false)
+                        else grid.post {
+                            // Keep the loading row until the new items have been committed.
+                            // An older page must not hide a newer page's loading row.
+                            if (!closed && ticket == generation && pageLoadId == pageLoadSequence)
+                                pageProgress(false)
+                        }
                         updateCatalogResultState()
                     }
                 }
+                listSubmitted = true
                 if (selectedGenre == null) {
                     try {
                         syncHomePage(selectedProvider, selectedCatalog, requestedOffset, page, rawCount, hasNext)
@@ -2006,7 +2008,7 @@ internal class CatalogBrowserDialog(
                 if (ticket == generation) {
                     loading = false
                     if (firstPage && items.isEmpty()) initialProgress(false)
-                    if (!firstPage) pageProgress(false)
+                    if (!firstPage && !listSubmitted) pageProgress(false)
                     updateCatalogResultState()
                 }
             }
