@@ -14,7 +14,13 @@ import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ImageSpan
 import android.view.View
+import android.view.ViewGroup
+import android.view.Gravity
+import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -70,6 +76,7 @@ internal class ElevateMdbRatings(
     private var previewModel: ResultViewModel2? = null
     private var previewObserver: Observer<Resource<ResultData>?>? = null
     private val bindings = mutableMapOf<Fragment, Binding>()
+    private var homeBinding: HomeBinding? = null
     private data class Key(val provider: String, val id: String, val movie: Boolean, val apiKeyHash: Int)
     private data class Cached(val until: Long, val values: List<String>)
     private val cache = object : LinkedHashMap<Key, Cached>(64, .75f, true) {
@@ -99,6 +106,7 @@ internal class ElevateMdbRatings(
         bindings.values.toList().forEach { binding ->
             (binding.model.page.value as? Resource.Success<ResultData>)?.value?.let(binding::update)
         }
+        homeBinding?.schedule()
     }
     private val keyListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "MDB_RATINGS_API_KEY") {
@@ -563,6 +571,327 @@ internal class ElevateMdbRatings(
             }
         }
     }
+
+    private fun heroMovie(item: LoadResponse): Boolean =
+        item.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
+            item.url.contains("/meta/movie/") ||
+            runCatching { JSONObject(item.url).optString("type").equals("movie", true) }
+                .getOrDefault(false)
+
+    /** Resolve the selected home hero using the same MDB key and anime/Simkl mapping. */
+    private fun heroIds(item: LoadResponse, hash: Int): Pair<Key?, List<Pair<String, String>>> {
+        val saved = readIdFromString(item.syncData["simkl"])
+        val extra = runCatching { JSONObject(item.url) }.getOrNull()
+        val meta = metaId.find(item.url)?.groupValues?.getOrNull(1)
+            ?.let(android.net.Uri::decode)
+        val movie = heroMovie(item)
+        val imdb = listOf(item.getImdbId(), saved[SimklSyncServices.Imdb],
+            item.syncData["imdb"], extra?.optString("imdbId"), extra?.optString("imdb_id"),
+            meta, item.url.substringBefore(':')).firstOrNull {
+                it != null && imdbPattern.matches(it)
+            }
+        val tmdb = listOf(item.getTMDbId(), saved[SimklSyncServices.Tmdb],
+            item.syncData["tmdb"], extra?.optString("tmdbId"), extra?.optString("tmdb_id"),
+            extra?.optString("moviedb_id"), meta?.takeIf { it.startsWith("tmdb:") },
+            item.url.takeIf { it.startsWith("tmdb:") }).firstNotNullOfOrNull { raw ->
+                raw?.substringAfterLast(':')?.toLongOrNull()?.takeIf { it > 0 }?.toString()
+            }
+        val direct = when {
+            imdb != null -> Key("imdb", imdb, movie, hash)
+            tmdb != null -> Key("tmdb", tmdb, movie, hash)
+            else -> null
+        }
+        if (direct != null) return direct to emptyList()
+        val alternatives = linkedMapOf<String, String>()
+        fun add(source: String, raw: String?) {
+            val id = raw?.removePrefix("$source:")?.substringBefore(':')
+                ?.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return
+            alternatives.putIfAbsent(source, id)
+        }
+        add("mal", item.getMalId())
+        add("kitsu", item.getKitsuId())
+        add("anilist", item.getAniListId())
+        add("mal", saved[SimklSyncServices.Mal])
+        add("anilist", saved[SimklSyncServices.AniList])
+        for (source in listOf("mal", "kitsu", "anilist", "simkl")) {
+            add(source, item.syncData[source])
+            add(source, extra?.optString(source))
+            add(source, meta?.takeIf { it.startsWith("$source:") })
+            add(source, item.url.takeIf { it.startsWith("$source:") })
+        }
+        add("simkl", saved[SimklSyncServices.Simkl])
+        return null to alternatives.map { it.key to it.value }
+    }
+
+    /** UI-only home binding: no changes to native LoadResponses or StremioC. */
+    private inner class HomeBinding(val fragment: Fragment, val root: View) {
+        private val model = ViewModelProvider(fragment.requireActivity())[HomeViewModel::class.java]
+        private val master = root.findViewById<RecyclerView>(
+            com.lagradost.cloudstream3.R.id.home_master_recycler)
+        private var header: View? = null
+        private var pager: ViewPager2? = null
+        private var description: TextView? = null
+        private var nativeScore: TextView? = null
+        private var scoreHidden = false
+        private var decoratedTv: String? = null
+        private var selected: LoadResponse? = null
+        private var identity = ""
+        private var generation = 0
+        private var ratings: List<String>? = null
+        private var queued = false
+        private var shown = false
+        private var editing = false
+        private var phonePage: View? = null
+        private var phoneLabel: TextView? = null
+        private var phoneDefault: TextView? = null
+        private var phoneDefaultVisibility = View.VISIBLE
+
+        private val refresh = Runnable { queued = false; if (homeBinding === this) update() }
+        fun schedule() {
+            if (!queued) {
+                queued = true
+                main.post(refresh)
+            }
+        }
+        private val previewObserver =
+            Observer<Resource<Pair<Boolean, List<LoadResponse>>>> { schedule() }
+        private val selectedPage = object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) = schedule()
+        }
+        private val children = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) = schedule()
+            override fun onChildViewDetachedFromWindow(view: View) {
+                if (header === view) {
+                    releaseHeader()
+                    schedule()
+                }
+            }
+        }
+        private val layout = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            if (header == null) schedule()
+            else {
+                val visible = pager?.isShown == true
+                if (shown != visible) {
+                    shown = visible
+                    schedule()
+                } else if (visible && description == null && !ratings.isNullOrEmpty()) {
+                    // A phone hero's native score row can be rebound after MDB arrives.
+                    renderPhone()
+                }
+            }
+        }
+        private val textWatcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) { if (!editing) schedule() }
+        }
+        fun start() {
+            master?.addOnChildAttachStateChangeListener(children)
+            master?.viewTreeObserver?.takeIf { it.isAlive }?.addOnGlobalLayoutListener(layout)
+            model.preview.observe(fragment.viewLifecycleOwner, previewObserver)
+            schedule()
+        }
+        private fun bindHeader() {
+            val list = master ?: return
+            val next = (0 until list.childCount).asSequence().map(list::getChildAt)
+                .firstOrNull {
+                    it.findViewById<View>(com.lagradost.cloudstream3.R.id.home_header) != null
+                }
+            val nextPager = next?.findViewById<ViewPager2>(
+                com.lagradost.cloudstream3.R.id.home_preview_viewpager)
+            if (next === header && nextPager === pager) return
+            releaseHeader()
+            header = next
+            pager = nextPager
+            description = next?.findViewById(com.lagradost.cloudstream3.R.id.home_preview_description)
+            nativeScore = next?.findViewById(com.lagradost.cloudstream3.R.id.home_preview_score)
+            description?.addTextChangedListener(textWatcher)
+            pager?.registerOnPageChangeCallback(selectedPage)
+            shown = pager?.isShown == true
+        }
+        private fun restoreTv() {
+            description?.let { view ->
+                val text = view.text ?: ""
+                if (decoratedTv != null && text.toString() == decoratedTv) {
+                    editing = true
+                    try { view.setText(sourceText(text), TextView.BufferType.SPANNABLE) }
+                    finally { editing = false }
+                }
+                decoratedTv = null
+                if (view.text.isNullOrBlank()) view.visibility = View.GONE
+            }
+            if (scoreHidden) {
+                nativeScore?.visibility = if (selected?.score == null) View.GONE else View.VISIBLE
+                scoreHidden = false
+            }
+        }
+        private fun clearPhone() {
+            (phoneLabel?.parent as? ViewGroup)?.removeView(phoneLabel)
+            phoneLabel = null
+            phonePage = null
+            phoneDefault?.visibility = if (phoneDefault?.text.isNullOrBlank())
+                View.GONE else phoneDefaultVisibility
+            phoneDefault = null
+        }
+        private fun releaseHeader() {
+            pager?.unregisterOnPageChangeCallback(selectedPage)
+            description?.removeTextChangedListener(textWatcher)
+            restoreTv()
+            clearPhone()
+            header = null
+            pager = null
+            description = null
+            nativeScore = null
+            shown = false
+        }
+        private fun renderTv() {
+            val view = description ?: return
+            val original = view.text ?: ""
+            val plain = if (decoratedTv != null && original.toString() == decoratedTv)
+                sourceText(original) else original
+            val values = ratings
+            val next = if (values.isNullOrEmpty()) plain else decorate(
+                SpannableStringBuilder("\u2063" + values.joinToString("  ") + "\n").append(plain),
+                view.textSize)
+            val hasImages = (original as? Spanned)
+                ?.getSpans(0, original.length, RatingSpan::class.java)?.isNotEmpty() == true
+            if (original.toString() != next.toString() ||
+                !values.isNullOrEmpty() && !hasImages) {
+                editing = true
+                try { view.setText(next, TextView.BufferType.SPANNABLE) }
+                finally { editing = false }
+            }
+            decoratedTv = if (values.isNullOrEmpty()) null else next.toString()
+            view.visibility = if (!values.isNullOrEmpty() || plain.isNotEmpty())
+                View.VISIBLE else View.GONE
+            if (!values.isNullOrEmpty()) {
+                nativeScore?.visibility = View.GONE
+                scoreHidden = true
+            } else if (scoreHidden) {
+                nativeScore?.visibility = if (selected?.score == null) View.GONE else View.VISIBLE
+                scoreHidden = false
+            }
+        }
+        private fun renderPhone() {
+            val viewPager = pager ?: return
+            val list = viewPager.getChildAt(0) as? RecyclerView ?: return
+            val index = viewPager.currentItem
+            val page = (0 until list.childCount).asSequence().map(list::getChildAt)
+                .firstOrNull {
+                    runCatching { list.getChildViewHolder(it).bindingAdapterPosition }
+                        .getOrDefault(RecyclerView.NO_POSITION) == index
+                }
+            val values = ratings
+            if (page == null || values.isNullOrEmpty()) {
+                clearPhone()
+                return
+            }
+            val tags = page.findViewById<TextView>(
+                com.lagradost.cloudstream3.R.id.home_scroll_preview_tags) ?: return
+            val holder = tags.parent as? LinearLayout ?: return
+            // Prefer the existing fallback-score position when a provider supplies one.
+            val fallback = (0 until holder.childCount).asSequence()
+                .map(holder::getChildAt).filterIsInstance<TextView>()
+                .firstOrNull { it !== tags && it !== phoneLabel &&
+                    it.text?.toString()?.trimStart()?.startsWith("★ ") == true }
+            if (phonePage !== page || phoneLabel?.parent !== holder) {
+                clearPhone()
+                phonePage = page
+                phoneLabel = TextView(holder.context).apply {
+                    textSize = 14f
+                    setTextColor(android.graphics.Color.WHITE)
+                    setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
+                    isClickable = false
+                    isFocusable = false
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }.also { label ->
+                    val anchor = fallback ?: tags
+                    holder.addView(label, holder.indexOfChild(anchor).coerceAtLeast(0),
+                        LinearLayout.LayoutParams(-1, -2).apply {
+                            topMargin = (4 * holder.resources.displayMetrics.density).roundToInt()
+                        })
+                }
+            }
+            val label = phoneLabel ?: return
+            label.gravity = if (tags.alpha == 0f) Gravity.START else Gravity.CENTER
+            val text = decorate("\u2063" + values.joinToString("  "), label.textSize)
+            if (label.text.toString() != text.toString() ||
+                (label.text as? Spanned)?.getSpans(0, label.text.length, RatingSpan::class.java)
+                    .isNullOrEmpty()) label.setText(text, TextView.BufferType.SPANNABLE)
+
+            // A phone hero may already show a fallback star rating in its own row.
+            if (fallback !== phoneDefault) {
+                phoneDefault?.visibility = if (phoneDefault?.text.isNullOrBlank())
+                    View.GONE else phoneDefaultVisibility
+                phoneDefault = fallback
+                phoneDefaultVisibility = fallback?.visibility ?: View.VISIBLE
+            }
+            fallback?.visibility = View.GONE
+        }
+        private fun update() {
+            if (fragment.view !== root) return
+            bindHeader()
+            val viewPager = pager ?: return
+            if (!viewPager.isShown) {
+                restoreTv()
+                clearPhone()
+                return
+            }
+            val current = (model.preview.value as?
+                Resource.Success<Pair<Boolean, List<LoadResponse>>>)?.value?.second
+                ?.getOrNull(viewPager.currentItem)
+            val apiKey = preferences.getString("MDB_RATINGS_API_KEY", "").orEmpty().trim()
+            val next = if (current == null || apiKey.isEmpty()) "" else
+                listOf(current.apiName, current.url, current.type, apiKey.hashCode())
+                    .joinToString("|")
+            if (next != identity) {
+                selected = current
+                restoreTv()
+                clearPhone()
+                identity = next
+                ratings = null
+                val token = ++generation
+                if (next.isNotEmpty() && current != null) io.launch {
+                    val values = try {
+                        val (direct, other) = heroIds(current, apiKey.hashCode())
+                        val target = direct ?: resolveOther(other, heroMovie(current),
+                            apiKey.hashCode()) ?: return@launch
+                        get(target, apiKey)
+                    } catch (e: CancellationException) { return@launch }
+                      catch (_: Exception) { emptyList() }
+                    main.post {
+                        if (homeBinding === this@HomeBinding && generation == token &&
+                            identity == next) {
+                            ratings = values
+                            schedule()
+                        }
+                    }
+                }
+            }
+            if (description != null) renderTv() else renderPhone()
+        }
+        fun stop() {
+            ++generation
+            main.removeCallbacks(refresh)
+            model.preview.removeObserver(previewObserver)
+            master?.removeOnChildAttachStateChangeListener(children)
+            master?.viewTreeObserver?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
+            releaseHeader()
+            selected = null
+            ratings = null
+            identity = ""
+        }
+    }
+
+    private fun attachHome(fragment: Fragment, root: View) {
+        if (homeBinding?.fragment === fragment && homeBinding?.root === root) {
+            homeBinding?.schedule()
+        } else {
+            homeBinding?.stop()
+            homeBinding = HomeBinding(fragment, root).also { it.start() }
+        }
+    }
+
     private fun attach(fragment: Fragment, root: View) {
         if (bindings.containsKey(fragment) || fragment.javaClass.name !in setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
@@ -573,13 +902,22 @@ internal class ElevateMdbRatings(
         runCatching { Binding(fragment, root, view).also { bindings[fragment] = it; it.start() } }
     }
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, saved: Bundle?) =
+        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, saved: Bundle?) {
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                attachHome(f, v)
             attach(f, v)
+        }
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                f.view?.let { attachHome(f, it) }
             bindings[f]?.let { it.render() } ?: f.view?.let { attach(f, it) }
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             bindings.remove(f)?.stop()
+            if (homeBinding?.fragment === f) {
+                homeBinding?.stop()
+                homeBinding = null
+            }
         }
     }
     private fun renderPreview(activity: FragmentActivity, data: ResultData) {
@@ -647,12 +985,18 @@ internal class ElevateMdbRatings(
         detachPreview()
         bindings.values.toList().forEach { it.stop() }
         bindings.clear()
+        homeBinding?.stop()
+        homeBinding = null
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         observePreview(activity)
         fun scan(manager: FragmentManager) {
             for (fragment in manager.fragments) {
-                fragment.view?.let { attach(fragment, it) }
+                fragment.view?.let {
+                    if (fragment.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                        attachHome(fragment, it)
+                    attach(fragment, it)
+                }
                 if (fragment.isAdded) scan(fragment.childFragmentManager)
             }
         }
@@ -669,6 +1013,8 @@ internal class ElevateMdbRatings(
         application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         detachPreview()
+        homeBinding?.stop()
+        homeBinding = null
         host = null
         bindings.values.toList().forEach { it.stop() }
         bindings.clear()
@@ -683,6 +1029,8 @@ internal class ElevateMdbRatings(
         if (host === activity) {
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             detachPreview()
+            homeBinding?.stop()
+            homeBinding = null
             host = null
             bindings.values.toList().forEach { it.stop() }
             bindings.clear()
