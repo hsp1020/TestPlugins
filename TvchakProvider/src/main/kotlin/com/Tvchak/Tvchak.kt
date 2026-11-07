@@ -332,15 +332,17 @@ class TvchakProvider : MainAPI() {
         val plot = document.selectFirst("h2#sum_tag")?.text()?.trim() ?: ""
         val poster = passedPoster ?: document.selectFirst(".poster img")?.attr("src") ?: ""
         
-        val episodes = document.select(".content_playlist li a").reversed().mapIndexedNotNull { index, element ->
+        val episodeRegex = Regex("""^\s*(?:제\s*)?(\d+)\s*(?:화|회|작|부)(?![가-힣\d])""")
+        val episodes = document.select(".content_playlist li a").mapIndexedNotNull { index, element ->
             val epTitle = element.text().trim()
             val epHref = fixUrlNull(element.attr("href")) ?: return@mapIndexedNotNull null
+            val epNumber = episodeRegex.find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: index + 1
 
             newEpisode(epHref) {
                 this.name = epTitle
-                this.episode = index + 1
+                this.episode = epNumber
             }
-        }
+        }.sortedBy { it.episode }
 
         val tvType = if (episodes.size == 1 && title.contains("영화")) TvType.Movie else TvType.TvSeries
         return newTvSeriesLoadResponse(title, realUrl, tvType, episodes) {
