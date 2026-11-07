@@ -1722,31 +1722,11 @@ class YoutubeProvider(
         return Triple(channel, views, date)
     }
 
-    private fun logRecommendationSource(
-        renderer: String, videoId: String, thumbsData: Any?, selected: String?
-    ) {
-        val items = when (thumbsData) {
-            is Map<*, *> -> (thumbsData["thumbnails"] as? List<*>)
-                ?: (thumbsData["sources"] as? List<*>)
-            is List<*> -> thumbsData
-            else -> null
-        }
-        val candidates = items?.takeLast(8)?.joinToString(" | ") { raw ->
-            val thumb = raw as? Map<*, *>
-            val url = (thumb?.get("url") as? String).orEmpty().take(250)
-            "($url ${thumb?.get("width")}x${thumb?.get("height")})"
-        } ?: "none"
-        Log.i("YouTubeThumbTrace",
-            "event=SOURCE renderer=$renderer videoId=$videoId selected=$selected " +
-                "candidates=${items?.size ?: 0} last=$candidates")
-    }
-
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
         playlistId: String? = null,
-        isSearch: Boolean,
-        traceRecommendationThumbnail: Boolean = false
+        isSearch: Boolean
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -1804,11 +1784,8 @@ class YoutubeProvider(
                     }
                 }
                 
-                val thumbnailData = videoData.getMapKey("thumbnail")
-                var poster = YoutubeUtils.getBestThumbnail(thumbnailData)
+                var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
-                if (traceRecommendationThumbnail)
-                    logRecommendationSource("videoRenderer", videoId, thumbnailData, poster)
                 
                 val watchUrl = if (!playlistId.isNullOrBlank()) {
                     "$mainUrl/watch?v=$videoId&list=$playlistId"
@@ -2028,29 +2005,9 @@ class YoutubeProvider(
                             else title
                         }
                     }
-                    // Video lockups nest their actual thumbnail list under thumbnailViewModel.
-                    // The old contentImage.image lookup skipped it and always fell back.
-                    val contentImage = lockup.getMapKey("contentImage")
-                    val primarySources = contentImage?.getMapKey("thumbnailViewModel")
-                        ?.getMapKey("image")?.getListKey("sources")
-                        ?.takeIf { it.isNotEmpty() }
-                    val sources = primarySources ?: contentImage?.getMapKey("image")
-                        ?.getListKey("sources")
-                    val wide = sources?.asReversed()?.firstOrNull { source ->
-                        val entry = source as? Map<*, *> ?: return@firstOrNull false
-                        val width = (entry["width"] as? Number)?.toDouble() ?: return@firstOrNull false
-                        val height = (entry["height"] as? Number)?.toDouble() ?: return@firstOrNull false
-                        height > 0 && width / height in 1.70..1.85
-                    } as? Map<*, *>
-                    val wideUrl = wide?.get("url") as? String
-                    poster = wideUrl?.let { if (it.startsWith("//")) "https:$it" else it }
-                        ?: YoutubeUtils.getBestThumbnail(sources)
-                        ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-                    if (traceRecommendationThumbnail)
-                        logRecommendationSource(
-                            if (primarySources != null) "lockup.thumbnailViewModel" else "lockup.legacy",
-                            videoId, sources, poster
-                        )
+                    poster = YoutubeUtils.getBestThumbnail(
+                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
+                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
@@ -2089,12 +2046,11 @@ class YoutubeProvider(
         playlistMode: Boolean,
         isSearch: Boolean = false,
         depth: Int = 0,
-        playlistId: String? = null,
-        traceRecommendationThumbnail: Boolean = false
+        playlistId: String? = null
     ) {    
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch, traceRecommendationThumbnail)
+            val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -2107,20 +2063,20 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, traceRecommendationThumbnail)
+                    processRecursive(data[key], outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, traceRecommendationThumbnail)
+                        processRecursive(value, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, traceRecommendationThumbnail)
+                processRecursive(item, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
             }
         }
     }
@@ -4154,8 +4110,7 @@ class YoutubeProvider(
 
             val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
             if (secondaryResults != null) {
-                processRecursive(secondaryResults, recommendations, seenRecIds, false,
-                    isSearch = false, traceRecommendationThumbnail = true)
+                processRecursive(secondaryResults, recommendations, seenRecIds, false)
             }
 
         } else if (response != null) {

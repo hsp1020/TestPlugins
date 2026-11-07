@@ -1491,7 +1491,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         private inner class Watcher(private val list: RecyclerView, private val role: Role) {
             private val modified = IdentityHashMap<View, CardState>()
-            private val thumbnailTraceKeys = IdentityHashMap<View, String>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private var homeAdapter: HomeChildItemAdapter? = null
@@ -1719,47 +1718,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
 
-            private fun traceRecommendationLayout(
-                view: View, card: View, image: ImageView, item: SearchResponse
-            ) {
-                val stamp = "${item.url}|${item.posterUrl}"
-                if (thumbnailTraceKeys[view] == stamp) return
-                thumbnailTraceKeys[view] = stamp
-                val videoId = YoutubeUtils.extractYoutubeId(item.url).orEmpty()
-                fun report(phase: String) {
-                    val drawable = image.drawable
-                    Log.i("YouTubeThumbTrace",
-                        "event=RENDER_$phase videoId=$videoId url=${item.posterUrl} " +
-                            "cell=${view.width}x${view.height} card=${card.width}x${card.height} " +
-                            "cardLp=${card.layoutParams.width}x${card.layoutParams.height} " +
-                            "image=${image.width}x${image.height} " +
-                            "imageLp=${image.layoutParams.width}x${image.layoutParams.height} " +
-                            "drawable=${drawable?.intrinsicWidth}x${drawable?.intrinsicHeight} " +
-                            "drawableType=${drawable?.javaClass?.simpleName} scale=${image.scaleType}")
-                }
-                report("BIND")
-                var frames = 0
-                val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
-                    override fun onPreDraw(): Boolean {
-                        val drawable = image.drawable
-                        // The first non-null drawable is often CloudStream's portrait
-                        // default_cover; wait for the decoded wide thumbnail instead.
-                        val loadedWide = drawable != null && drawable.intrinsicHeight > 0 &&
-                            drawable.intrinsicWidth.toFloat() / drawable.intrinsicHeight > 1.5f
-                        val stop = thumbnailTraceKeys[view] != stamp ||
-                            !image.isAttachedToWindow || loadedWide || ++frames >= 180
-                        if (stop) {
-                            if (image.viewTreeObserver.isAlive) {
-                                image.viewTreeObserver.removeOnPreDrawListener(this)
-                            }
-                            if (thumbnailTraceKeys[view] == stamp) report("DRAW")
-                        }
-                        return true
-                    }
-                }
-                image.viewTreeObserver.addOnPreDrawListener(listener)
-            }
-
             private fun apply(view: View) {
                 if (isParent) {
                     view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
@@ -1831,15 +1789,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     } else baseWidth
                     state.setCardWidth(width)
                     state.setImageHeight((width * (if (shorts) 16f / 9f else 9f / 16f)).roundToInt())
-                    // The YouTube thumbnail is already widescreen; never crop it a
-                    // second time when filling the fixed 16:9 recommendation cell.
                     if (role == Role.DETAIL_RECOMMENDATIONS) {
-                        if (video) {
-                            state.setImageFill()
-                            traceRecommendationLayout(view, card, image, item)
-                        } else {
-                            state.restoreImageScale()
-                        }
+                        if (video) state.setImageFill() else state.restoreImageScale()
                     }
                 } else {
                     val wide = HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 } ?: dp(180)
