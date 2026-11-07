@@ -4829,7 +4829,7 @@ open class StremioC(
 
             val videosByDisplaySeason = videos.groupBy {
                 val s = it.seasonNumber ?: 0
-                if (s == 0 || (it.episode ?: it.number) == 0) targetSeasonForZero else s
+                if (s == 0) targetSeasonForZero else s
             }
 
             val processedEpisodes = mutableListOf<Episode>()
@@ -5335,7 +5335,7 @@ open class StremioC(
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true
                 val specialsSeason = finalVideos.orEmpty().takeIf { videos ->
-                    videos.any { it.seasonNumber == 0 || (it.episode ?: it.number) == 0 }
+                    videos.any { it.seasonNumber == 0 }
                 }?.let { videos ->
                     (videos.mapNotNull { it.seasonNumber?.takeIf { n -> n > 0 } }.maxOrNull() ?: 0) + 1
                 }
