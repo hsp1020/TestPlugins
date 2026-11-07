@@ -80,6 +80,7 @@ class StremioCPlugin : Plugin() {
         }
         isUnloaded = false
         val appContext = context.applicationContext
+        BrowserPosterTrace.configureNativeCoilDispatcher(appContext)
 
         val subtitlePrefs = appContext.getSharedPrefs()
         val subtitleLanguage = subtitlePrefs.getString(SUBTITLE_AUTO_SELECT_KEY, null)?.trim()

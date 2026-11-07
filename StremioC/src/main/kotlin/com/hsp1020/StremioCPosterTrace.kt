@@ -62,6 +62,45 @@ internal object BrowserPosterTrace {
         watched.clear()
     }
 
+    /** Tune the existing native Coil network clients; no new loader, requests or cache. */
+    @Synchronized
+    fun configureNativeCoilDispatcher(context: Context) {
+        try {
+            val loader = SingletonImageLoader.get(context.applicationContext)
+            val seen = ArrayList<OkHttpClient>()
+            var updated = 0
+            for ((factory, _) in loader.components.fetcherFactories) {
+                if (!factory.javaClass.name.contains("NetworkFetcher")) continue
+                try {
+                    val lazyField = factory.javaClass.getDeclaredField("networkClientLazy")
+                        .apply { isAccessible = true }
+                    val networkClient = (lazyField.get(factory) as Lazy<*>).value ?: continue
+                    val clientField = networkClient.javaClass.getDeclaredField("callFactory")
+                        .apply { isAccessible = true }
+                    val client = clientField.get(networkClient) as? OkHttpClient ?: continue
+                    if (seen.any { it === client }) continue
+                    seen.add(client)
+                    val dispatcher = client.dispatcher
+                    val beforeGlobal = dispatcher.maxRequests
+                    val beforeHost = dispatcher.maxRequestsPerHost
+                    dispatcher.maxRequests = 64
+                    dispatcher.maxRequestsPerHost = 64
+                    updated++
+                    log("COIL_DISPATCHER",
+                        "client=${System.identityHashCode(client).toUInt().toString(16)} " +
+                            "beforeGlobal=$beforeGlobal beforeHost=$beforeHost " +
+                            "global=${dispatcher.maxRequests} perHost=${dispatcher.maxRequestsPerHost} " +
+                            "queued=${dispatcher.queuedCallsCount()} running=${dispatcher.runningCallsCount()}")
+                } catch (error: Throwable) {
+                    log("COIL_DISPATCHER_SKIP", "reason=${error.javaClass.simpleName}")
+                }
+            }
+            log("COIL_DISPATCHER_DONE", "clients=$updated global=64 perHost=64")
+        } catch (error: Throwable) {
+            log("COIL_DISPATCHER_FAIL", "reason=${error.javaClass.simpleName}")
+        }
+    }
+
     @Synchronized
     fun start(context: Context) {
         if (active) return

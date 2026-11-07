@@ -108,9 +108,8 @@ internal object PosterWipe {
     // but log *actual request headers sent* rather than Coil NETWORK results.
     private val measuredFetcher by lazy {
         val dispatcher = Dispatcher().apply {
-            // Increase per-host concurrency from OkHttp's default of five.
-            // Keep the global dispatcher limit unchanged.
-            maxRequestsPerHost = 32
+            maxRequests = 64
+            maxRequestsPerHost = 64
         }
         val client = OkHttpClient.Builder().dispatcher(dispatcher).eventListenerFactory { call ->
             val key = call.request().url.toString().hashCode().toUInt().toString(16)
