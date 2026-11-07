@@ -142,40 +142,67 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         seekPlayer = null
     }
 
-    private fun clearPendingTimeSeek() {
+    private fun logTimeSeek(event: String, detail: String = "") {
+        Log.i("YouTubeTimestamp", "event=$event $detail")
+    }
+
+    private fun clearPendingTimeSeek(reason: String = "unspecified") {
+        pendingTimeSeek?.let {
+            logTimeSeek("pending_cleared",
+                "reason=$reason videoId=${it.videoId} positionMs=${it.positionMs}")
+        }
         detachTimeSeekListener()
         pendingTimeSeek = null
     }
 
     /** The existing player event path supplies the loaded media; no polling. */
     private fun watchPendingTimeSeek(fragment: Fragment) {
-        if (pendingTimeSeek == null || fragment.javaClass.name != PLAYER_SCREEN) return
-        val playerFragment = fragment as? GeneratorPlayer ?: return
+        val pending = pendingTimeSeek ?: return
+        if (fragment.javaClass.name != PLAYER_SCREEN) return
+        logTimeSeek("watch_started",
+            "videoId=${pending.videoId} positionMs=${pending.positionMs} fragment=${System.identityHashCode(fragment)}")
+        val playerFragment = fragment as? GeneratorPlayer ?: run {
+            logTimeSeek("watch_skipped", "reason=player_type_mismatch")
+            return
+        }
         val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
         fun seekWhenReady(mediaPlayer: Media3Player) {
             val current = pendingTimeSeek ?: return
             val meta = model.state.generatorState?.meta as? ResultEpisode
+            logTimeSeek("ready_check",
+                "state=${mediaPlayer.playbackState} seekable=${mediaPlayer.isCurrentMediaItemSeekable} " +
+                    "metaApi=${meta?.apiName} metaId=${meta?.data?.let { YoutubeUtils.extractYoutubeId(it) }} " +
+                    "expectedId=${current.videoId} duration=${mediaPlayer.duration}")
             if (meta?.apiName != "YouTube" ||
                 YoutubeUtils.extractYoutubeId(meta.data) != current.videoId) {
                 Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=episode_mismatch")
-                clearPendingTimeSeek()
+                clearPendingTimeSeek("episode_mismatch")
                 return
             }
             if (!mediaPlayer.isCurrentMediaItemSeekable) {
                 Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=not_seekable")
-                clearPendingTimeSeek()
+                clearPendingTimeSeek("not_seekable")
                 return
             }
             val duration = mediaPlayer.duration
             val target = if (duration > 0) current.positionMs.coerceAtMost(
                 (duration - 1_000L).coerceAtLeast(0L)
             ) else current.positionMs
+            logTimeSeek("seek_call", "positionMs=$target")
             mediaPlayer.seekTo(target)
-            clearPendingTimeSeek()
+            logTimeSeek("seek_returned", "currentMs=${mediaPlayer.currentPosition}")
+            clearPendingTimeSeek("applied")
         }
         fun attachToReadyPlayer() {
-            if (pendingTimeSeek == null || this.playerFragment !== fragment || !fragment.isAdded) return
-            val mediaPlayer = playerFragment.playerView?.player ?: return
+            if (pendingTimeSeek == null || this.playerFragment !== fragment || !fragment.isAdded) {
+                logTimeSeek("attach_skipped",
+                    "pending=${pendingTimeSeek != null} active=${this.playerFragment === fragment} added=${fragment.isAdded}")
+                return
+            }
+            val mediaPlayer = playerFragment.playerView?.player ?: run {
+                logTimeSeek("attach_skipped", "reason=media_player_missing")
+                return
+            }
             if (seekPlayer !== mediaPlayer) {
                 detachTimeSeekListener()
                 seekPlayer = mediaPlayer
@@ -187,6 +214,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 ) { proxy, method, args ->
                     when (method.name) {
                         "onPlaybackStateChanged" -> {
+                            logTimeSeek("playback_state", "state=${args?.firstOrNull()}")
                             if (args?.firstOrNull() == Media3Player.STATE_READY) seekWhenReady(mediaPlayer)
                             null
                         }
@@ -198,6 +226,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 } as Media3Player.Listener
                 seekListener = listener
                 mediaPlayer.addListener(listener)
+                logTimeSeek("listener_attached",
+                    "state=${mediaPlayer.playbackState} seekable=${mediaPlayer.isCurrentMediaItemSeekable}")
             }
             if (mediaPlayer.playbackState == Media3Player.STATE_READY) {
                 seekWhenReady(mediaPlayer)
@@ -473,7 +503,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 enteredPlayer = true
             } else if (enteredPlayer) {
                 popupAwaitingPlayer = false
-                clearPendingTimeSeek()
+                clearPendingTimeSeek("navigation_return")
                 if (destination.id == origin) popupReturning = expandedReturnDialog != null
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
@@ -614,7 +644,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         popupRoot: View? = null,
         startAtMs: Long? = null,
     ) {
+        if (startAtMs != null) logTimeSeek("direct_begin",
+            "positionMs=$startAtMs loading=$directLoading session=${directPlayback != null}")
         if (directLoading) {
+            if (startAtMs != null) logTimeSeek("direct_blocked", "reason=loading")
             return
         }
         val generation = ++directGeneration
@@ -628,20 +661,36 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val homeNav = host?.supportFragmentManager
                 ?.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment
             if (!redirected || homeNav?.navController?.currentDestination?.id ==
-                R.id.navigation_player) return
+                R.id.navigation_player) {
+                if (startAtMs != null) logTimeSeek("direct_blocked",
+                    "reason=existing_session redirected=$redirected nav=${homeNav?.navController?.currentDestination?.id}")
+                return
+            }
             clearPlaybackReturnListener()
-            clearPendingTimeSeek()
+            clearPendingTimeSeek("stale_session_replaced")
             directPlayback = null
             playerFragment = null
         }
         clearPopupReturnListener()
         expandedReturnDialog = null
         popupReturning = false
-        val activity = host ?: return
-        val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+        val activity = host ?: run {
+            if (startAtMs != null) logTimeSeek("direct_blocked", "reason=host_missing")
+            return
+        }
+        val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: run {
+            if (startAtMs != null) logTimeSeek("direct_blocked", "reason=provider_missing")
+            return
+        }
         val navHost = activity.supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return
-        val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
+            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: run {
+                if (startAtMs != null) logTimeSeek("direct_blocked", "reason=nav_host_missing")
+                return
+            }
+        val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: run {
+            if (startAtMs != null) logTimeSeek("direct_blocked", "reason=invalid_card_url")
+            return
+        }
         val popupDialog = popupRoot?.let(::findExpandedDialog)
         directLoading = true
         activity.lifecycleScope.launch {
@@ -678,7 +727,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val selectedIndex = initial.indexOfFirst {
                 YoutubeUtils.extractYoutubeId(it.data) == videoId
             }
-            if (selectedIndex < 0) return@launch
+            if (selectedIndex < 0) {
+                if (startAtMs != null) logTimeSeek("direct_blocked", "reason=episode_not_found")
+                return@launch
+            }
             val episodes = CopyOnWriteArrayList(initial)
             val session = DirectPlayback(
                 card, parentId, initial[selectedIndex].episode,
@@ -689,8 +741,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             appliedRange = null
             directPlayback = session
             if (startAtMs != null) {
-                clearPendingTimeSeek()
+                clearPendingTimeSeek("replaced")
                 pendingTimeSeek = PendingTimeSeek(videoId, startAtMs)
+                logTimeSeek("pending_set", "videoId=$videoId positionMs=$startAtMs")
             }
             expandedReturnDialog = popupDialog
             popupAwaitingPlayer = popupDialog != null
@@ -708,9 +761,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 Bundle(playerArgs).apply { putBoolean("youtube_direct_launch", true) }
                 else playerArgs) == true
             if (bridged) {
+                if (startAtMs != null) logTimeSeek("player_launch", "route=elevate_bridge")
                 externalDirectPlaybackHost = externalPlayerHost
             } else if (popupDialog != null && launchStandalonePlayer(activity, playerArgs)) {
+                if (startAtMs != null) logTimeSeek("player_launch", "route=standalone")
             } else {
+                if (startAtMs != null) logTimeSeek("player_launch", "route=native_navigation")
                 registerReturn(navHost.navController, session)
                 // Avoid a native pop animation flashing between playback and Home/Search.
                 val noTransition = NavOptions.Builder()
@@ -722,8 +778,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             prefetchDirectEpisodes(session, api, generation)
         } catch (e: Exception) {
+            if (startAtMs != null) Log.e("YouTubeTimestamp", "event=player_launch_failed", e)
             popupAwaitingPlayer = false
-            clearPendingTimeSeek()
+            clearPendingTimeSeek("launch_failed")
             clearPlaybackReturnListener()
             directPlayback = null
             if (expandedReturnDialog === popupDialog) {
@@ -802,7 +859,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (f.javaClass.name != PLAYER_SCREEN) return
             recordPlayerEpisode(f)
             if (playerFragment === f) {
-                clearPendingTimeSeek()
+                clearPendingTimeSeek("player_fragment_destroyed")
                 playerFragment = null
             }
             // Normally the destination listener already handled return.
@@ -837,6 +894,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
+                if (pendingTimeSeek != null) logTimeSeek("player_view_created",
+                    "fragment=${System.identityHashCode(f)}")
                 val popup = expandedReturnDialog
                 if (popupAwaitingPlayer && popup != null) view.doOnPreDraw {
                     if (popupAwaitingPlayer && expandedReturnDialog === popup) {
@@ -891,6 +950,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             manager.fragments.forEach { fragment ->
                 if (fragment.javaClass.name == PLAYER_SCREEN && fragment.view != null) {
                     playerFragment = fragment
+                    if (pendingTimeSeek != null) logTimeSeek("external_player_found",
+                        "fragment=${System.identityHashCode(fragment)}")
                     fragment.view?.let { attach(fragment, it) }
                     watchPendingTimeSeek(fragment)
                 }
@@ -912,7 +973,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private fun release() {
         clearStandalonePlayer()
-        clearPendingTimeSeek()
+        clearPendingTimeSeek("hook_release")
         clearPlaybackReturnListener()
         clearPopupReturnListener()
         popupAwaitingPlayer = false
@@ -1026,8 +1087,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private var editingDescription = false
 
         private fun openTimestamp(seconds: Int) {
-            val active = fragment?.takeIf { it.isAdded } ?: return
-            val videoId = YoutubeUtils.extractYoutubeId(pageUrl) ?: return
+            logTimeSeek("clicked", "seconds=$seconds pageUrl=$pageUrl added=${fragment?.isAdded}")
+            val active = fragment?.takeIf { it.isAdded } ?: run {
+                logTimeSeek("click_blocked", "reason=fragment_not_added")
+                return
+            }
+            val videoId = YoutubeUtils.extractYoutubeId(pageUrl) ?: run {
+                logTimeSeek("click_blocked", "reason=invalid_video_url")
+                return
+            }
             val currentPlayer = playerFragment as? GeneratorPlayer
             val currentMeta = currentPlayer?.let {
                 ViewModelProvider(it)[PlayerGeneratorViewModel::class.java]
@@ -1038,15 +1106,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 YoutubeUtils.extractYoutubeId(currentMeta.data) == videoId &&
                 media?.playbackState == Media3Player.STATE_READY &&
                 media.isCurrentMediaItemSeekable) {
+                logTimeSeek("seek_existing", "videoId=$videoId positionMs=${seconds * 1000L}")
                 media.seekTo(seconds * 1000L)
                 return
             }
-            if (directLoading || directPlayback != null) return
-            val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+            if (directLoading || directPlayback != null) {
+                logTimeSeek("click_blocked",
+                    "reason=direct_session loading=$directLoading session=${directPlayback != null}")
+                return
+            }
+            val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: run {
+                logTimeSeek("click_blocked", "reason=provider_missing")
+                return
+            }
             val title = active.arguments?.getString("name").orEmpty().ifBlank { "YouTube Video" }
             val card = api.newMovieSearchResponse(title, pageUrl, TvType.Movie) {
                 posterUrl = YoutubeUtils.buildThumbnailFromId(videoId)
             }
+            logTimeSeek("launch_requested", "videoId=$videoId positionMs=${seconds * 1000L}")
             playHomeVideo(card, startAtMs = seconds * 1000L)
         }
 
@@ -1133,6 +1210,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }
                 }
             }
+            if (videoId != null) logTimeSeek("description_decorated",
+                "timestampMatches=${TIME_LINK.findAll(text).count()} appliedLinks=$links")
             if (links == 0) return
             editingDescription = true
             try {
@@ -1147,7 +1226,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val text = description?.text?.toString().orEmpty()
             if (text.isBlank() || text == "\u200b") return
             val message = window.findViewById<TextView>(android.R.id.message) ?: return
-            if (message !== description && message.text?.toString() == text) decorateDescription(message)
+            if (message !== description && message.text?.toString() == text) {
+                logTimeSeek("expanded_description_bound", "length=${text.length}")
+                decorateDescription(message)
+            }
         }
 
         private fun bindDescription() {
@@ -1225,6 +1307,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         init {
+            if (pageUrl.contains("/watch?v=") || pageUrl.contains("/shorts/")) {
+                logTimeSeek("detail_hook_attached",
+                    "pageUrl=$pageUrl descriptionPresent=${description != null} fragment=${fragment?.javaClass?.simpleName}")
+            }
             if (fragment is GeneratorPlayer) {
                 root.findViewById<RecyclerView>(R.id.player_episode_list)
                     ?.let { watch(it, Role.DETAIL_EPISODE) }

@@ -133,6 +133,17 @@ class YoutubeProvider(
         private val directMainPageLock = Any()
         private val directMainPageCache = LinkedHashMap<String, CachedDirectMainPage>(8, 0.75f, true)
 
+        // Short-lived channel tab snapshots avoid repeating all continuation requests on re-entry.
+        private const val CHANNEL_TAB_REUSE_MS = 2 * 60_000L
+        private data class CachedChannelTab(val episodes: List<Episode>, val savedAtMs: Long)
+        private val channelTabCache = Collections.synchronizedMap(
+            object : LinkedHashMap<String, CachedChannelTab>(12, 0.75f, true) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<String, CachedChannelTab>?
+                ): Boolean = size > 12
+            }
+        )
+
         private const val STARTUP_DIRECT_REQUEST_SETTLE_MS = 200L
         private val startupGateLock = Any()
         @Volatile
@@ -3659,10 +3670,25 @@ class YoutubeProvider(
                 }
 
                 suspend fun fetchTab(tabUrl: String): List<Episode> {
+                    val cacheKey = "$tabUrl|$lang|$maxPagesLimit"
+                    synchronized(channelTabCache) {
+                        val cached = channelTabCache[cacheKey]
+                        if (cached != null &&
+                            System.currentTimeMillis() - cached.savedAtMs in 0L..CHANNEL_TAB_REUSE_MS) {
+                            cached.episodes.map { it.copy() }
+                        } else {
+                            if (cached != null) channelTabCache.remove(cacheKey)
+                            null
+                        }
+                    }?.let { return it }
                     val tabEpisodes = mutableListOf<Episode>()
+                    var cacheable = true
                     try {
-                        val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
-                        val tabData = extractYtInitialData(tabHtml) ?: return emptyList()
+                        // The channel header already fetched and parsed /videos.
+                        val tabData = if (tabUrl == channelUrl) data else {
+                            val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
+                            extractYtInitialData(tabHtml) ?: return emptyList()
+                        }
 
                         var initialItems: List<*>? = null
                         val tabs = safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
@@ -3746,16 +3772,36 @@ class YoutubeProvider(
                                     "continuation" to currentToken
                                 )
                                 val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
-                                val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>() ?: break
-                                val javaContinuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
+                                val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                if (jsonResponse == null) {
+                                    cacheable = false
+                                    break
+                                }
+                                val javaContinuationItems = findContinuationItemsRecursive(jsonResponse)
+                                if (javaContinuationItems == null) {
+                                    cacheable = false
+                                    break
+                                }
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, tabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                             } catch (e: Exception) {
+                                cacheable = false
                                 break
                             }
                         }
+                        if (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit) {
+                            cacheable = false
+                        }
                     } catch (e: Exception) {
+                        cacheable = false
                         logError(e)
+                    }
+                    if (cacheable && tabEpisodes.isNotEmpty()) {
+                        synchronized(channelTabCache) {
+                            channelTabCache[cacheKey] = CachedChannelTab(
+                                tabEpisodes.map { it.copy() }, System.currentTimeMillis()
+                            )
+                        }
                     }
                     return tabEpisodes
                 }
