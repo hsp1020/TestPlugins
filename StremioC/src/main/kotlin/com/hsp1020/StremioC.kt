@@ -4827,9 +4827,9 @@ open class StremioC(
             val maxRegularSeason = videos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
 
-            val videosByDisplaySeason = videos.groupBy { 
+            val videosByDisplaySeason = videos.groupBy {
                 val s = it.seasonNumber ?: 0
-                if (s == 0) targetSeasonForZero else s
+                if (s == 0 || (it.episode ?: it.number) == 0) targetSeasonForZero else s
             }
 
             val processedEpisodes = mutableListOf<Episode>()
@@ -5335,7 +5335,7 @@ open class StremioC(
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true
                 val specialsSeason = finalVideos.orEmpty().takeIf { videos ->
-                    videos.any { it.seasonNumber == 0 }
+                    videos.any { it.seasonNumber == 0 || (it.episode ?: it.number) == 0 }
                 }?.let { videos ->
                     (videos.mapNotNull { it.seasonNumber?.takeIf { n -> n > 0 } }.maxOrNull() ?: 0) + 1
                 }
@@ -5357,8 +5357,11 @@ open class StremioC(
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus
-                    if (nonstandardType && specialsSeason != null) {
-                        this.seasonNames = listOf(SeasonData(specialsSeason, "Specials", 0))
+                    if (specialsSeason != null) {
+                        val seasonLabel = CloudStreamApp.context
+                            ?.getString(com.lagradost.cloudstream3.R.string.season)
+                            ?.let { "$it S" } ?: "S"
+                        this.seasonNames = listOf(SeasonData(specialsSeason, seasonLabel))
                     }
                     this.plot = finalDescription
                     this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
