@@ -1726,7 +1726,8 @@ class YoutubeProvider(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
         playlistId: String? = null,
-        isSearch: Boolean
+        isSearch: Boolean,
+        preferWideThumbnail: Boolean = false
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -1784,7 +1785,9 @@ class YoutubeProvider(
                     }
                 }
                 
-                var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
+                var poster = if (preferWideThumbnail) {
+                    YoutubeUtils.getWideThumbnail(videoData.getMapKey("thumbnail"), videoId)
+                } else YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
                 val watchUrl = if (!playlistId.isNullOrBlank()) {
@@ -2005,9 +2008,12 @@ class YoutubeProvider(
                             else title
                         }
                     }
-                    poster = YoutubeUtils.getBestThumbnail(
-                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
-                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                    val sources = lockup.getMapKey("contentImage")
+                        ?.getMapKey("image")?.getListKey("sources")
+                    poster = if (preferWideThumbnail) {
+                        YoutubeUtils.getWideThumbnail(sources, videoId)
+                    } else YoutubeUtils.getBestThumbnail(sources)
+                        ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
@@ -2046,11 +2052,12 @@ class YoutubeProvider(
         playlistMode: Boolean,
         isSearch: Boolean = false,
         depth: Int = 0,
-        playlistId: String? = null
+        playlistId: String? = null,
+        preferWideThumbnail: Boolean = false
     ) {    
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch)
+            val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch, preferWideThumbnail)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -2063,20 +2070,20 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
+                    processRecursive(data[key], outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, preferWideThumbnail)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
+                        processRecursive(value, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, preferWideThumbnail)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
+                processRecursive(item, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId, preferWideThumbnail)
             }
         }
     }
@@ -4110,7 +4117,8 @@ class YoutubeProvider(
 
             val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
             if (secondaryResults != null) {
-                processRecursive(secondaryResults, recommendations, seenRecIds, false, isSearch = false)
+                processRecursive(secondaryResults, recommendations, seenRecIds, false,
+                    isSearch = false, preferWideThumbnail = true)
             }
 
         } else if (response != null) {
