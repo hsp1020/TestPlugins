@@ -48,13 +48,16 @@ import kotlin.math.max
 /** Keep the native cover visible until Coil finishes; only the decoded artwork wipes in. */
 internal object PosterWipe {
     internal data class Result(val success: Boolean, val source: String = "", val error: String = "")
-    private data class Running(val url: String, val animator: ValueAnimator, val overlay: WipeDrawable)
+    private data class Running(
+        val url: String, val base: Drawable?, val animator: ValueAnimator, val overlay: WipeDrawable
+    )
     private data class Displayed(val url: String, val drawable: java.lang.ref.WeakReference<Drawable>)
     private val active = WeakHashMap<ImageView, Running>()
     private val displayed = WeakHashMap<ImageView, Displayed>()
 
     private fun isDisplayed(image: ImageView, url: String): Boolean =
-        displayed[image]?.let { it.url == url && it.drawable.get() === image.drawable } == true
+        displayed[image]?.let { it.url == url && it.drawable.get() === image.drawable } == true ||
+            active[image]?.let { it.url == url && it.base === image.drawable } == true
 
     private fun recordDisplayed(image: ImageView, url: String, drawable: Drawable) {
         displayed[image] = Displayed(url, java.lang.ref.WeakReference(drawable))
@@ -69,7 +72,6 @@ internal object PosterWipe {
     // the same URL's fetch, allowing Coil to reuse its disk cache before decoding.
     private data class UrlGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val urlGates = HashMap<String, UrlGate>()
-    private val httpAttempts = AtomicLong()
     // A cache probe can never trigger an HTTP call. Only use it when another
     // size for the same URL is already filling the cache.
     private val cacheOnlyFetcher = NetworkFetcher.Factory(networkClient = {
@@ -226,7 +228,7 @@ internal object PosterWipe {
         // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
         val outcome = try {
             if (!image.isAttachedToWindow || !valid()) return Result(false, error = "stale")
-            if (isDisplayed(image, url) || active[image]?.url == url)
+            if (isDisplayed(image, url))
                 return Result(true, source = "UNCHANGED")
             val scale = when (image.scaleType) {
                 ImageView.ScaleType.CENTER_CROP, ImageView.ScaleType.FIT_XY -> Scale.FILL
@@ -248,7 +250,7 @@ internal object PosterWipe {
         if (outcome is ErrorResult)
             return Result(false, error = outcome.throwable.javaClass.simpleName)
         val success = outcome as? SuccessResult ?: return Result(false, error = "no_image")
-        if (isDisplayed(image, url) || active[image]?.url == url)
+        if (isDisplayed(image, url))
             return Result(true, source = success.dataSource.name)
         val custom = success.image.asDrawable(image.resources).mutate()
         cancel(image)
@@ -266,7 +268,7 @@ internal object PosterWipe {
         wipe.bounds = Rect(0, 0, image.width, image.height)
         image.overlay.add(wipe)
         val animation = ValueAnimator.ofFloat(0f, 1f).apply { duration = DURATION_MS }
-        val running = Running(url, animation, wipe)
+        val running = Running(url, image.drawable, animation, wipe)
         active[image] = running
         animation.addUpdateListener {
             if (active[image] === running) wipe.progress = it.animatedValue as Float
