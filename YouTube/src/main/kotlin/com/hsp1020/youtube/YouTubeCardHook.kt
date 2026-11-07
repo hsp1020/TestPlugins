@@ -1734,14 +1734,20 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             "cardLp=${card.layoutParams.width}x${card.layoutParams.height} " +
                             "image=${image.width}x${image.height} " +
                             "imageLp=${image.layoutParams.width}x${image.layoutParams.height} " +
-                            "drawable=${drawable?.intrinsicWidth}x${drawable?.intrinsicHeight} scale=${image.scaleType}")
+                            "drawable=${drawable?.intrinsicWidth}x${drawable?.intrinsicHeight} " +
+                            "drawableType=${drawable?.javaClass?.simpleName} scale=${image.scaleType}")
                 }
                 report("BIND")
                 var frames = 0
                 val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
                     override fun onPreDraw(): Boolean {
+                        val drawable = image.drawable
+                        // The first non-null drawable is often CloudStream's portrait
+                        // default_cover; wait for the decoded wide thumbnail instead.
+                        val loadedWide = drawable != null && drawable.intrinsicHeight > 0 &&
+                            drawable.intrinsicWidth.toFloat() / drawable.intrinsicHeight > 1.5f
                         val stop = thumbnailTraceKeys[view] != stamp ||
-                            !image.isAttachedToWindow || image.drawable != null || ++frames >= 120
+                            !image.isAttachedToWindow || loadedWide || ++frames >= 180
                         if (stop) {
                             if (image.viewTreeObserver.isAlive) {
                                 image.viewTreeObserver.removeOnPreDrawListener(this)
@@ -1825,8 +1831,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     } else baseWidth
                     state.setCardWidth(width)
                     state.setImageHeight((width * (if (shorts) 16f / 9f else 9f / 16f)).roundToInt())
-                    if (role == Role.DETAIL_RECOMMENDATIONS && video) {
-                        traceRecommendationLayout(view, card, image, item)
+                    // The YouTube thumbnail is already widescreen; never crop it a
+                    // second time when filling the fixed 16:9 recommendation cell.
+                    if (role == Role.DETAIL_RECOMMENDATIONS) {
+                        if (video) {
+                            state.setImageFill()
+                            traceRecommendationLayout(view, card, image, item)
+                        } else {
+                            state.restoreImageScale()
+                        }
                     }
                 } else {
                     val wide = HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 } ?: dp(180)
@@ -2010,6 +2023,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private val cardWidth = card.layoutParams.width
         private val cardHeight = card.layoutParams.height
         private val imageHeight = image.layoutParams.height
+        private val originalImageScaleType = image.scaleType
         private val titleWidth = title.layoutParams.width
         private var changedTitleWidth = false
         private val horizontal = Build.VERSION.SDK_INT >= 29 && title.isSingleLine
@@ -2053,7 +2067,20 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             changedImage = true
         }
 
+        fun setImageFill() {
+            if (image.scaleType != ImageView.ScaleType.FIT_XY) {
+                image.scaleType = ImageView.ScaleType.FIT_XY
+            }
+        }
+
+        fun restoreImageScale() {
+            if (image.scaleType != originalImageScaleType) {
+                image.scaleType = originalImageScaleType
+            }
+        }
+
         fun restoreSize() {
+            restoreImageScale()
             if (changedTitleWidth) {
                 val params = title.layoutParams
                 if (params.width != titleWidth) {
