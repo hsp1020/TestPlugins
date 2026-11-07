@@ -3704,7 +3704,7 @@ class YoutubeProvider(
                     var pagesFetchedLocal = 1
                     try {
                         // The channel header already fetched and parsed /videos.
-                        val tabData = if (tabUrl == channelUrl) data else {
+                        var tabData = if (tabUrl == channelUrl) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
                             extractYtInitialData(tabHtml) ?: run {
                                 Log.w("YouTubeChannel", "event=CHANNEL_ERROR tab=$tabName page=1 reason=initial_data_missing")
@@ -3713,7 +3713,8 @@ class YoutubeProvider(
                         }
 
                         var initialItems: List<*>? = null
-                        val tabs = safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                        val tabs = (safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs")
+                            ?: safeGet(tabData, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
                         if (tabs != null) {
                             val targetPath = when {
                                 tabUrl.endsWith("/videos") -> "/videos"
@@ -3723,7 +3724,9 @@ class YoutubeProvider(
 
                             val matchingTab = tabs.firstOrNull { tab ->
                                 val commandUrl = safeGet(tab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-                                commandUrl != null && targetPath.isNotEmpty() && commandUrl.endsWith(targetPath)
+                                commandUrl != null && targetPath.isNotEmpty() &&
+                                    commandUrl.endsWith(targetPath) &&
+                                    safeGet(tab, "tabRenderer", "content") != null
                             }
 
                             val tabToUse = matchingTab ?: run {
@@ -3733,10 +3736,10 @@ class YoutubeProvider(
                                 val selectedUrl = safeGet(selectedTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
 
                                 if (targetPath == "/videos" && selectedUrl?.endsWith("/shorts") == true) {
-                                    return emptyList()
+                                    return@run null
                                 }
                                 if (targetPath == "/shorts" && selectedUrl?.endsWith("/videos") == true) {
-                                    return emptyList()
+                                    return@run null
                                 }
                                 selectedTab
                             }
@@ -3746,6 +3749,8 @@ class YoutubeProvider(
                                 initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
                             } else if (activeContent?.containsKey("gridRenderer") == true) {
                                 initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
+                            } else if (activeContent?.containsKey("sectionListRenderer") == true) {
+                                initialItems = safeGet(activeContent, "sectionListRenderer", "contents") as? List<*>
                             }
 
                             if (initialItems == null && targetPath.isEmpty()) {
@@ -3762,6 +3767,36 @@ class YoutubeProvider(
                                         break
                                     }
                                 }
+                            }
+                        }
+
+                        // Some channel header responses contain metadata but an empty tab grid.
+                        // Retry /videos only in that case; normally the existing HTML is reused.
+                        if (initialItems.isNullOrEmpty() && tabUrl == channelUrl) {
+                            Log.i("YouTubeChannel",
+                                "event=CHANNEL_FALLBACK tab=$tabName reason=empty_initial action=fresh_html")
+                            val refreshedData = extractYtInitialData(
+                                app.get(tabUrl, interceptor = ytInterceptor).text
+                            )
+                            if (refreshedData != null) {
+                                tabData = refreshedData
+                                val refreshedTabs = (safeGet(refreshedData, "contents", "twoColumnBrowseResultsRenderer", "tabs")
+                                    ?: safeGet(refreshedData, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
+                                val refreshedTab = refreshedTabs?.firstOrNull {
+                                    (safeGet(it, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url")
+                                        as? String)?.endsWith("/videos") == true &&
+                                        safeGet(it, "tabRenderer", "content") != null
+                                } ?: refreshedTabs?.firstOrNull {
+                                    safeGet(it, "tabRenderer", "selected") == true &&
+                                        safeGet(it, "tabRenderer", "content") != null
+                                }
+                                val refreshedContent = safeGet(refreshedTab, "tabRenderer", "content")
+                                initialItems = (safeGet(refreshedContent, "richGridRenderer", "contents")
+                                    ?: safeGet(refreshedContent, "gridRenderer", "items")
+                                    ?: safeGet(refreshedContent, "sectionListRenderer", "contents")) as? List<*>
+                                Log.i("YouTubeChannel",
+                                    "event=CHANNEL_FALLBACK tab=$tabName resultCount=${initialItems?.size ?: 0} " +
+                                        "tabs=${refreshedTabs?.size ?: 0}")
                             }
                         }
 
@@ -3820,6 +3855,12 @@ class YoutubeProvider(
                                     "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName}")
                                 break
                             }
+                        }
+                        if (tabEpisodes.isEmpty() && currentToken.isNullOrBlank()) {
+                            cacheable = false
+                            Log.w("YouTubeChannel",
+                                "event=CHANNEL_ERROR tab=$tabName page=1 reason=empty_initial_no_token " +
+                                    "tabCount=${tabs?.size ?: 0} contents=${(tabData["contents"] as? Map<*, *>)?.keys}")
                         }
                         if (!currentToken.isNullOrBlank() && apiKey.isNullOrBlank()) {
                             cacheable = false
@@ -4089,6 +4130,23 @@ class YoutubeProvider(
         rememberChannel(url, channelName, channelId)
 
         val filteredRecs = recommendations.filter { it.type != TvType.Live && !it.url.contains("/shorts/") }
+        var landscapeCorrected = 0
+        filteredRecs.forEach { rec ->
+            // hqdefault/sddefault are 4:3 assets; center-cropping them in 16:9 cards
+            // cuts off thumbnail text. Keep native 16:9 sources unchanged.
+            val imageName = rec.posterUrl?.substringBefore("?")?.substringAfterLast("/")?.lowercase()
+            if (imageName in setOf("hqdefault.jpg", "sddefault.jpg", "default.jpg",
+                    "hqdefault.webp", "sddefault.webp", "default.webp")) {
+                YoutubeUtils.extractYoutubeId(rec.url)?.let { recId ->
+                    rec.posterUrl = "https://i.ytimg.com/vi/$recId/mqdefault.jpg"
+                    landscapeCorrected++
+                }
+            }
+        }
+        if (landscapeCorrected > 0) {
+            Log.i("YouTubePoster",
+                "event=RECOMMENDATION_LANDSCAPE total=${filteredRecs.size} corrected=$landscapeCorrected")
+        }
         val episodes = mutableListOf<Episode>()
         
         var ep1Dur = ""
