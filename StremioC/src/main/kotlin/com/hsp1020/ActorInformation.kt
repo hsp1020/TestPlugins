@@ -1092,16 +1092,18 @@ internal object ActorInformation {
                                     " restoreX=" + restoreX)
                                 appendCredits((restoreX / dp(124) + 12).coerceAtLeast(12))
                                 requestMore = {
-                                    strip.mark("REQUEST_MORE", "shown=" + shown +
-                                        " total=" + entries.size +
-                                        " active=" + (dialog === windowDialog))
                                     if (dialog === windowDialog && shown < entries.size) {
+                                        strip.mark("REQUEST_MORE", "shown=" + shown +
+                                            " total=" + entries.size)
                                         appendCredits(12)
                                         preparePosters(entries, shown)
                                     }
                                 }
                                 preloadSections.add { preparePosters(entries, shown) }
-                                strip.addView(row)
+                                // Reserve the full credit range before the first fling.
+                                // Appending cards must not change the scroller's maximum X.
+                                strip.addView(row, FrameLayout.LayoutParams(
+                                    entries.size * dp(124), ViewGroup.LayoutParams.WRAP_CONTENT))
                                 strip.mark("RESTORE_POST", "requestedX=" + (creditScroll[title] ?: 0))
                                 strip.post {
                                     if (dialog === windowDialog) {
@@ -1111,15 +1113,19 @@ internal object ActorInformation {
                                         strip.mark("RESTORE_AFTER", "requestedX=" + x)
                                     }
                                 }
+                                var lastStripX = strip.scrollX
                                 val stripListener = ViewTreeObserver.OnScrollChangedListener {
-                                    if (dialog === windowDialog) {
+                                    if (dialog === windowDialog && strip.scrollX != lastStripX) {
+                                        lastStripX = strip.scrollX
                                         creditScroll[title] = strip.scrollX
                                         save()
-                                        if (strip.width > 0 && row.width > 0 &&
-                                            strip.scrollX + strip.width >= row.width - dp(124 * 4)) {
-                                            if (shown < entries.size)
-                                                strip.mark("NEAR_END", "shown=" + shown +
-                                                    " total=" + entries.size)
+                                        // Only extend actual cards near their trailing edge;
+                                        // the total scroll range is already fixed.
+                                        if (shown < entries.size && strip.width > 0 &&
+                                            strip.scrollX + strip.width >=
+                                                (shown - 4) * dp(124)) {
+                                            strip.mark("NEAR_END", "shown=" + shown +
+                                                " total=" + entries.size)
                                             requestMore()
                                         }
                                     }
