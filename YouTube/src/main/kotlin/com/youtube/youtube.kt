@@ -4130,23 +4130,6 @@ class YoutubeProvider(
         rememberChannel(url, channelName, channelId)
 
         val filteredRecs = recommendations.filter { it.type != TvType.Live && !it.url.contains("/shorts/") }
-        var landscapeCorrected = 0
-        filteredRecs.forEach { rec ->
-            // hqdefault/sddefault are 4:3 assets; center-cropping them in 16:9 cards
-            // cuts off thumbnail text. Keep native 16:9 sources unchanged.
-            val imageName = rec.posterUrl?.substringBefore("?")?.substringAfterLast("/")?.lowercase()
-            if (imageName in setOf("hqdefault.jpg", "sddefault.jpg", "default.jpg",
-                    "hqdefault.webp", "sddefault.webp", "default.webp")) {
-                YoutubeUtils.extractYoutubeId(rec.url)?.let { recId ->
-                    rec.posterUrl = "https://i.ytimg.com/vi/$recId/mqdefault.jpg"
-                    landscapeCorrected++
-                }
-            }
-        }
-        if (landscapeCorrected > 0) {
-            Log.i("YouTubePoster",
-                "event=RECOMMENDATION_LANDSCAPE total=${filteredRecs.size} corrected=$landscapeCorrected")
-        }
         val episodes = mutableListOf<Episode>()
         
         var ep1Dur = ""
