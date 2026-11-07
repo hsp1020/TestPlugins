@@ -1852,6 +1852,13 @@ open class StremioC(
     private fun isLibraryAnimeId(id: String?): Boolean =
         isKitsuOrMalId(id) || id?.startsWith("anilist:") == true
 
+    private fun isTmdbEligibleId(id: String?): Boolean {
+        if (id.isNullOrBlank()) return false
+        if (IMDB_ID_REGEX.matches(id)) return true
+        if (id.substringBefore(':') !in setOf("mal", "kitsu", "anilist", "tmdb")) return false
+        return id.substringAfter(':', "").substringBefore(':').toIntOrNull()?.let { it > 0 } == true
+    }
+
     private fun cachedFindMatches(
         imdbId: String?,
         tmdbId: String?,
@@ -4930,6 +4937,16 @@ open class StremioC(
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
             if (nonstandardType && finalImdbId == null) finalImdbId = extraAnimeMapping?.imdbId
+            val eligibleNonstandardId = nonstandardType && (
+                sequenceOf(this@CatalogEntry.id, detailedEntry.id, originalAnimeId, finalImdbId)
+                    .any { provider.isTmdbEligibleId(it) } ||
+                sequenceOf(this@CatalogEntry.tmdbIdExt, detailedEntry.tmdbIdExt,
+                    this@CatalogEntry.malIdExt, detailedEntry.malIdExt,
+                    this@CatalogEntry.kitsuIdExt, detailedEntry.kitsuIdExt)
+                    .any { it?.toIntOrNull()?.let { n -> n > 0 } == true } ||
+                (this@CatalogEntry.moviedb_id ?: 0) > 0 ||
+                (detailedEntry.moviedb_id ?: 0) > 0
+            )
 
             var tmdbIdStr: String? = resolvedTmdbId ?: extraAnimeMapping?.tmdbId?.toString()
                 ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true)
@@ -4940,12 +4957,13 @@ open class StremioC(
                         ?.removePrefix("tmdb:")
             var tmdbType = provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
             if (nonstandardType) {
-                tmdbType = when {
+                if (!eligibleNonstandardId) tmdbIdStr = null
+                tmdbType = if (eligibleNonstandardId) when {
                     tmdbIdStr != null && tmdbIdStr == resolvedTmdbId -> resolvedTmdbMediaType
                     tmdbIdStr != null && tmdbIdStr == extraAnimeMapping?.tmdbId?.toString() ->
                         extraAnimeMapping?.tmdbMediaType
                     else -> null
-                }
+                } else null
             }
             if (tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true &&
                 preFetchedFind?.second == tmdbType && preFetchedFindImdbId == finalImdbId) {
@@ -4955,7 +4973,8 @@ open class StremioC(
             val lookupMediaType = tmdbType
             val needsTmdbFind = if (nonstandardType) tmdbType == null else tmdbIdStr == null
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (
-                needsTmdbFind && lookupImdbId != null
+                needsTmdbFind && lookupImdbId != null &&
+                    (!nonstandardType || eligibleNonstandardId)
             ) {
                 async(Dispatchers.IO) {
                     provider.fetchTmdbFindForLoad(lookupImdbId, lookupMediaType)
@@ -5038,7 +5057,7 @@ open class StremioC(
                 }
             }
             var probedTmdbDetail: TmdbDetailResponse? = null
-            if (nonstandardType && tmdbType == null &&
+            if (eligibleNonstandardId && tmdbType == null &&
                 tmdbIdStr?.toIntOrNull()?.let { it > 0 } == true) {
                 // Direct TMDB ID with no type: check actual endpoints, never video counts.
                 for (candidate in listOf("movie", "tv")) {
@@ -5050,7 +5069,7 @@ open class StremioC(
                     }
                 }
             }
-            val resolvedSimklJob = simklJob ?: if (nonstandardType &&
+            val resolvedSimklJob = simklJob ?: if (eligibleNonstandardId &&
                 (tmdbType == "movie" || tmdbType == "tv")) StremioC.requestSimklSuggestions(
                 if (tmdbType == "movie") "movie" else "series",
                 tmdbIdStr, finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) },
@@ -5058,7 +5077,8 @@ open class StremioC(
             ) else null
 
             var tmdbData: FetchedTmdbData? = null
-            if (tmdbType != null && tmdbIdStr != null) {
+            if (tmdbType != null && tmdbIdStr != null &&
+                (!nonstandardType || eligibleNonstandardId)) {
                 try {
                     val refinedMediaType = tmdbType
                     val safePrefetchedDetail = probedTmdbDetail ?: preFetchedDetail?.takeIf {
@@ -5077,7 +5097,7 @@ open class StremioC(
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
             val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
                 .firstOrNull { !it.isNullOrBlank() }
-            var finalDescription = if (nonstandardType)
+            var finalDescription = if (eligibleNonstandardId)
                 tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalAddonDescription
             else finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
 
@@ -5190,7 +5210,7 @@ open class StremioC(
             val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
                 this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
-            val finalLogo = if (nonstandardType)
+            val finalLogo = if (eligibleNonstandardId)
                 tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo ?: fallbackAddonLogo
             else addonLogo ?: fallbackAddonLogo
                 ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
