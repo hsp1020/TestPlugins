@@ -5,6 +5,7 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.Rect
 import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
@@ -12,6 +13,8 @@ import android.os.SystemClock
 import android.util.TypedValue
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.ViewTreeObserver
 import android.view.View
 import android.view.ViewGroup
@@ -249,6 +252,197 @@ internal object ActorInformation {
         return unique.values.toList()
     }
 
+
+    /** Actor credits diagnostics only; native touch, fling and layout remain unchanged. */
+    private class TracedCreditsScrollView(
+        context: Context, private val record: (String, String) -> Unit
+    ) : HorizontalScrollView(context) {
+        private var gesture = 0
+        private var velocity: VelocityTracker? = null
+        private var downX = 0f
+        private var lastTouchLog = 0L
+        private var lastScrollLog = 0L
+        private var lastOverscrollLog = 0L
+        private var lastFrameLog = 0L
+        private var lastUp = 0L
+        private var lastFling = 0L
+        private var direction = 0
+        private var lastIntercept = false
+        private var lastClamp = false
+        private var reportedWidth = -1
+        private var reportedViewport = -1
+
+        fun snapshot(): String {
+            val child = getChildAt(0)
+            val visible = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            return "x=" + scrollX + " max=" + ((child?.width ?: 0) - visible).coerceAtLeast(0) +
+                " viewport=" + width + " content=" + (child?.width ?: 0) +
+                " measured=" + (child?.measuredWidth ?: 0) +
+                " cards=" + ((child as? LinearLayout)?.childCount ?: -1) +
+                " attached=" + isAttachedToWindow + " shown=" + isShown +
+                " overMode=" + overScrollMode
+        }
+        fun mark(event: String, info: String = "") =
+            record(event, "gesture=" + gesture + " " + info + " " + snapshot())
+
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            val action = ev.actionMasked
+            val now = SystemClock.elapsedRealtime()
+            if (action == MotionEvent.ACTION_DOWN) {
+                gesture++
+                direction = 0
+                lastIntercept = false
+                velocity?.recycle()
+                velocity = VelocityTracker.obtain()
+                downX = ev.x
+                lastTouchLog = 0L
+                mark("TOUCH_DOWN", "x=" + ev.x.toInt() + " y=" + ev.y.toInt())
+            }
+            velocity?.addMovement(ev)
+            if (action == MotionEvent.ACTION_MOVE && now - lastTouchLog >= 40L) {
+                lastTouchLog = now
+                mark("TOUCH_MOVE", "x=" + ev.x.toInt() + " dxFromDown=" + (ev.x-downX).toInt() +
+                    " pointerCount=" + ev.pointerCount)
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                velocity?.computeCurrentVelocity(1000)
+                lastUp = now
+                mark(if (action == MotionEvent.ACTION_UP) "TOUCH_UP" else "TOUCH_CANCEL",
+                    "x=" + ev.x.toInt() + " dxFromDown=" + (ev.x-downX).toInt() +
+                    " velocityX=" + (velocity?.xVelocity ?: 0f).toInt() +
+                    " velocityY=" + (velocity?.yVelocity ?: 0f).toInt())
+            } else if (action == MotionEvent.ACTION_POINTER_DOWN ||
+                action == MotionEvent.ACTION_POINTER_UP) {
+                mark("TOUCH_POINTER", "action=" + action + " count=" + ev.pointerCount)
+            }
+            val handled = super.dispatchTouchEvent(ev)
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP ||
+                action == MotionEvent.ACTION_CANCEL) {
+                mark("DISPATCH_RESULT", "action=" + action + " handled=" + handled)
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                velocity?.recycle()
+                velocity = null
+            }
+            return handled
+        }
+
+        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            val result = super.onInterceptTouchEvent(ev)
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN ||
+                ev.actionMasked == MotionEvent.ACTION_UP ||
+                ev.actionMasked == MotionEvent.ACTION_CANCEL || result != lastIntercept)
+                mark("INTERCEPT", "action=" + ev.actionMasked + " result=" + result)
+            lastIntercept = result
+            return result
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            val result = super.onTouchEvent(ev)
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN ||
+                ev.actionMasked == MotionEvent.ACTION_UP ||
+                ev.actionMasked == MotionEvent.ACTION_CANCEL)
+                mark("TOUCH_HANDLER", "action=" + ev.actionMasked + " result=" + result)
+            return result
+        }
+
+        override fun fling(velocityX: Int) {
+            lastFling = SystemClock.elapsedRealtime()
+            mark("FLING", "velocityX=" + velocityX)
+            super.fling(velocityX)
+            mark("FLING_RETURN", "velocityX=" + velocityX)
+        }
+
+        override fun overScrollBy(
+            deltaX: Int, deltaY: Int, scrollX: Int, scrollY: Int,
+            scrollRangeX: Int, scrollRangeY: Int,
+            maxOverScrollX: Int, maxOverScrollY: Int, isTouchEvent: Boolean
+        ): Boolean {
+            val requested = scrollX + deltaX
+            val clamped = super.overScrollBy(deltaX, deltaY, scrollX, scrollY,
+                scrollRangeX, scrollRangeY, maxOverScrollX, maxOverScrollY, isTouchEvent)
+            val now = SystemClock.elapsedRealtime()
+            if ((clamped || requested < 0 || requested > scrollRangeX) &&
+                now - lastOverscrollLog >= 45L) {
+                lastOverscrollLog = now
+                mark("OVER_SCROLL_BY", "deltaX=" + deltaX + " requested=" + requested +
+                    " range=" + scrollRangeX + " maxOver=" + maxOverScrollX +
+                    " touch=" + isTouchEvent + " clamped=" + clamped)
+            }
+            return clamped
+        }
+
+        override fun onOverScrolled(x: Int, y: Int, clampedX: Boolean, clampedY: Boolean) {
+            super.onOverScrolled(x, y, clampedX, clampedY)
+            val now = SystemClock.elapsedRealtime()
+            if (clampedX != lastClamp || clampedX && now - lastOverscrollLog >= 45L) {
+                lastOverscrollLog = now
+                mark("OVER_SCROLLED", "requestedX=" + x +
+                    " clampedX=" + clampedX + " clampedY=" + clampedY)
+            }
+            lastClamp = clampedX
+        }
+
+        override fun onScrollChanged(x: Int, y: Int, oldX: Int, oldY: Int) {
+            if (x != oldX) {
+                val sign = if (x > oldX) 1 else -1
+                val reverse = direction != 0 && sign != direction
+                val now = SystemClock.elapsedRealtime()
+                if (reverse || now - lastScrollLog >= 35L) {
+                    lastScrollLog = now
+                    mark(if (reverse) "SCROLL_REVERSE" else "SCROLL",
+                        "old=" + oldX + " new=" + x + " dx=" + (x-oldX) +
+                        " afterUpMs=" + (if (lastUp > 0) now-lastUp else -1) +
+                        " afterFlingMs=" + (if (lastFling > 0) now-lastFling else -1))
+                }
+                direction = sign
+            }
+            super.onScrollChanged(x, y, oldX, oldY)
+        }
+
+        override fun computeScroll() {
+            super.computeScroll()
+            val now = SystemClock.elapsedRealtime()
+            if ((lastUp > 0 && now-lastUp < 3500L ||
+                    lastFling > 0 && now-lastFling < 3500L) &&
+                now-lastFrameLog >= 75L) {
+                lastFrameLog = now
+                mark("FLING_FRAME", "sinceUp=" + (if (lastUp > 0) now-lastUp else -1) +
+                    " sinceFling=" + (if (lastFling > 0) now-lastFling else -1))
+            }
+        }
+
+        override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+            super.onLayout(changed, left, top, right, bottom)
+            val contentWidth = getChildAt(0)?.width ?: 0
+            if (contentWidth != reportedWidth || width != reportedViewport) {
+                mark("LAYOUT_RANGE", "previousContent=" + reportedWidth +
+                    " previousViewport=" + reportedViewport + " changed=" + changed)
+                reportedWidth = contentWidth
+                reportedViewport = width
+            }
+        }
+
+        override fun onSizeChanged(w: Int, h: Int, oldW: Int, oldH: Int) {
+            super.onSizeChanged(w, h, oldW, oldH)
+            mark("SIZE_CHANGE", "old=" + oldW + "x" + oldH + " new=" + w + "x" + h)
+        }
+
+        override fun requestChildFocus(child: View, focused: View) {
+            mark("CHILD_FOCUS", "view=" + focused.javaClass.simpleName)
+            super.requestChildFocus(child, focused)
+        }
+
+        override fun requestChildRectangleOnScreen(
+            child: View, rectangle: Rect, immediate: Boolean
+        ): Boolean {
+            mark("CHILD_RECT", "left=" + rectangle.left + " right=" + rectangle.right +
+                " immediate=" + immediate)
+            val moved = super.requestChildRectangleOnScreen(child, rectangle, immediate)
+            if (moved) mark("CHILD_RECT_MOVED", "immediate=" + immediate)
+            return moved
+        }
+    }
+
     internal class Controller(private val fragment: Fragment, private val sourceUrl: String?) {
         private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
         private val stateKey = "stremioc_actor_info_return"
@@ -374,6 +568,13 @@ internal object ActorInformation {
 
             val activity = fragment.activity ?: return
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
+            val scrollSession = SystemClock.elapsedRealtime()
+            fun traceScroll(section: String, event: String, detail: String = "") {
+                Log.d("ActorScrollTrace", "session=" + scrollSession + " person=" + actor.id +
+                    " section=" + section + " elapsedMs=" +
+                    (SystemClock.elapsedRealtime() - scrollSession) + " event=" + event + " " + detail)
+            }
+            traceScroll("dialog", "OPEN", "resumeY=" + resumeY)
             // Decode a TMDB credit poster once for every Popular/Latest occurrence.
             // Each card retains its own ImageView, focus and custom-poster overlay.
             val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -646,7 +847,10 @@ internal object ActorInformation {
             windowDialog.setContentView(root)
             windowDialog.window?.setLayout(-1, -1)
             windowDialog.setOnDismissListener {
+                traceScroll("dialog", "DISMISS", "rows=" + scrollListeners.size)
                 scrollListeners.forEach { (view, listener) ->
+                    (view as? TracedCreditsScrollView)?.mark("ROW_DISMISS")
+
                     view.viewTreeObserver.takeIf { it.isAlive }?.removeOnScrollChangedListener(listener)
                 }
                 scrollListeners.clear()
@@ -809,12 +1013,18 @@ internal object ActorInformation {
                             "Upcoming" to upcoming).forEach { (title, entries) ->
                             if (entries.isNotEmpty()) {
                                 filmArea.addView(label(title, 19f, true))
-                                val strip = HorizontalScrollView(activity)
+                                val strip = TracedCreditsScrollView(activity) { event, detail ->
+                                    traceScroll(title, event, detail)
+                                }
                                 val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
                                 var shown = 0
                                 lateinit var requestMore: () -> Unit
                                 fun appendCredits(count: Int) {
+                                    val before = shown
+                                    val widthBefore = row.width
                                     val target = (shown + count).coerceAtMost(entries.size)
+                                    strip.mark("APPEND_BEGIN", "from=" + before + " to=" + target +
+                                        " total=" + entries.size + " rowWidthBefore=" + widthBefore)
                                     while (shown < target) {
                                         val credit = entries[shown++]
                                         val position = shown
@@ -869,10 +1079,22 @@ internal object ActorInformation {
                                         }, LinearLayout.LayoutParams(posterWidth, -2))
                                         row.addView(card, LinearLayout.LayoutParams(dp(124), -2))
                                     }
+                                    strip.mark("APPEND_END", "from=" + before + " to=" + shown +
+                                        " total=" + entries.size + " rowMeasured=" + row.measuredWidth)
+                                    strip.post {
+                                        if (dialog === windowDialog)
+                                            strip.mark("APPEND_AFTER_LAYOUT",
+                                                "from=" + before + " to=" + shown)
+                                    }
                                 }
                                 val restoreX = creditScroll[title] ?: 0
+                                strip.mark("SECTION_START", "total=" + entries.size +
+                                    " restoreX=" + restoreX)
                                 appendCredits((restoreX / dp(124) + 12).coerceAtLeast(12))
                                 requestMore = {
+                                    strip.mark("REQUEST_MORE", "shown=" + shown +
+                                        " total=" + entries.size +
+                                        " active=" + (dialog === windowDialog))
                                     if (dialog === windowDialog && shown < entries.size) {
                                         appendCredits(12)
                                         preparePosters(entries, shown)
@@ -880,14 +1102,26 @@ internal object ActorInformation {
                                 }
                                 preloadSections.add { preparePosters(entries, shown) }
                                 strip.addView(row)
-                                strip.post { if (dialog === windowDialog) strip.scrollTo(creditScroll[title] ?: 0, 0) }
+                                strip.mark("RESTORE_POST", "requestedX=" + (creditScroll[title] ?: 0))
+                                strip.post {
+                                    if (dialog === windowDialog) {
+                                        val x = creditScroll[title] ?: 0
+                                        strip.mark("RESTORE_BEFORE", "requestedX=" + x)
+                                        strip.scrollTo(x, 0)
+                                        strip.mark("RESTORE_AFTER", "requestedX=" + x)
+                                    }
+                                }
                                 val stripListener = ViewTreeObserver.OnScrollChangedListener {
                                     if (dialog === windowDialog) {
                                         creditScroll[title] = strip.scrollX
                                         save()
                                         if (strip.width > 0 && row.width > 0 &&
-                                            strip.scrollX + strip.width >= row.width - dp(124 * 4))
+                                            strip.scrollX + strip.width >= row.width - dp(124 * 4)) {
+                                            if (shown < entries.size)
+                                                strip.mark("NEAR_END", "shown=" + shown +
+                                                    " total=" + entries.size)
                                             requestMore()
+                                        }
                                     }
                                 }
                                 strip.viewTreeObserver.addOnScrollChangedListener(stripListener)
