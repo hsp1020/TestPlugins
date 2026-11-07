@@ -2663,7 +2663,7 @@ internal fun parseTrailerYoutubeId(raw: String?): String? {
         candidate?.takeIf(::valid)
     }.getOrNull()
 }
-private fun stremioTrailerLanguages(): List<String> {
+internal fun tmdbTrailerLanguages(): List<String> {
     val configured = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         ?.getString("tmdb_language_code", "en-US")
@@ -2675,7 +2675,7 @@ internal fun collectStremioTrailers(
     tmdb: List<StremioTrailerCandidate>,
     fallback: List<TrailerChoice> = emptyList()
 ): List<TrailerChoice> {
-    val languages = stremioTrailerLanguages()
+    val languages = tmdbTrailerLanguages()
     val ranked = tmdb.mapNotNull { item ->
         if (item.type != "Trailer" && item.type != "Teaser") return@mapNotNull null
         val id = parseTrailerYoutubeId(item.key) ?: return@mapNotNull null

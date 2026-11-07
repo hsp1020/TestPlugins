@@ -231,18 +231,22 @@ class ElevatePlugin : Plugin() {
             searchProviderOrder?.stop()
             searchProviderOrder = null
         }
-        if (enabled(ElevateFeature.ARTWORK_TRAILERS)) {
-            if (artworkHook == null) artworkHook = ElevateArtworkHook(application).also { it.start() }
-        } else {
-            artworkHook?.stop()
-            artworkHook = null
-        }
-        if (enabled(ElevateFeature.HERO_CAROUSEL)) {
+        val hideHomeHero = enabled(ElevateFeature.HERO_CAROUSEL)
+        if (hideHomeHero) {
             if (homeHero == null) homeHero = HomeHeroToggle(application).also { it.start() }
             homeHero?.setHidden(true)
         } else {
             homeHero?.stop()
             homeHero = null
+        }
+        val detailArtworkEnabled = enabled(ElevateFeature.ARTWORK_TRAILERS)
+        val phoneHeroLayoutEnabled = enabled(ElevateFeature.PHONE_HERO_LAYOUT) && !hideHomeHero
+        if (detailArtworkEnabled || phoneHeroLayoutEnabled) {
+            if (artworkHook == null) artworkHook = ElevateArtworkHook(application).also { it.start() }
+            artworkHook?.setFeatures(detailArtworkEnabled, phoneHeroLayoutEnabled)
+        } else {
+            artworkHook?.stop()
+            artworkHook = null
         }
         // Original pre-merge behavior: the dedicated poster guard owns its
         // provider/page observers only while Home Poster Refresh is enabled.

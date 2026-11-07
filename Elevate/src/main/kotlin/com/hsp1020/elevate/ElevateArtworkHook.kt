@@ -31,6 +31,8 @@ import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
  * StremioC can supply the optional multi-trailer and language flags through syncData.
  */
 internal class ElevateArtworkHook(private val app: Application) : Application.ActivityLifecycleCallbacks {
+    private var detailsEnabled = false
+    private var phoneHeroEnabled = false
     private var host: FragmentActivity? = null
     private val details = mutableMapOf<Fragment, Detail>()
     private var homeRoot: View? = null
@@ -42,6 +44,7 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
     }
 
     private fun attachHomeHero() {
+        if (!phoneHeroEnabled) return
         val parent = homeList ?: return
         val activity = host ?: return
         if (!isLayout(PHONE)) {
@@ -53,6 +56,7 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
         runCatching { hero.attach(parent) }
     }
     private fun bindHome(root: View) {
+        if (!phoneHeroEnabled) return
         if (homeRoot === root) { attachHomeHero(); return }
         unbindHome()
         homeRoot = root
@@ -149,8 +153,8 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
             when (fragment.javaClass.name) {
-                HOME -> bindHome(view)
-                in DETAIL_CLASSES -> bindDetail(fragment, view)
+                HOME -> if (phoneHeroEnabled) bindHome(view)
+                in DETAIL_CLASSES -> if (detailsEnabled) bindDetail(fragment, view)
             }
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
@@ -158,28 +162,45 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             details.remove(fragment)?.stop()
         }
         override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
-            if (fragment.javaClass.name == HOME) fragment.view?.let(::bindHome)
+            if (phoneHeroEnabled && fragment.javaClass.name == HOME)
+                fragment.view?.let(::bindHome)
         }
     }
     private fun bindDetail(fragment: Fragment, view: View) {
-        if (details.containsKey(fragment)) return
+        if (!detailsEnabled || details.containsKey(fragment)) return
         runCatching { Detail(fragment, view).also { it.start() } }
             .onSuccess { details[fragment] = it }
     }
+    private fun scan(fm: FragmentManager) {
+        fm.fragments.forEach { fragment ->
+            fragment.view?.let { view ->
+                if (phoneHeroEnabled && fragment.javaClass.name == HOME) bindHome(view)
+                else if (detailsEnabled && fragment.javaClass.name in DETAIL_CLASSES)
+                    bindDetail(fragment, view)
+            }
+            if (fragment.isAdded) scan(fragment.childFragmentManager)
+        }
+    }
+
+    fun setFeatures(detail: Boolean, phoneHero: Boolean) {
+        val hadDetail = detailsEnabled
+        val hadHero = phoneHeroEnabled
+        if (hadDetail && !detail) {
+            details.values.toList().forEach { it.stop(restoreNative = true) }
+            details.clear()
+        }
+        if (hadHero && !phoneHero) unbindHome()
+        detailsEnabled = detail
+        phoneHeroEnabled = phoneHero
+        if ((!hadDetail && detail) || (!hadHero && phoneHero))
+            host?.supportFragmentManager?.let(::scan)
+    }
+
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
         detach()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
-        fun scan(fm: FragmentManager) {
-            fm.fragments.forEach { fragment ->
-                fragment.view?.let { view ->
-                    if (fragment.javaClass.name == HOME) bindHome(view)
-                    else if (fragment.javaClass.name in DETAIL_CLASSES) bindDetail(fragment, view)
-                }
-                if (fragment.isAdded) scan(fragment.childFragmentManager)
-            }
-        }
         scan(activity.supportFragmentManager)
     }
     private fun detach() {

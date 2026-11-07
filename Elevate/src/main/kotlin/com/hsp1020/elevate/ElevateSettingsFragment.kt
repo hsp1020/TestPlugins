@@ -32,10 +32,12 @@ internal enum class ElevateFeature(
         "Open full CloudStream search from the title details and retain back navigation."),
     PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
         "Use saved provider order on Home and Search, including related search providers."),
-    ARTWORK_TRAILERS("Home & Library", "Artwork & Trailer Picker",
-        "Keep poster and logo artwork visible and use a selectable trailer list on all providers; customize the phone Home hero."),
+    ARTWORK_TRAILERS("Home & Library", "Detail Backdrop & Trailer Picker",
+        "Keep detail backgrounds and logos visible, and play trailers from a separate picker instead of replacing the artwork."),
     HERO_CAROUSEL("Home & Library", "Hide Home Hero Carousel",
         "Hide the featured Home banner while keeping search and profile controls available."),
+    PHONE_HERO_LAYOUT("Home & Library", "Phone Home Hero Layout",
+        "Rearrange the phone Home hero artwork, title, ratings and plot. Unavailable when Hide Home Hero Carousel is enabled."),
     LIVE_HOME_AUTOPLAY("Home & Library", "Live Home Autoplay",
         "Play live streams directly when selecting a Home catalog card; keep native player back navigation."),
     HOME_REPAIR("Home & Library", "Home Poster Refresh",
@@ -137,6 +139,13 @@ class ElevateSettingsFragment : DialogFragment() {
         }
         scroll.addView(content)
         val preferences = ctx.applicationContext.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+        var phoneHeroSwitch: SwitchCompat? = null
+        var phoneHeroLabels: LinearLayout? = null
+        fun updatePhoneHeroAvailability() {
+            val available = !preferences.getBoolean(ElevateFeature.HERO_CAROUSEL.name, false)
+            phoneHeroSwitch?.isEnabled = available
+            phoneHeroLabels?.alpha = if (available) 1f else 0.5f
+        }
         var savePosterSettings: (() -> Unit)? = null
         ElevateFeature.entries.groupBy { it.section }.forEach { (section, features) ->
             content.addView(TextView(ctx).apply {
@@ -167,6 +176,7 @@ class ElevateSettingsFragment : DialogFragment() {
                     setPadding(0, dp(3), 0, 0)
                 })
                 row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                if (feature == ElevateFeature.PHONE_HERO_LAYOUT) phoneHeroLabels = labels
                 val posterControls = if (feature == ElevateFeature.LIBRARY_POSTERS) {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
@@ -365,6 +375,10 @@ class ElevateSettingsFragment : DialogFragment() {
                 row.addView(SwitchCompat(ctx).apply {
                     isChecked = preferences.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
                     contentDescription = feature.label
+                    if (feature == ElevateFeature.PHONE_HERO_LAYOUT) {
+                        phoneHeroSwitch = this
+                        updatePhoneHeroAvailability()
+                    }
                     posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     skipControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
@@ -372,6 +386,7 @@ class ElevateSettingsFragment : DialogFragment() {
                     mdbControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
+                        if (feature == ElevateFeature.HERO_CAROUSEL) updatePhoneHeroAvailability()
                         posterControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         skipControls?.visibility =
