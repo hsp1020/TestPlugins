@@ -1,4 +1,4 @@
-package com.hsp1020
+package com.hsp1020.elevate
 
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -36,7 +36,11 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlin.math.*
 
-internal class DetailBackdropLayout(private val root: View, private val detailUrl: String? = null) {
+internal class DetailBackdropLayout(
+    private val root: View,
+    private val requiresTitleForLogo: () -> Boolean,
+    private val hasExpectedLogo: () -> Boolean
+) {
     private fun find(name: String): View? {
         val id = root.resources.getIdentifier(name, "id", root.context.packageName)
         return if (id == 0) null else root.findViewById(id)
@@ -354,7 +358,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (index < 0) return
         val original = native.layoutParams as? LinearLayout.LayoutParams ?: return
         val portraitForeign = portraitMode() &&
-            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
+            requiresTitleForLogo()
 
         if (!portraitForeign && !splitMode()) return
         val lp = LinearLayout.LayoutParams(original)
@@ -446,8 +450,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             root.resources.configuration.smallestScreenWidthDp,
             image.drawable, logoView?.drawable, logoView?.visibility ?: View.GONE,
             logoView?.width ?: 0, logoView?.height ?: 0, title?.visibility ?: View.GONE,
-            detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true,
-            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true,
+            hasExpectedLogo(),
+            requiresTitleForLogo(),
             title?.text?.toString(), image.left, image.top, image.width, image.height)
     }
     private val density = root.resources.displayMetrics.density
@@ -559,7 +563,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val background = picture?.drawable
         if (background == null || background.intrinsicWidth <= 0 || background.intrinsicHeight <= 0)
             return SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
-        if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true) return true
+        if (!hasExpectedLogo()) return true
         val logoView = logo
         return (logoView?.visibility == View.VISIBLE && logoView.drawable != null &&
             logoView.width > 0 && logoView.height > 0) ||
@@ -621,23 +625,23 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun portraitMode() = phoneHero != null && !splitMode()
     private fun maskPortraitTitle(): Boolean {
-        if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true) return false
+        if (!hasExpectedLogo()) return false
         val image = logo ?: return false
 
         if (image.visibility == View.GONE) return false
         val ready = image.visibility == View.VISIBLE && image.drawable != null && image.width > 0
         if (!ready && started && SystemClock.uptimeMillis() - artworkRevealStart >= 6000L) return false
-        return !(detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true && ready)
+        return !(requiresTitleForLogo() && ready)
     }
     private fun updatePortraitTitle() {
         if (!portraitMode()) return
         if (titleSlot == null &&
-            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true) installTitleSlot()
-        if (portraitTitleOnly && detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true) {
+            requiresTitleForLogo()) installTitleSlot()
+        if (portraitTitleOnly && hasExpectedLogo()) {
             val alpha = if (maskPortraitTitle()) 0f else originalTitleAlpha
             if (title?.alpha != alpha) title?.alpha = alpha
         }
-        if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
+        if (requiresTitleForLogo() &&
             logo?.visibility == View.VISIBLE && !title?.text.isNullOrBlank()) {
             val logoReady = logo.drawable != null && logo.width > 0
 
@@ -780,9 +784,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (topScrim?.visibility != View.VISIBLE) topScrim?.visibility = View.VISIBLE
 
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
-        val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
+        val expectedLogo = hasExpectedLogo()
         val logoPending = expectedLogo && !hasLogo
-        val foreignLogo = hasLogo && detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
+        val foreignLogo = hasLogo && requiresTitleForLogo()
         val titleText = if (foreignLogo || !hasLogo)
             title?.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
         val maxLabelWidth = (container.width * 0.36f).roundToInt().coerceAtLeast(1)

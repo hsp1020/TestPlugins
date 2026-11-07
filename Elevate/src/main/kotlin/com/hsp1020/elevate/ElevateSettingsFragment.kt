@@ -32,6 +32,8 @@ internal enum class ElevateFeature(
         "Open full CloudStream search from the title details and retain back navigation."),
     PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
         "Use saved provider order on Home and Search, including related search providers."),
+    ARTWORK_TRAILERS("Home & Library", "Artwork & Trailer Picker",
+        "Keep poster and logo artwork visible and use a selectable trailer list on all providers; customize the phone Home hero."),
     HERO_CAROUSEL("Home & Library", "Hide Home Hero Carousel",
         "Hide the featured Home banner while keeping search and profile controls available."),
     LIVE_HOME_AUTOPLAY("Home & Library", "Live Home Autoplay",

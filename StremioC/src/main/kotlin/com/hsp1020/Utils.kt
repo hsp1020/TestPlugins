@@ -1,6 +1,8 @@
 
 package com.hsp1020
 
+import coil3.SingletonImageLoader
+import okhttp3.OkHttpClient
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 
@@ -224,7 +226,7 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
+    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { _ -> }
     private var homeRoot: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
     private fun syncHomeHooks() {
@@ -237,17 +239,6 @@ internal class RatingPlotImageHook(
         } else {
             homeEntries.detach()
         }
-    }
-    private var phoneHero: PhoneHeroHook? = null
-    private fun bindPhoneHero(parent: RecyclerView?) {
-        if (parent == null || !isLayout(PHONE)) {
-            phoneHero?.detach()
-            phoneHero = null
-            return
-        }
-        val activity = host ?: return
-        val hero = phoneHero ?: PhoneHeroHook(activity) { _, _ -> null }.also { phoneHero = it }
-        hero.attach(parent)
     }
     private var homePreviewText: TextView? = null
     private data class HeroTextStyle(
@@ -2313,9 +2304,7 @@ internal class RatingPlotImageHook(
     }
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
-        private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
-        private val trailers = TrailerChooser(fragment, root, detailUrl)
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
@@ -2557,7 +2546,6 @@ internal class RatingPlotImageHook(
             if (castItems != null || genreGroup != null)
                 root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
             detailLayout.onGlobalLayout()
-            runCatching { backdrop.start() }; runCatching { trailers.start() }
         }
         fun detach() {
             castLongPressHandled = false
@@ -2580,13 +2568,10 @@ internal class RatingPlotImageHook(
                 restoreCastPress(card)
             }
             boundActorCards.clear()
-            runCatching { trailers.stop() }; runCatching { backdrop.stop() }
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-        override fun afterTextChanged(s: Editable?) {
-            runCatching { trailers.refresh() }
-        }
+        override fun afterTextChanged(s: Editable?) = Unit
 
     }
 
@@ -2609,3 +2594,121 @@ internal class RatingPlotImageHook(
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 }
+
+/** Apply the existing image concurrency policy without replacing the native Coil loader. */
+internal object NativeCoilDispatcher {
+    @Synchronized
+    fun configure(context: Context) {
+        try {
+            val loader = SingletonImageLoader.get(context.applicationContext)
+            val clients = ArrayList<OkHttpClient>()
+            for ((factory, _) in loader.components.fetcherFactories) {
+                if (!factory.javaClass.name.contains("NetworkFetcher")) continue
+                try {
+                    val lazyField = factory.javaClass.getDeclaredField("networkClientLazy")
+                        .apply { isAccessible = true }
+                    val networkClient = (lazyField.get(factory) as Lazy<*>).value ?: continue
+                    val clientField = networkClient.javaClass.getDeclaredField("callFactory")
+                        .apply { isAccessible = true }
+                    val client = clientField.get(networkClient) as? OkHttpClient ?: continue
+                    if (clients.any { it === client }) continue
+                    clients.add(client)
+                    client.dispatcher.maxRequests = 64
+                    client.dispatcher.maxRequestsPerHost = 32
+                } catch (_: Throwable) {
+                    // Fail open when a different Coil fetcher implementation is installed.
+                }
+            }
+        } catch (_: Throwable) {
+            // Never block plugin startup if the native image loader is unavailable.
+        }
+    }
+}
+
+
+/** StremioC-only metadata assembly; the presentation layer reads standard LoadResponse metadata. */
+internal data class TrailerChoice(
+    val youtubeId: String,
+    val title: String,
+    val type: String,
+    val language: String? = null
+)
+internal data class StremioTrailerCandidate(
+    val key: String?,
+    val title: String?,
+    val type: String?,
+    val language: String?,
+    val region: String?,
+    val publishedAt: String?
+)
+internal fun parseTrailerYoutubeId(raw: String?): String? {
+    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    fun valid(id: String) = id.length == 11 && id.all {
+        (it.isLetterOrDigit() && it.code < 128) || it == '_' || it == '-'
+    }
+    if (valid(value)) return value
+    return runCatching {
+        val uri = android.net.Uri.parse(value)
+        val host = uri.host?.lowercase() ?: return@runCatching null
+        val segments = uri.pathSegments
+        val candidate = when {
+            host == "youtu.be" || host.endsWith(".youtu.be") -> segments.firstOrNull()
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+                host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com") ->
+                uri.getQueryParameter("v") ?: segments.takeIf {
+                    it.firstOrNull() in listOf("embed", "shorts", "live", "v")
+                }?.getOrNull(1)
+            else -> null
+        }
+        candidate?.takeIf(::valid)
+    }.getOrNull()
+}
+private fun stremioTrailerLanguages(): List<String> {
+    val configured = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("tmdb_language_code", "en-US")
+        ?.trim()?.replace('_', '-')?.takeIf { it.isNotEmpty() } ?: "en-US"
+    return listOf(configured, configured.substringBefore('-'), "en")
+        .distinctBy { it.lowercase() }
+}
+internal fun collectStremioTrailers(
+    tmdb: List<StremioTrailerCandidate>,
+    fallback: List<TrailerChoice> = emptyList()
+): List<TrailerChoice> {
+    val languages = stremioTrailerLanguages()
+    val ranked = tmdb.mapNotNull { item ->
+        if (item.type != "Trailer" && item.type != "Teaser") return@mapNotNull null
+        val id = parseTrailerYoutubeId(item.key) ?: return@mapNotNull null
+        val rank = languages.indexOfFirst { locale ->
+            item.language.equals(locale.substringBefore('-'), true) &&
+                (!locale.contains('-') || item.region.equals(locale.substringAfter('-'), true))
+        }
+        if (rank < 0) null else Triple(rank, item, id)
+    }
+    val best = ranked.minOfOrNull { it.first }
+    val selected = ranked.asSequence().filter { it.first == best }
+        .sortedWith(compareBy({ if (it.second.type == "Trailer") 0 else 1 },
+            { it.second.publishedAt ?: "9999-12-31" }))
+        .map { (_, item, id) ->
+            TrailerChoice(id, item.title?.takeIf { it.isNotBlank() } ?: (item.type ?: "Trailer"),
+                item.type ?: "Trailer", item.language)
+        }.toList()
+    return selected.ifEmpty { fallback }.distinctBy { it.youtubeId }.take(30)
+}
+internal fun serializeStremioTrailers(items: List<TrailerChoice>): String =
+    JSONArray().apply {
+        items.forEach { item ->
+            put(JSONObject().apply {
+                put("url", "https://www.youtube.com/watch?v=${item.youtubeId}")
+                put("title", item.title)
+                put("type", item.type)
+                item.language?.let { put("language", it) }
+            })
+        }
+    }.toString()
+
+/** TMDB's language selection is StremioC-specific; Elevate only consumes the result flag. */
+internal fun stremioLogoNeedsTitle(
+    logo: String?, tmdbLogo: String?, tmdbFallback: Boolean
+): Boolean = !logo.isNullOrBlank() && (tmdbLogo.isNullOrBlank() || tmdbFallback)
+

@@ -91,6 +91,7 @@ class ElevatePlugin : Plugin() {
     private var subtitleLanguageNormalizer: SubtitleLanguageNormalizer? = null
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
+    private var artworkHook: ElevateArtworkHook? = null
     private var libraryPosters: LibraryPosterHook? = null
     private var recommendationPosters: RecommendationPosterHook? = null
     private var thumbnailRatios: OriginalThumbnailRatioHook? = null
@@ -229,6 +230,12 @@ class ElevatePlugin : Plugin() {
         } else {
             searchProviderOrder?.stop()
             searchProviderOrder = null
+        }
+        if (enabled(ElevateFeature.ARTWORK_TRAILERS)) {
+            if (artworkHook == null) artworkHook = ElevateArtworkHook(application).also { it.start() }
+        } else {
+            artworkHook?.stop()
+            artworkHook = null
         }
         if (enabled(ElevateFeature.HERO_CAROUSEL)) {
             if (homeHero == null) homeHero = HomeHeroToggle(application).also { it.start() }
@@ -422,6 +429,8 @@ class ElevatePlugin : Plugin() {
         subtitleSyncRepair = null
         homeHero?.stop()
         homeHero = null
+        artworkHook?.stop()
+        artworkHook = null
         recommendationPosters?.stop()
         recommendationPosters = null
         libraryPosters?.stop()

@@ -1,4 +1,4 @@
-package com.hsp1020
+package com.hsp1020.elevate
 
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -29,6 +29,7 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.ExtractorLinkGenerator
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.extractorApis
@@ -50,6 +51,15 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.VideoGenerator
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.ResultData
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProvider
+import org.json.JSONArray
 
 private fun installedYouTubeExtractor(): ExtractorApi? {
     for (index in extractorApis.lastIndex downTo 0) {
@@ -87,12 +97,92 @@ private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorL
                 .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
     }
 
+
+internal data class TrailerChoice(
+    val url: String,
+    val title: String,
+    val type: String,
+    val language: String? = null,
+    val referer: String? = null,
+    val raw: Boolean = false,
+    val headers: Map<String, String> = emptyMap()
+) {
+    val youtubeId: String?
+        get() {
+            val parsed = runCatching { android.net.Uri.parse(url) }.getOrNull() ?: return null
+            val host = parsed.host?.lowercase() ?: return null
+            val candidate = when {
+                host == "youtu.be" || host.endsWith(".youtu.be") -> parsed.pathSegments.firstOrNull()
+                host == "youtube.com" || host.endsWith(".youtube.com") ||
+                    host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com") ->
+                    parsed.getQueryParameter("v") ?: parsed.pathSegments
+                        .takeIf { it.firstOrNull() in listOf("embed", "shorts", "live", "v") }
+                        ?.getOrNull(1)
+                else -> null
+            }
+            return candidate?.takeIf { id -> id.length == 11 && id.all { c ->
+                (c.isLetterOrDigit() && c.code < 128) || c == '_' || c == '-'
+            } }
+        }
+}
+
+private suspend fun extractTrailerMedia(entry: TrailerChoice): Pair<List<ExtractorLink>, List<SubtitleData>> {
+    val youtubeId = entry.youtubeId
+    if (youtubeId != null && installedYouTubeExtractor() != null) return extractTrailerMedia(youtubeId)
+    return withContext(Dispatchers.IO) {
+        val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val subtitles = Collections.synchronizedList(mutableListOf<SubtitleFile>())
+        val handled = loadExtractor(entry.url, entry.referer,
+            { subtitles.add(it) }, { links.add(it) })
+        if (!handled && entry.raw) links.add(newExtractorLink(
+            "", "Trailer", entry.url
+        ) {
+            referer = entry.referer.orEmpty()
+            headers = entry.headers
+        })
+        synchronized(links) { links.toList() }.distinctBy { it.url } to
+            synchronized(subtitles) { subtitles.toList() }
+                .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
+    }
+}
+
 internal class TrailerChooser(
     private val fragment: Fragment,
     private val root: View,
     private val detailUrl: String?
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
+    private val responseField by lazy {
+        runCatching { ResultViewModel2::class.java.getDeclaredField("currentResponse")
+            .apply { isAccessible = true } }.getOrNull()
+    }
+    private val pageObserver = Observer<Resource<ResultData>?> { refresh() }
+    private val nativeObserver = Observer<List<com.lagradost.cloudstream3.ui.result.ExtractedTrailerData>> { refresh() }
+    private fun choices(): List<TrailerChoice> {
+        val page = (model.page.value as? Resource.Success<ResultData>)?.value
+        val extras = runCatching { JSONArray(page?.syncData?.get("trailer_choices").orEmpty()) }
+            .getOrNull()?.let { array ->
+                (0 until array.length()).mapNotNull { index ->
+                    val item = array.optJSONObject(index) ?: return@mapNotNull null
+                    val url = item.optString("url").takeIf { it.startsWith("https://") } ?: return@mapNotNull null
+                    TrailerChoice(url, item.optString("title", "Trailer"), item.optString("type", "Trailer"),
+                        item.optString("language").takeIf { it.isNotBlank() })
+                }
+            }.orEmpty()
+        if (extras.isNotEmpty()) return extras.distinctBy { it.url }.take(30)
+        val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
+        if (page == null) return emptyList()
+        val native = if (response != null && response.url == page.url) response.trailers.mapIndexedNotNull { index, trailer ->
+            val url = trailer.extractorUrl.trim().takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
+            TrailerChoice(url, "Trailer ${index + 1}", "Trailer",
+                referer = trailer.referer, raw = trailer.raw, headers = trailer.headers)
+        } else emptyList()
+        if (native.isNotEmpty()) return native.distinctBy { it.url }.take(30)
+        return model.trailers.value.orEmpty().flatMap { it.mirros }.mapIndexed { index, pair ->
+            TrailerChoice(pair.second, "Trailer ${index + 1}", "Trailer")
+        }.distinctBy { it.url }.take(30)
+    }
     private var button: TextView? = null
     private var dialog: BottomSheetDialog? = null
     private var opening = false
@@ -104,7 +194,7 @@ internal class TrailerChooser(
     private var reopenScrollY = 0
     private var reopenFocusedRow = -1
     private var restorePosted = false
-    private val returnKey = "stremioc_trailer_picker_return"
+    private val returnKey = "elevate_trailer_picker_return"
     private val returnScrollKey = "${returnKey}_scroll"
     private val returnFocusKey = "${returnKey}_focus"
     private val resumeObserver = LifecycleEventObserver { _, event ->
@@ -165,6 +255,8 @@ internal class TrailerChooser(
     fun start() {
         stopped = false
         fragment.lifecycle.addObserver(resumeObserver)
+        model.page.observe(fragment.viewLifecycleOwner, pageObserver)
+        model.trailers.observe(fragment.viewLifecycleOwner, nativeObserver)
         title?.addTextChangedListener(titleWatcher)
         if (isTv) {
 
@@ -201,12 +293,9 @@ internal class TrailerChooser(
     }
 
     fun refresh() {
-        if (!fragment.isAdded || detailUrl.isNullOrBlank()) return
+        if (!fragment.isAdded) return
         val context = root.context
-        val settingId = context.resources.getIdentifier("show_trailers_key", "string", context.packageName)
-        val enabled = settingId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
-            .getBoolean(context.getString(settingId), true)
-        val next = if (enabled) StremioC.trailerChoicesByUrl[detailUrl].orEmpty() else emptyList()
+        val next = choices()
         if (next == items && (isTv || button != null || next.isEmpty())) {
             if (!isTv && button != null) updatePhoneLabel()
             reopenPickerIfReady()
@@ -237,8 +326,7 @@ internal class TrailerChooser(
                 chipBackgroundColor = ColorStateList.valueOf(
                     androidx.core.content.ContextCompat.getColor(context, R.color.primaryGrayBackground))
                 setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.white))
-                applyEpisodeChipFeedback(this)
-                applyStremioCNativeFont(bold = true)
+                applyElevateNativeFont(bold = true)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
                 isClickable = true
@@ -262,21 +350,10 @@ internal class TrailerChooser(
         button?.contentDescription = "${root.context.getString(R.string.play_trailer_button)} (${items.size})"
     }
 
-    private fun showYouTubeInstallNotice() {
-        val activity = fragment.activity ?: return
-        AlertDialog.Builder(activity)
-            .setMessage("Install and enable the YouTube plugin to play trailers.")
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
-    }
 
     private fun showPicker(restoreScrollY: Int? = null, restoreFocus: Int = -1): Boolean {
         val activity = fragment.activity ?: return false
         if (dialog?.isShowing == true || opening || items.isEmpty()) return false
-        if (installedYouTubeExtractor() == null) {
-            if (restoreScrollY == null) showYouTubeInstallNotice()
-            return false
-        }
         navigatingToPlayer = false
         val foreground = themeColor("textColor", Color.WHITE)
         val list = LinearLayout(activity).apply {
@@ -294,12 +371,17 @@ internal class TrailerChooser(
                 ) && ripple.resourceId != 0) {
                 this.foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
             }
-            if (isTv) this.foreground = tvOutlinedForeground(this, this.foreground)
+            if (isTv) this.foreground = this.foreground?.let { pressed ->
+                val border = androidx.appcompat.content.res.AppCompatResources.getDrawable(
+                    activity, R.drawable.outline_drawable)?.mutate()
+                if (border != null) android.graphics.drawable.LayerDrawable(arrayOf(pressed, border))
+                else pressed
+            }
             setOnClickListener { dialog?.dismiss() }
         }
         header.addView(TextView(activity, null, 0, R.style.WatchHeaderText).apply {
             text = "${activity.getString(R.string.trailer)} (${items.size})"
-            applyStremioCNativeFont(bold = true)
+            applyElevateNativeFont(bold = true)
             fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -363,7 +445,7 @@ internal class TrailerChooser(
                             activity, ripple.resourceId
                         )
                     }
-                    loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
+                    entry.youtubeId?.let { loadImage("https://i.ytimg.com/vi/" + it + "/hqdefault.jpg") }
                 }, FrameLayout.LayoutParams(dp(126), dp(72)))
             }
             row.addView(thumbnail, LinearLayout.LayoutParams(dp(126), dp(72)))
@@ -373,7 +455,7 @@ internal class TrailerChooser(
             }
             labels.addView(TextView(activity).apply {
                 text = "${index + 1}. ${entry.title}"
-                applyStremioCNativeFont(bold = true)
+                applyElevateNativeFont(bold = true)
                 // Native episode_text has no maxLines/ellipsize restriction.
                 setTextColor(foreground)
             }, LinearLayout.LayoutParams(
@@ -443,15 +525,11 @@ internal class TrailerChooser(
     private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
         if (opening) return
         val picker = dialog?.takeIf { it.isShowing } ?: return
-        if (installedYouTubeExtractor() == null) {
-            showYouTubeInstallNotice()
-            return
-        }
         opening = true
         extractionProgress?.visibility = View.VISIBLE
         extractionJob = scope.launch {
             try {
-                val (playable, subtitles) = extractTrailerMedia(entry.youtubeId)
+                val (playable, subtitles) = extractTrailerMedia(entry)
                 if (!fragment.isResumed || fragment.view !== root || dialog !== picker || !picker.isShowing)
                     return@launch
                 if (playable.isEmpty()) {
@@ -466,7 +544,10 @@ internal class TrailerChooser(
                     ?: return@launch
                 val returnEntry = controller.currentBackStackEntry ?: return@launch
                 val playerArgs = GeneratorPlayer.newInstance(
-                    TrailerPlaybackGenerator(items.toList(), heading, selectedIndex, playable, subtitles),
+                    TrailerPlaybackGenerator(
+                        items.toList(), heading, fragment.arguments?.getString("apiName") ?: "Elevate",
+                        selectedIndex, playable, subtitles
+                    ),
                     selectedIndex
                 )
                 val saved = returnEntry.savedStateHandle
@@ -502,9 +583,21 @@ internal class TrailerChooser(
     fun stop() {
         stopped = true
         fragment.lifecycle.removeObserver(resumeObserver)
+        model.page.removeObserver(pageObserver)
+        model.trailers.removeObserver(nativeObserver)
         title?.removeTextChangedListener(titleWatcher)
         if (isTv) {
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(tvLayout)
+            val nativeLinks = model.trailers.value.orEmpty().flatMap { it.mirros }.map { it.first }
+            tvContainer?.visibility = if (nativeLinks.isEmpty()) View.GONE else View.VISIBLE
+            tvButton?.setOnClickListener(if (nativeLinks.isEmpty()) null else View.OnClickListener {
+                runCatching {
+                    fragment.findNavController().navigate(
+                        R.id.global_to_navigation_player,
+                        GeneratorPlayer.newInstance(ExtractorLinkGenerator(nativeLinks, emptyList()), 0)
+                    )
+                }
+            })
         }
 
         extractionJob?.cancel()
@@ -521,6 +614,7 @@ internal class TrailerChooser(
 internal class TrailerPlaybackGenerator(
     private val trailers: List<TrailerChoice>,
     heading: String,
+    providerName: String,
     selectedIndex: Int,
     selectedLinks: List<ExtractorLink>,
     selectedSubtitles: List<SubtitleData>
@@ -529,13 +623,13 @@ internal class TrailerPlaybackGenerator(
         ResultEpisode(
             headerName = heading,
             name = item.title,
-            poster = "https://i.ytimg.com/vi/${item.youtubeId}/hqdefault.jpg",
+            poster = item.youtubeId?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" },
             episode = index + 1,
             seasonIndex = null,
             season = null,
-            data = "https://www.youtube.com/watch?v=${item.youtubeId}",
-            apiName = "StremioC",
-            id = -(("stremioc-trailer:" + item.youtubeId).hashCode() and Int.MAX_VALUE) - 1,
+            data = item.url,
+            apiName = providerName,
+            id = -(("elevate-trailer:" + item.url).hashCode() and Int.MAX_VALUE) - 1,
             index = index,
             position = 0L,
             duration = 0L,
@@ -566,7 +660,7 @@ internal class TrailerPlaybackGenerator(
     ): Boolean {
         val trailer = trailers.getOrNull(offset) ?: return false
         if (clearCache) cache.remove(offset)
-        val (links, subtitles) = cache[offset] ?: extractTrailerMedia(trailer.youtubeId)
+        val (links, subtitles) = cache[offset] ?: extractTrailerMedia(trailer)
             .also { cache[offset] = it }
 
         links.filter { it.type in sourceTypes }.forEach { callback(it to null) }

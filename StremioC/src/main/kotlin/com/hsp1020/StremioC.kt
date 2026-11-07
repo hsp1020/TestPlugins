@@ -343,15 +343,6 @@ private fun JsonNode?.intOrNull(): Int? {
     return try { this.asInt() } catch (e: Exception) { null }
 }
 
-private fun tmdbTrailerLanguages(): List<String> {
-    val configured = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("tmdb_language_code", "en-US")
-        ?.trim()?.replace('_', '-')?.takeIf { it.isNotEmpty() } ?: "en-US"
-    return listOf(configured, configured.substringBefore('-'), "en")
-        .distinctBy { it.lowercase() }
-}
-
 private fun tmdbLogoLanguages(): String {
     val preferred = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -367,36 +358,6 @@ private class NoNativeTrailerPreview : AbstractMutableList<TrailerData>() {
     override fun add(index: Int, element: TrailerData) = Unit
     override fun set(index: Int, element: TrailerData): TrailerData = throw IndexOutOfBoundsException()
     override fun removeAt(index: Int): TrailerData = throw IndexOutOfBoundsException()
-}
-
-internal data class TrailerChoice(
-    val youtubeId: String,
-    val title: String,
-    val type: String,
-    val language: String? = null
-)
-
-private fun parseTrailerYoutubeId(raw: String?): String? {
-    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    fun valid(id: String) = id.length == 11 && id.all {
-        (it.isLetterOrDigit() && it.code < 128) || it == '_' || it == '-'
-    }
-    if (valid(value)) return value
-    return runCatching {
-        val uri = android.net.Uri.parse(value)
-        val host = uri.host?.lowercase() ?: return@runCatching null
-        val segments = uri.pathSegments
-        val candidate = when {
-            host == "youtu.be" || host.endsWith(".youtu.be") -> segments.firstOrNull()
-            host == "youtube.com" || host.endsWith(".youtube.com") ||
-                host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com") ->
-                uri.getQueryParameter("v") ?: segments.takeIf {
-                    it.firstOrNull() in listOf("embed", "shorts", "live", "v")
-                }?.getOrNull(1)
-            else -> null
-        }
-        candidate?.takeIf(::valid)
-    }.getOrNull()
 }
 
 open class StremioC(
@@ -1279,10 +1240,8 @@ open class StremioC(
 
         @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
-        internal val fallbackLogoTitles = lruCacheMap<String, Boolean>(200)
 
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
-        internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
         // Distinguish an episode-based result awaiting native season selection
         // from a movie, which has no native seasonSelections event.
@@ -1354,7 +1313,6 @@ open class StremioC(
                 i += Character.charCount(codePoint)
             }
         }
-        internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
 
         private data class AddonMetaEntry(val bytes: ByteArray, val at: Long, val ttlMs: Long)
         private val addonMetaCache = LinkedHashMap<String, AddonMetaEntry>(48, 0.75f, true)
@@ -2595,12 +2553,9 @@ open class StremioC(
                     StremioC(base, name).load(metaUrl).also { response ->
 
                         for (source in listOf(metaUrl, response.url)) {
-                            fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
-                            expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
                             animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
                             episodeBasedByUrl[source]?.let { episodeBasedByUrl[url] = it }
-                            seasonEpisodeCountsByUrl[source]?.let { seasonEpisodeCountsByUrl[url] = it }
-                            trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
+            seasonEpisodeCountsByUrl[source]?.let { seasonEpisodeCountsByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
                         }
                     }
@@ -2876,11 +2831,8 @@ open class StremioC(
         ) }
 
         if (url != loadRes.url) {
-            fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
-            expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
-                            seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
-            trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
+            seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
             ActorInformation.alias(this@StremioC, url, loadRes.url)
         }
@@ -2889,11 +2841,8 @@ open class StremioC(
             libraryOriginalUrlsByMeta[url]?.toList().orEmpty()
         }
         for (originalUrl in libraryOrigins) {
-            fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
-            expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
             animeAudioByUrl[url]?.let { animeAudioByUrl[originalUrl] = it }
-                            seasonEpisodeCountsByUrl[url]?.let { seasonEpisodeCountsByUrl[originalUrl] = it }
-            trailerChoicesByUrl[url]?.let { trailerChoicesByUrl[originalUrl] = it }
+            seasonEpisodeCountsByUrl[url]?.let { seasonEpisodeCountsByUrl[originalUrl] = it }
             genreCatalogsByUrl[url]?.let { genreCatalogsByUrl[originalUrl] = it }
         }
         collectionDeferred?.cancel()
@@ -4779,27 +4728,11 @@ open class StremioC(
             } ?: emptyList()
             val actorPairs = crewPairs + castPairs
 
-            val trailerLanguages = tmdbTrailerLanguages()
-            val rankedTrailers = detailRes.videos?.results.orEmpty()
-                .filter { (it.type == "Trailer" || it.type == "Teaser") && it.site.equals("YouTube", true) }
-                .mapNotNull { item ->
-                    val rank = trailerLanguages.indexOfFirst { locale ->
-                        item.language.equals(locale.substringBefore('-'), true) &&
-                            (!locale.contains('-') || item.region.equals(locale.substringAfter('-'), true))
-                    }
-                    if (rank < 0 || parseTrailerYoutubeId(item.key) == null) null else rank to item
-                }
-            val bestLanguage = rankedTrailers.minOfOrNull { it.first }
-            val fetchedTrailers = rankedTrailers.asSequence()
-                .filter { it.first == bestLanguage }
-                .map { it.second }
-                .sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" }))
-                .mapNotNull { item ->
-                    parseTrailerYoutubeId(item.key)?.let { id ->
-                        TrailerChoice(id, item.name?.takeIf { it.isNotBlank() } ?: (item.type ?: "Trailer"),
-                            item.type ?: "Trailer", item.language)
-                    }
-                }.distinctBy { it.youtubeId }.take(30).toList()
+            val fetchedTrailers = collectStremioTrailers(
+                detailRes.videos?.results.orEmpty()
+                    .filter { it.site.equals("YouTube", true) }
+                    .map { StremioTrailerCandidate(it.key, it.name, it.type, it.language, it.region, it.publishedAt) }
+            )
 
             val translationData = detailRes.translations?.translations?.firstOrNull { 
                 it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
@@ -5119,8 +5052,9 @@ open class StremioC(
                     }
                 }
             }
-            val finalTrailers = tmdbData?.fetchedTrailers.orEmpty().ifEmpty { fallbackTrailers }
-                .distinctBy { it.youtubeId }.take(30)
+            val finalTrailers = collectStremioTrailers(
+                emptyList(), tmdbData?.fetchedTrailers.orEmpty().ifEmpty { fallbackTrailers }
+            )
 
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
@@ -5188,11 +5122,9 @@ open class StremioC(
 
             // Keep TMDB's preferred-language/English selection for the title
             // fallback even when a custom AIOMetadata logo is displayed.
-            val finalLogoFallback = when {
-                finalLogo == null -> false
-                tmdbData?.fetchedLogo.isNullOrBlank() -> true
-                else -> tmdbData?.fetchedLogoFallback == true
-            }
+            val finalLogoFallback = stremioLogoNeedsTitle(
+                finalLogo, tmdbData?.fetchedLogo, tmdbData?.fetchedLogoFallback == true
+            )
 
             fun LoadResponse.attachMappedIds() {
                 val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
@@ -5206,13 +5138,14 @@ open class StremioC(
                 }
                 apiName = provider.getTargetApiName()
 
+                syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)
+                syncData["logo_expected"] = (!finalLogo.isNullOrBlank()).toString()
+                syncData["logo_foreign_language"] = finalLogoFallback.toString()
                 trailers = NoNativeTrailerPreview()
             }
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
-                StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
-                StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = false
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
@@ -5222,7 +5155,6 @@ open class StremioC(
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
                     .mapValues { (_, videos) -> videos.size }
-                StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
@@ -5299,8 +5231,6 @@ open class StremioC(
                     if (episode.runTime == null) episode.runTime = representativeRunTime
                 }
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
-                StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
-                StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
@@ -5310,7 +5240,6 @@ open class StremioC(
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
                     .mapValues { (_, videos) -> videos.size }
-                StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val response = run { provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
