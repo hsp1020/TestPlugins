@@ -2314,56 +2314,6 @@ internal class RatingPlotImageHook(
     }
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
-        private val posterProbeStarted = SystemClock.elapsedRealtime()
-        private val posterProbeKey = StremioCMetaPerf.key(detailUrl)
-        private val posterViews = listOf(
-            "main" to "result_poster",
-            "background" to "result_poster_background",
-            "tv_background" to "background_poster",
-            "logo" to "background_poster_watermark_badge",
-            "tv_logo" to "background_poster_watermark_badge_holder"
-        ).mapNotNull { (label, idName) ->
-            val id = root.resources.getIdentifier(idName, "id", root.context.packageName)
-            if (id == 0) null else (root.findViewById<View>(id) as? ImageView)?.let { label to it }
-        }
-        private val posterDrawables = java.util.IdentityHashMap<ImageView, Drawable?>()
-        private val posterVisible = java.util.Collections.newSetFromMap(
-            java.util.IdentityHashMap<ImageView, Boolean>()
-        )
-        private var posterProbeActive = false
-        private val posterPreDraw = ViewTreeObserver.OnPreDrawListener {
-            val elapsed = SystemClock.elapsedRealtime() - posterProbeStarted
-            if (elapsed > 30_000L) {
-                stopPosterProbe()
-            } else {
-                for ((label, image) in posterViews) {
-                    val drawable = image.drawable
-                    val seen = posterDrawables.containsKey(image)
-                    if (!seen || posterDrawables[image] !== drawable) {
-                        posterDrawables[image] = drawable
-                        StremioCMetaPerf.log("POSTER_DRAWABLE", posterProbeKey,
-                            "view=$label phase=${if (seen) "changed" else "initial"} " +
-                                "elapsedMs=$elapsed hasDrawable=${drawable != null} " +
-                                "size=${drawable?.intrinsicWidth ?: 0}x${drawable?.intrinsicHeight ?: 0}")
-                    }
-                    if (drawable != null && !posterVisible.contains(image) &&
-                        image.isShown && image.alpha > 0f && image.width > 0 && image.height > 0) {
-                        posterVisible.add(image)
-                        // The first drawable may be a placeholder, not the final poster.
-                        StremioCMetaPerf.log("POSTER_FIRST_VISIBLE", posterProbeKey,
-                            "view=$label elapsedMs=$elapsed alpha=${image.alpha} " +
-                                "size=${drawable.intrinsicWidth}x${drawable.intrinsicHeight}")
-                    }
-                }
-            }
-            true
-        }
-        private fun stopPosterProbe() {
-            if (!posterProbeActive) return
-            posterProbeActive = false
-            if (root.viewTreeObserver.isAlive)
-                root.viewTreeObserver.removeOnPreDrawListener(posterPreDraw)
-        }
         private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
@@ -2584,36 +2534,16 @@ internal class RatingPlotImageHook(
             actorInformation.start()
             val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             fun applyRecommendation(update: StremioC.Companion.RecommendationUpdate) {
-                val key = Integer.toHexString(update.url.hashCode())
                 val page = (model.page.value as? Resource.Success<ResultData>)?.value
                 if (page?.url != update.url) {
-                    android.util.Log.d(STREMIO_REC_RANK_TAG,
-                        "APPLY_SKIP page=$key phase=${update.phase} reason=page_mismatch " +
-                            "active=${page?.url?.let { Integer.toHexString(it.hashCode()) }}")
                     return
                 }
                 @Suppress("UNCHECKED_CAST")
                 val target = model.recommendations as? androidx.lifecycle.MutableLiveData<List<SearchResponse>>
                 if (target == null) {
-                    android.util.Log.d(STREMIO_REC_RANK_TAG,
-                        "APPLY_SKIP page=$key phase=${update.phase} reason=immutable_model")
                     return
                 }
                 target.value = update.cards
-                android.util.Log.d(STREMIO_REC_RANK_TAG,
-                    "APPLY page=$key phase=${update.phase} count=${update.cards.size}")
-            }
-            model.recommendations.observe(fragment.viewLifecycleOwner) { current ->
-                val active = (model.page.value as? Resource.Success<ResultData>)?.value
-                val page = active?.url?.let { Integer.toHexString(it.hashCode()) } ?: "unknown"
-                android.util.Log.d(STREMIO_REC_RANK_TAG,
-                    "MODEL_LIST page=$page count=${current.orEmpty().size}")
-                current.orEmpty().forEachIndexed { index, card ->
-                    android.util.Log.d(STREMIO_REC_RANK_TAG,
-                        "MODEL_RANK page=$page rank=${index + 1} " +
-                            "cardKey=${Integer.toHexString(card.url.hashCode())} " +
-                            "title=${recommendationTraceTitle(card.name)}")
-                }
             }
             model.page.observe(fragment.viewLifecycleOwner) { value ->
                 val page = (value as? Resource.Success<ResultData>)?.value ?: return@observe
@@ -2625,12 +2555,6 @@ internal class RatingPlotImageHook(
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
             view.addTextChangedListener(this)
-            StremioCMetaPerf.log("POSTER_WATCH_START", posterProbeKey,
-                "views=${posterViews.joinToString(",") { it.first }}")
-            if (posterViews.isNotEmpty()) {
-                posterProbeActive = true
-                root.viewTreeObserver.addOnPreDrawListener(posterPreDraw)
-            }
             if (castItems != null || genreGroup != null)
                 root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
             detailLayout.onGlobalLayout()
@@ -2642,7 +2566,6 @@ internal class RatingPlotImageHook(
             seasonSyncProbe.stop()
             actorInformation.stop()
             view.removeTextChangedListener(this)
-            stopPosterProbe()
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(detailLayout)
             boundGenreChips.keys.forEach { chip ->
                 chip.setOnClickListener(null)

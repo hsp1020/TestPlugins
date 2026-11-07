@@ -10,8 +10,6 @@ import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
-import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -81,7 +79,7 @@ internal class RecommendationPosterHook(private val application: Application) :
     private val simklLimiter = Semaphore(10)
     private val detailLimiter = Semaphore(10)
     private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
-    private data class DetailLookup(val ids: DetailIds?, val reason: String, val waitMs: Long, val loadMs: Long)
+    private data class DetailLookup(val ids: DetailIds?)
     private val detailMappings = LinkedHashMap<String, Pair<Long, DetailLookup>>()
     private val detailFlights = mutableMapOf<String, Deferred<DetailLookup>>()
     private val simklMappings = LinkedHashMap<String, Pair<Long, DetailIds?>>()
@@ -346,28 +344,12 @@ internal class RecommendationPosterHook(private val application: Application) :
 
     private data class Cover(
         val key: String, val generation: Int, val original: String?,
-        val headers: Map<String, String>?, val provider: String,
-        val cardId: String, val startedAt: Long,
+        val headers: Map<String, String>?,
         var custom: String? = null, var failed: Boolean = false,
         var fallback: PosterIds? = null, var fallbackMovie: Boolean = false,
         var fallbackAttempted: Boolean = false,
         var imdbFallback: String? = null
     )
-
-    private fun trace(cover: Cover, event: String, info: String = "") {
-        Log.d("ElevatePoster", "event=$event provider=${cover.provider} card=${cover.cardId} " +
-            "elapsedMs=${SystemClock.elapsedRealtime() - cover.startedAt} $info")
-    }
-
-    private fun idLabel(ids: PosterIds, simkl: String? = null): String = when {
-        ids.imdb != null -> "imdb:${ids.imdb}"
-        ids.tmdb != null -> "tmdb:${ids.tmdb}"
-        ids.mal != null -> "mal:${ids.mal}"
-        ids.anilist != null -> "anilist:${ids.anilist}"
-        ids.kitsu != null -> "kitsu:${ids.kitsu}"
-        simkl != null -> "simkl:$simkl"
-        else -> "none"
-    }
 
     private inner class Screen(val list: RecyclerView) {
         private val covers = IdentityHashMap<ImageView, Cover>()
@@ -468,22 +450,18 @@ internal class RecommendationPosterHook(private val application: Application) :
         private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
             if (covers[image] !== cover || revision != cover.generation ||
                 !image.isAttachedToWindow) return
-            trace(cover, "POSTER_REQUEST", "service=${setting.service}")
             val result = PosterWipe.load(image, poster, "recommendation") {
                 covers[image] === cover && revision == cover.generation
             }
             if (covers[image] !== cover || revision != cover.generation ||
                 result.error == "stale") return
             if (result.success) {
-                trace(cover, "POSTER_SUCCESS", "cache=${result.source}")
                 return
             }
-            trace(cover, "POSTER_FAIL", "reason=${result.error}")
             unavailable.add(poster)
             val imdbPoster = cover.imdbFallback?.takeIf { it != poster && it !in unavailable }
             cover.imdbFallback = null
             if (imdbPoster != null) {
-                trace(cover, "POSTER_RETRY", "source=imdb")
                 cover.custom = imdbPoster
                 loadCustom(image, cover, imdbPoster)
                 return
@@ -497,7 +475,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                     !image.isAttachedToWindow) return
                 val next = mapped?.let { setting.image(it, cover.fallbackMovie) }
                 if (next != null && next != poster && next !in unavailable) {
-                    trace(cover, "POSTER_RETRY", "source=anime_mapping")
                     cover.custom = next
                     loadCustom(image, cover, next)
                     return
@@ -528,13 +505,9 @@ internal class RecommendationPosterHook(private val application: Application) :
             pending.remove(image)?.cancel()
             PosterWipe.cancel(image)
             PosterWipe.ensurePlaceholder(image)
-            val current = Cover(key, revision, card.posterUrl, card.posterHeaders,
-                card.apiName, Integer.toHexString(card.url.hashCode()), SystemClock.elapsedRealtime())
+            val current = Cover(key, revision, card.posterUrl, card.posterHeaders)
             covers[image] = current
-            trace(current, "CARD_BIND", "type=${card.type} title=${card.name.take(64).replace(' ', '_').replace('\n', '_')}")
             val (ids, simkl) = directIds(card)
-            if (ids.available || simkl != null)
-                trace(current, "ID_DIRECT", "id=${idLabel(ids, simkl)}")
             val config = setting
             // Some providers label every search card as Movie but keep the real
             // media type in the card URL (for example TMDB recommendations).
@@ -553,9 +526,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                 try {
                     // Other providers often expose their IDs only in LoadResponse.syncData,
                     // never in the recommendation SearchResponse URL.
-                    val detail = if (!ids.available && simkl == null) detailIds(card, current) else null
-                    if (detail != null)
-                        trace(current, "ID_RESOLVED", "source=detail id=${idLabel(detail.ids, detail.simkl)}")
+                    val detail = if (!ids.available && simkl == null) detailIds(card) else null
                     val resolvedIds = detail?.ids ?: ids
                     val resolvedSimkl = detail?.simkl ?: simkl
                     val resolvedMovie = detail?.movie ?: movie
@@ -564,8 +535,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                         resolvedIds.imdb != null || resolvedIds.tmdb != null ||
                             config.service == PosterService.XRDB && resolvedIds.available -> initial
                         resolvedSimkl != null -> {
-                            trace(current, "ID_RESOLVE",
-                                "source=simkl id=${idLabel(resolvedIds, resolvedSimkl)}")
                             withContext(Dispatchers.IO) {
                                 simklIds(resolvedSimkl, resolvedMovie, simklType)
                             } ?: initial
@@ -581,13 +550,8 @@ internal class RecommendationPosterHook(private val application: Application) :
                     // One existing AIOStreams mapping for the season, shared by all
                     // poster services that require an IMDb/TMDB artwork identifier.
                     val season = if (animeIdentity && config.service != PosterService.XRDB) {
-                        trace(current, "ID_RESOLVE",
-                            "source=aiostreams id=${idLabel(candidate)}")
                         withContext(Dispatchers.IO) { animeIds(candidate) }
                     } else null
-                    if (season != null)
-                        trace(current, "ID_RESOLVED",
-                            "source=aiostreams id=${idLabel(season)}")
                     val posterIds = when {
                         season != null -> season
                         config.service == PosterService.XRDB && animeIdentity ->
@@ -606,9 +570,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                     current.imdbFallback = imdbPoster?.takeIf {
                         poster == primary && it != primary
                     }
-                    if (poster != null)
-                        trace(current, "POSTER_TARGET",
-                            "id=${idLabel(primaryIds)} urlKey=${poster.hashCode().toUInt().toString(16)}")
                     if (animeIdentity &&
                         (config.service == PosterService.XRDB ||
                             season != null && (candidate.imdb != null || candidate.tmdb != null))) {
@@ -621,7 +582,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                         !image.isAttachedToWindow || view.parent !== list) return@launch
                     if (poster == null || poster in unavailable) {
                         current.failed = true
-                        trace(current, "POSTER_SKIP", "reason=${if (poster == null) "unresolved_id" else "failed_url_cache"}")
                         return@launch
                     }
                     current.custom = poster
@@ -631,7 +591,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                 } catch (error: Exception) {
                     if (covers[image] === current) {
                         current.failed = true
-                        trace(current, "POSTER_SKIP", "reason=${error.javaClass.simpleName}")
                     }
                 } finally {
                     if (covers[image] === current) pending.remove(image)
@@ -683,7 +642,7 @@ internal class RecommendationPosterHook(private val application: Application) :
     }
 
     /** Prefer IDs already on the card; only unresolved cards need provider.load(). */
-    private suspend fun detailIds(card: SearchResponse, cover: Cover): DetailIds? {
+    private suspend fun detailIds(card: SearchResponse): DetailIds? {
         val key = card.apiName + "|" + card.url + "|" + card.type
         val now = System.currentTimeMillis()
         val cached = synchronized(detailMappings) {
@@ -692,41 +651,33 @@ internal class RecommendationPosterHook(private val application: Application) :
             }
         }
         if (cached != null) {
-            trace(cover, "DETAIL_DONE",
-                "cache=hit found=${cached.second.ids != null} reason=${cached.second.reason} waitMs=0 loadMs=0")
             return cached.second.ids
         }
-        val (flight, shared) = synchronized(detailMappings) {
+        val flight = synchronized(detailMappings) {
             detailMappings[key]?.takeIf {
                 System.currentTimeMillis() - it.first < if (it.second.ids == null) 120_000L else 1_800_000L
             }?.let {
-                trace(cover, "DETAIL_DONE", "cache=hit found=${it.second.ids != null} reason=${it.second.reason} waitMs=0 loadMs=0")
                 return it.second.ids
             }
-            detailFlights[key]?.let { it to true } ?: run {
-                val queuedAt = SystemClock.elapsedRealtime()
+            detailFlights[key] ?: run {
                 val task = scope.async(Dispatchers.IO) {
                     val outcome = detailLimiter.withPermit {
-                        val waitMs = SystemClock.elapsedRealtime() - queuedAt
-                        val loadedAt = SystemClock.elapsedRealtime()
-                        trace(cover, "DETAIL_LOAD", "queueWaitMs=$waitMs")
-                        var reason = "no_ids"
                         val ids = try {
                             withTimeout(8_000L) {
                                 if (card.apiName == "4K HDHUB") {
                                     fourKHdHubIds(card)?.let {
-                                        reason = "lightweight_imdb"
+
                                         return@withTimeout it
                                     }
                                 }
                                 val provider = APIHolder.getApiFromNameNull(card.apiName)
                                     ?: APIHolder.getApiFromUrlNull(card.url)
                                     ?: run {
-                                        reason = "provider_missing"
+
                                         return@withTimeout null
                                     }
                                 val response = provider.load(card.url) ?: run {
-                                    reason = "load_null"
+
                                     return@withTimeout null
                                 }
                                 val saved = readIdFromString(response.syncData["simkl"])
@@ -754,7 +705,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                                     response.syncData["simkl"],
                                     SIMKL.find(response.url)?.groupValues?.get(1))
                                 if (!result.available && simkl == null) null else {
-                                    reason = "ok"
+
                                     DetailIds(result, simkl, when (response.type) {
                                         TvType.Others -> card.type in setOf(TvType.Movie, TvType.AnimeMovie)
                                         else -> response.type in setOf(TvType.Movie, TvType.AnimeMovie)
@@ -762,19 +713,18 @@ internal class RecommendationPosterHook(private val application: Application) :
                                 }
                             }
                         } catch (cancelled: TimeoutCancellationException) {
-                            reason = "timeout"
+
                             null
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: NotImplementedError) {
-                            reason = "not_implemented"
+
                             null
                         } catch (error: Exception) {
-                            reason = error.javaClass.simpleName
+
                             null
                         }
-                        DetailLookup(ids, reason, waitMs,
-                            SystemClock.elapsedRealtime() - loadedAt)
+                        DetailLookup(ids)
                     }
                     synchronized(detailMappings) {
                         detailFlights.remove(key)
@@ -790,14 +740,10 @@ internal class RecommendationPosterHook(private val application: Application) :
                         if (detailFlights[key] === task) detailFlights.remove(key)
                     }
                 }
-                task to false
+                task
             }
         }
-        trace(cover, if (shared) "DETAIL_JOIN" else "DETAIL_START", "cache=miss")
         val outcome = flight.await()
-        trace(cover, "DETAIL_DONE",
-            "cache=${if (shared) "shared" else "miss"} found=${outcome.ids != null} " +
-                "reason=${outcome.reason} waitMs=${outcome.waitMs} loadMs=${outcome.loadMs}")
         return outcome.ids
     }
 
