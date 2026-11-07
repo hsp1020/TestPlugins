@@ -15,7 +15,6 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ListView
-import android.widget.ScrollView
 import android.text.TextWatcher
 import android.text.Editable
 import android.text.TextUtils
@@ -26,7 +25,6 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.media3.common.C
 import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -464,12 +462,9 @@ internal class ElevatePlayerPanel(
     }
     private val subtitleContent = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
-        addView(subtitlePane, LinearLayout.LayoutParams(-1, dp(48)))
+        // The two lists fill the available viewport and scroll independently.
+        addView(subtitlePane, LinearLayout.LayoutParams(-1, 0, 1f))
         addView(importActions, LinearLayout.LayoutParams(-1, -2))
-    }
-    private val subtitleScroll = ScrollView(ctx).apply {
-        isVerticalScrollBarEnabled = false
-        addView(subtitleContent, FrameLayout.LayoutParams(-1, -2))
     }
     private var inSync = false
     private var offsetBeforeSync = 0L
@@ -978,7 +973,7 @@ internal class ElevatePlayerPanel(
     private fun panelContent(view: View) {
         if (body.getChildAt(body.childCount - 1) === view) return
         (list.parent as? ViewGroup)?.removeView(list)
-        (subtitleScroll.parent as? ViewGroup)?.removeView(subtitleScroll)
+        (subtitleContent.parent as? ViewGroup)?.removeView(subtitleContent)
         (nativeSync.parent as? ViewGroup)?.removeView(nativeSync)
         body.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
     }
@@ -1006,7 +1001,7 @@ internal class ElevatePlayerPanel(
             Tab.SUBTITLES -> {
                 bindRefreshListener()
                 updateEncodingLabel()
-                panelContent(subtitleScroll)
+                panelContent(subtitleContent)
                 val providers = GeneratorPlayer.subsProvidersIsActive
                 onlineImport.visibility = if (providers) View.VISIBLE else View.GONE
                 val state = vm.state.generatorState
@@ -1242,27 +1237,7 @@ internal class ElevatePlayerPanel(
         replaceRows(items)
     }
 
-    private fun traceEmbeddedChoice(stage: String, sub: SubtitleData?, reload: Boolean? = null) {
-        if (sub?.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) return
-        val media = fragment.playerView?.player
-        val tracks = media?.currentTracks?.groups.orEmpty()
-            .filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
-                (0 until group.length).map { index ->
-                    val format = group.getTrackFormat(index)
-                    "${format.id ?: "null"}:supported=${group.isTrackSupported(index)}:selected=${group.isTrackSelected(index)}"
-                }
-            }
-        android.util.Log.i("ElevateEmbeddedTrace",
-            "panel $stage instance=${vm.state.instance} enabled=" +
-                "${ElevateFeaturePrefs.enabled(ctx, ElevateFeature.EMBEDDED_SUBTITLES)} " +
-                "id=${sub.url} nativeId=${sub.getId()} " +
-                "media3=${media?.let(System::identityHashCode)} " +
-                "preferred=${fragment.player.getCurrentPreferredSubtitle()?.url} " +
-                "reload=$reload tracks=$tracks")
-    }
-
     private fun setSubtitle(sub: SubtitleData?) {
-        traceEmbeddedChoice("before", sub)
         browsingSubtitleGroup = false
         beforeImport = null
         resumeAfterFileImport = false
@@ -1275,9 +1250,7 @@ internal class ElevatePlayerPanel(
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
-            traceEmbeddedChoice("afterNative", sub, requiresReload)
             if (requiresReload) {
-                traceEmbeddedChoice("reloadRequested", sub, true)
                 currentLink()?.let { link ->
                     if (wasPlaying) resumeAfterSubtitleReloadInstance = vm.state.instance
                     GeneratorPlayer::class.java.getDeclaredMethod(
@@ -1359,14 +1332,6 @@ internal class ElevatePlayerPanel(
             .filter { SubtitleLanguageNormalizer.isSelectable(it) }
         subtitleGroups = all.groupBy(::subtitleDisplayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
-        // Keep both columns tall enough for the language rows and up to five options.
-        val paneParams = subtitlePane.layoutParams as LinearLayout.LayoutParams
-        val paneHeight = dp(48 * maxOf(subtitleGroups.size + 1,
-            minOf(5, subtitleGroups.maxOfOrNull { it.second.size } ?: 0)))
-        if (paneParams.height != paneHeight) {
-            paneParams.height = paneHeight
-            subtitlePane.layoutParams = paneParams
-        }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
         if (!browsingSubtitleGroup) {
