@@ -22,11 +22,21 @@ import android.widget.TextView
 import android.util.TypedValue
 import androidx.preference.PreferenceManager
 import androidx.lifecycle.Observer
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MovieLoadResponse
+import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
@@ -37,9 +47,13 @@ import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.isMovieType
 import com.lagradost.cloudstream3.subtitles.AbstractSubtitleEntities.SubtitleSearch
+import com.lagradost.cloudstream3.ui.player.DownloadFileGenerator
 import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment.Companion.getAutoSelectLanguageTagIETF
+import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper
@@ -103,6 +117,63 @@ internal class ElevatePlayerPanel(
     private var chosenVideo: VideoTrack? = null
     private var nativeWidth = overlay.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
     private val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+    private data class OfflineEpisode(val index: Int, val file: ExtractorUri)
+    private fun downloadedEpisodes(): List<OfflineEpisode> =
+        if (vm.generator !is DownloadFileGenerator ||
+            (vm.state.generatorState?.meta as? ExtractorUri)?.tvType?.isMovieType() == true)
+            emptyList()
+        else vm.state.generatorState?.allMeta.orEmpty().mapIndexedNotNull { index, meta ->
+            (meta as? ExtractorUri)?.let { OfflineEpisode(index, it) }
+        }.takeIf { it.size > 1 }.orEmpty()
+
+    private var offlineRows = emptyList<OfflineEpisode>()
+    private class OfflineHolder(val label: TextView) : RecyclerView.ViewHolder(label)
+    private val offlineAdapter = object : RecyclerView.Adapter<OfflineHolder>() {
+        override fun getItemCount() = offlineRows.size
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): OfflineHolder {
+            val label = TextView(ctx).apply {
+                setTextColor(textColor)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(18), 0, dp(12), 0)
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                applyElevateNativeFont()
+                enableTvFocus()
+            }
+            return OfflineHolder(label)
+        }
+        override fun onBindViewHolder(holder: OfflineHolder, position: Int) {
+            val row = offlineRows[position]
+            val file = row.file
+            val number = if (file.episode != null)
+                "S%02dE%02d".format(file.season ?: 1, file.episode) else ""
+            holder.label.text = listOf(number, file.name).filter { it.isNotBlank() }
+                .joinToString("  ·  ")
+            val current = row.index == vm.state.generatorState?.index
+            holder.label.alpha = if (current) 1f else .75f
+            holder.label.setOnClickListener {
+                if (row.index == vm.state.generatorState?.index) return@setOnClickListener
+                fragment.releasePlayer()
+                overlay.visibility = View.GONE
+                vm.loadThisEpisode(row.index)
+            }
+        }
+    }
+    private val offlineEpisodeList = RecyclerView(ctx).apply {
+        layoutManager = LinearLayoutManager(ctx)
+        adapter = offlineAdapter
+        visibility = View.GONE
+    }
+    private fun renderOfflineEpisodes() {
+        offlineRows = downloadedEpisodes().sortedWith(
+            compareBy<OfflineEpisode> { it.file.season ?: 0 }
+                .thenBy { it.file.episode ?: 0 }.thenBy { it.index }
+        )
+        offlineAdapter.notifyDataSetChanged()
+        val selected = offlineRows.indexOfFirst { it.index == vm.state.generatorState?.index }
+        if (selected >= 0) offlineEpisodeList.scrollToPosition(selected)
+    }
     private val tabs = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
@@ -426,33 +497,68 @@ internal class ElevatePlayerPanel(
             android.util.Log.w("ElevatePanel", "Subtitle file picker failed", it)
         }
     }
+    @Suppress("DEPRECATION_ERROR")
+    private fun withSubtitleMetadata(action: (LoadResponse?) -> Unit) {
+        val state = vm.state.generatorState
+        val offline = state?.meta as? ExtractorUri
+        if (offline?.parentId == null) {
+            action(state?.response)
+            return
+        }
+        val instance = vm.state.instance
+        fragment.viewLifecycleOwner.lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val header = ctx.getKey<DownloadObjects.DownloadHeaderCached>(
+                    DOWNLOAD_HEADER_CACHE, offline.parentId.toString()
+                )
+                val ids = header?.let {
+                    ElevateSkipRepository.identityDownloaded(it, offline, 0L)
+                }
+                if (header == null || ids == null) null
+                else MovieLoadResponse(
+                    name = header.name, url = header.url, apiName = header.apiName,
+                    type = offline.tvType ?: header.type, dataUrl = ""
+                ).apply {
+                    addImdbId(ids.imdb)
+                    addTMDbId(ids.tmdb)
+                    addMalId(ids.mal?.toIntOrNull())
+                    addAniListId(ids.anilist?.toIntOrNull())
+                }
+            }
+            if (fragment.isAdded && vm.state.instance == instance) action(result ?: state.response)
+        }
+    }
     private val onlineImport = importAction(R.string.player_load_subtitles_online) {
-        fragment.openOnlineSubPicker(ctx, vm.state.generatorState?.response) {}
+        withSubtitleMetadata { response ->
+            fragment.openOnlineSubPicker(ctx, response) {}
+        }
     }
     private val firstImport = importAction(R.string.player_load_one_subtitle_online) {
         val state = vm.state.generatorState
-        val response = state?.response
         val episode = state?.meta as? ResultEpisode
         val offline = state?.meta as? ExtractorUri
-        val name = episode?.headerName ?: offline?.headerName ?: response?.name
-        if (name.isNullOrBlank()) return@importAction
-        android.widget.Toast.makeText(ctx, R.string.loading, android.widget.Toast.LENGTH_SHORT).show()
-        val type = episode?.tvType ?: offline?.tvType ?: response?.type
-        val query = SubtitleSearch(
-            query = name,
-            lang = getAutoSelectLanguageTagIETF().ifBlank { null },
-            imdbId = response?.getImdbId(),
-            tmdbId = response?.getTMDbId()?.toIntOrNull(),
-            malId = response?.getMalId()?.toIntOrNull(),
-            aniListId = response?.getAniListId()?.toIntOrNull(),
-            epNumber = if (type?.isMovieType() == true) null else episode?.episode ?: offline?.episode,
-            seasonNumber = if (type?.isMovieType() == true) null else episode?.season ?: offline?.season,
-            year = vm.currentSubtitleYear.value
-        )
-        runCatching {
-            GeneratorPlayer::class.java.getDeclaredMethod("addFirstSub", SubtitleSearch::class.java)
-                .apply { isAccessible = true }.invoke(fragment, query)
-        }.onFailure { android.util.Log.w("ElevatePanel", "Subtitle auto-search failed", it) }
+        val name = episode?.headerName ?: offline?.headerName ?: state?.response?.name
+        if (!name.isNullOrBlank()) {
+            android.widget.Toast.makeText(ctx, R.string.loading, android.widget.Toast.LENGTH_SHORT).show()
+            withSubtitleMetadata { response ->
+                val type = episode?.tvType ?: offline?.tvType ?: response?.type
+                val query = SubtitleSearch(
+                    query = name,
+                    lang = getAutoSelectLanguageTagIETF().ifBlank { null },
+                    imdbId = response?.getImdbId(),
+                    tmdbId = response?.getTMDbId()?.toIntOrNull(),
+                    malId = response?.getMalId()?.toIntOrNull(),
+                    aniListId = response?.getAniListId()?.toIntOrNull(),
+                    epNumber = if (type?.isMovieType() == true) null else episode?.episode ?: offline?.episode,
+                    seasonNumber = if (type?.isMovieType() == true) null else episode?.season ?: offline?.season,
+                    year = vm.currentSubtitleYear.value
+                )
+                runCatching {
+                    GeneratorPlayer::class.java.getDeclaredMethod("addFirstSub", SubtitleSearch::class.java)
+                        .apply { isAccessible = true }.invoke(fragment, query)
+                }.onFailure { android.util.Log.w("ElevatePanel", "Subtitle auto-search failed", it) }
+            }
+        }
     }
     private val importActions = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
@@ -830,13 +936,16 @@ internal class ElevatePlayerPanel(
     }
 
     private fun updateAvailableTabs() {
+        buttons[Tab.SOURCES]?.visibility =
+            if (vm.generator is DownloadFileGenerator) View.GONE else View.VISIBLE
         val tracks = fragment.player.getVideoTracks()
         val hasTracks = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
         buttons[Tab.AUDIO]?.visibility = if (hasTracks) View.VISIBLE else View.GONE
         // Native subtitle file import must remain reachable even with no loaded tracks.
         buttons[Tab.SUBTITLES]?.visibility = View.VISIBLE
         buttons[Tab.EPISODES]?.visibility =
-            if (fragment.isThereEpisodes()) View.VISIBLE else View.GONE
+            if (fragment.isThereEpisodes() || downloadedEpisodes().isNotEmpty())
+                View.VISIBLE else View.GONE
 
         // Four buttons fill the original 360dp bar. One to three keep the
         // original 90dp slot width and are centered together.
@@ -855,7 +964,8 @@ internal class ElevatePlayerPanel(
 
     private fun fallbackFromHiddenTab() {
         if (buttons[tab]?.visibility != View.VISIBLE) {
-            tab = Tab.SOURCES
+            tab = buttons.entries.firstOrNull { it.value.visibility == View.VISIBLE }?.key
+                ?: Tab.SUBTITLES
             if (overlay.isShown) showTabContents()
         }
     }
@@ -880,6 +990,7 @@ internal class ElevatePlayerPanel(
         overlay.layoutParams = overlay.layoutParams.apply { this.width = width }
         overlay.addView(tabs, 0, LinearLayout.LayoutParams(-1, dp(48)))
         overlay.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        overlay.addView(offlineEpisodeList, LinearLayout.LayoutParams(-1, 0, 1f))
         vm.currentLinks.observe(fragment.viewLifecycleOwner, linksChanged)
         vm.currentSubtitles.observe(fragment.viewLifecycleOwner, subtitlesChanged)
         bindRefreshListener()
@@ -932,6 +1043,7 @@ internal class ElevatePlayerPanel(
         overlay.layoutParams = overlay.layoutParams.apply { width = nativeWidth }
         overlay.removeView(tabs)
         overlay.removeView(body)
+        overlay.removeView(offlineEpisodeList)
         episodeTitle?.visibility = View.VISIBLE
         episodeList?.visibility = View.VISIBLE
         seasonSelector()?.visibility = View.VISIBLE
@@ -959,7 +1071,9 @@ internal class ElevatePlayerPanel(
         updateAvailableTabs()
         if (!explicitlySelectedTab && buttons[Tab.EPISODES]?.visibility == View.VISIBLE)
             tab = Tab.EPISODES
-        else if (buttons[tab]?.visibility != View.VISIBLE) tab = Tab.SOURCES
+        else if (buttons[tab]?.visibility != View.VISIBLE)
+            tab = buttons.entries.firstOrNull { it.value.visibility == View.VISIBLE }?.key
+                ?: Tab.SUBTITLES
         showTabContents()
     }
 
@@ -987,9 +1101,14 @@ internal class ElevatePlayerPanel(
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         val episode = tab == Tab.EPISODES
         body.visibility = if (episode) View.GONE else View.VISIBLE
-        episodeList?.visibility = if (episode) View.VISIBLE else View.GONE
-        episodeTitle?.visibility = if (episode && seasonSelector() == null) View.VISIBLE else View.GONE
-        seasonSelector()?.visibility = if (episode) View.VISIBLE else View.GONE
+        val offlineEpisodeTab = episode && downloadedEpisodes().isNotEmpty()
+        if (offlineEpisodeTab) renderOfflineEpisodes()
+        offlineEpisodeList.visibility = if (offlineEpisodeTab) View.VISIBLE else View.GONE
+        episodeList?.visibility = if (episode && !offlineEpisodeTab) View.VISIBLE else View.GONE
+        episodeTitle?.visibility = if (episode && !offlineEpisodeTab &&
+            seasonSelector() == null) View.VISIBLE else View.GONE
+        seasonSelector()?.visibility = if (episode && !offlineEpisodeTab)
+            View.VISIBLE else View.GONE
         sourceActions.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
         groupScroll.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
         subtitleActions.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
@@ -1238,6 +1357,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun setSubtitle(sub: SubtitleData?) {
+        SubtitleLanguageNormalizer.markManualSubtitle(fragment, vm.state.instance)
         browsingSubtitleGroup = false
         beforeImport = null
         resumeAfterFileImport = false

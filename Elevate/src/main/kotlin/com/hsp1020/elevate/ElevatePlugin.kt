@@ -92,6 +92,7 @@ class ElevatePlugin : Plugin() {
     private var searchProviderOrder: SearchProviderOrderHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
+    private var downloadMetadataCapture: ElevateDownloadMetadataCapture? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var subtitleLanguageNormalizer: SubtitleLanguageNormalizer? = null
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
@@ -222,6 +223,15 @@ class ElevatePlugin : Plugin() {
         } else {
             mdbRatings?.stop()
             mdbRatings = null
+        }
+        if (enabled(ElevateFeature.AUDIO_TRACKS) || enabled(ElevateFeature.SKIP)) {
+            if (downloadMetadataCapture == null) {
+                downloadMetadataCapture = ElevateDownloadMetadataCapture(application)
+                    .also { it.start() }
+            }
+        } else {
+            downloadMetadataCapture?.stop()
+            downloadMetadataCapture = null
         }
         if (enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (externalDownloaderLifecycle == null) {
@@ -479,6 +489,8 @@ class ElevatePlugin : Plugin() {
         audioSelector = null
         skipController?.stop()
         skipController = null
+        downloadMetadataCapture?.stop()
+        downloadMetadataCapture = null
         embeddedSubtitles?.stop()
         embeddedSubtitles = null
         subtitleLanguageNormalizer?.stop()

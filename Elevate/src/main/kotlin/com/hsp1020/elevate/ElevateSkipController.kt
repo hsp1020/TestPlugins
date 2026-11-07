@@ -23,6 +23,7 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -431,7 +432,7 @@ internal class ElevateSkipController(private val application: Application) :
                 ElevateSkipRepository.identityDownloaded(header, file, duration)
             } ?: return@launch
             if (serial != generation || activeKey != key) return@launch
-            val result = ElevateSkipRepository.fetch(target)
+            val result = ElevateSkipRepository.fetch(target, preferLocal = offline != null)
             if (serial != generation || activeKey != key) return@launch
             custom = result
             publish()
@@ -1034,6 +1035,14 @@ internal object ElevateSkipRepository {
         header: DownloadObjects.DownloadHeaderCached, file: ExtractorUri, duration: Long
     ): Identity? {
         val type = file.tvType ?: header.type
+        CloudStreamApp.context?.let { ctx ->
+            ElevateOfflineMedia.identity(ctx, header.id)?.let { saved ->
+                return saved.copy(
+                    season = file.season, episode = file.episode ?: 0, duration = duration,
+                    anime = ElevateOfflineMedia.anime(ctx, header.id) ?: saved.anime
+                )
+            }
+        }
         val key = header.apiName + "|" + header.url
         val now = System.currentTimeMillis()
         val cached = synchronized(offlineIds) {
@@ -1071,7 +1080,12 @@ internal object ElevateSkipRepository {
             found
         } ?: return null
         return Identity(info.imdb, info.tmdb, info.mal, info.anilist, info.kitsu,
-            file.season, file.episode ?: 0, info.anime, info.movie, duration, null)
+            file.season, file.episode ?: 0, info.anime, info.movie, duration, null).also { resolved ->
+            CloudStreamApp.context?.let { ctx ->
+                ElevateOfflineMedia.putIdentity(ctx, header.id, resolved)
+                if (resolved.anime) ElevateOfflineMedia.putAnime(ctx, header.id, true)
+            }
+        }
     }
 
     /** Resolve ambiguous offline TvSeries using existing cached IDs and AIOStreams mapping. */
@@ -1080,6 +1094,9 @@ internal object ElevateSkipRepository {
     ): Boolean? {
         val animeTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
         if (file.tvType in animeTypes || header.type in animeTypes) return true
+        CloudStreamApp.context?.let { ctx ->
+            ElevateOfflineMedia.anime(ctx, header.id)?.let { return it }
+        }
         val identity = identityDownloaded(header, file, 0L) ?: return null
         if (identity.anime) return true
         // AIOStreams maps anime identities; it is not a generic title classifier.
@@ -1324,11 +1341,19 @@ internal object ElevateSkipRepository {
             emptyList()
         }
 
-    suspend fun fetch(i: Identity): List<VideoSkipStamp> = withContext(Dispatchers.IO) {
+    suspend fun fetch(i: Identity, preferLocal: Boolean = false): List<VideoSkipStamp> =
+        withContext(Dispatchers.IO) {
         if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) {
             return@withContext emptyList()
         }
         val now = System.currentTimeMillis()
+        if (preferLocal) {
+            CloudStreamApp.context?.let { ctx ->
+                ElevateOfflineMedia.stamps(ctx, i)?.let { saved ->
+                    return@withContext saved
+                }
+            }
+        }
         resultCache[i.key]?.takeIf { it.until > now }?.let {
             return@withContext it.data
         }
@@ -1351,6 +1376,9 @@ internal object ElevateSkipRepository {
         } ?: emptyList<VideoSkipStamp>()
         if (resultCache.size >= 400) resultCache.clear()
         resultCache[i.key] = Timed(result, now + if (result.isEmpty()) MISS else DAY)
+        if (result.isNotEmpty()) {
+            CloudStreamApp.context?.let { ElevateOfflineMedia.putStamps(it, i, result) }
+        }
         result
     }
 }

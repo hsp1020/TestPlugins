@@ -239,7 +239,10 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             TvType.Anime, TvType.AnimeMovie, TvType.OVA
         ))) || "anime" in tags || ("animation" in tags && "japanese" in tags)
 
-        if (offline != null && response == null && !isAnime) {
+        val savedAnime = if (offline != null && response == null)
+            ElevateOfflineMedia.anime(application, offline.parentId) else null
+        if (savedAnime == true) isAnime = true
+        if (offline != null && response == null && !isAnime && savedAnime == null) {
             // The native download generator often labels anime as TvSeries.
             // Resolve the saved title ID without blocking the player or picking English first.
             awaitingAnime = true

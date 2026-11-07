@@ -9,6 +9,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
 import com.lagradost.cloudstream3.ui.player.DownloadFileGenerator
 import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper.Companion.toSubtitleMimeType
@@ -43,6 +44,7 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.utils.SubtitleHelper
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment.Companion.getAutoSelectLanguageTagIETF
 
 /**
  * Localize plugin subtitle groups before the native picker builds its originalName groups.
@@ -114,6 +116,13 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     // Share original extractor descriptions through the existing URL metadata cache,
     // without modifying nameSuffix, which is part of the native track identity.
     companion object {
+        private val manualChoices = java.util.WeakHashMap<GeneratorPlayer, Int>()
+        internal fun markManualSubtitle(player: GeneratorPlayer, instance: Int) {
+            synchronized(manualChoices) { manualChoices[player] = instance }
+        }
+        private fun manuallyChanged(player: GeneratorPlayer, instance: Int): Boolean =
+            synchronized(manualChoices) { manualChoices[player] == instance }
+
         private val embeddedSdhLabel = Regex("""(?i)\b(?:SDH|CC|HOH|HI)\b|hearing[\s-]*impaired""")
         private val embeddedForcedLabel = Regex("""(?i)\bforced?\b|강제""")
         private val embeddedTrackPrefix = Regex("""^\d+:""")
@@ -439,7 +448,10 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         model = vm
         val observer = Observer<VideoLive<Set<SubtitleData>>> { event ->
             if (event != null && event.instance == vm.state.instance &&
-                fragment === candidate) normalize(vm)
+                fragment === candidate) {
+                trackLateDownloadedSubtitles(vm, candidate, event.value, event.instance)
+                normalize(vm)
+            }
         }
         vm.currentSubtitles.observe(candidate.viewLifecycleOwner, observer)
         removeObserver = { vm.currentSubtitles.removeObserver(observer) }
@@ -462,9 +474,75 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         fragment = null
         model = null
         scannedOfflineKey = null
+        trackedSubtitleInstance = -1
+        trackedDownloadedUrls = emptySet()
+    }
+
+    private var trackedSubtitleInstance = -1
+    private var trackedDownloadedUrls = emptySet<String>()
+    private fun trackLateDownloadedSubtitles(
+        vm: PlayerGeneratorViewModel, playerFragment: GeneratorPlayer,
+        subtitles: Set<SubtitleData>, instance: Int
+    ) {
+        if (vm.generator !is DownloadFileGenerator) return
+        if (trackedSubtitleInstance != instance) {
+            trackedSubtitleInstance = instance
+            trackedDownloadedUrls = emptySet()
+        }
+        val urls = subtitles.filter { it.origin == SubtitleOrigin.DOWNLOADED_FILE }
+            .map { it.url }.toSet()
+        val newlyAdded = urls - trackedDownloadedUrls
+        trackedDownloadedUrls = urls
+        if (newlyAdded.isNotEmpty()) playerFragment.view?.postDelayed({
+            autoSelectNewKorean(vm, playerFragment, instance)
+        }, 250L)
     }
 
     private var scannedOfflineKey: String? = null
+
+    private fun autoSelectNewKorean(
+        vm: PlayerGeneratorViewModel, playerFragment: GeneratorPlayer, instance: Int,
+        attempts: Int = 4
+    ) {
+        if (fragment !== playerFragment || vm.state.instance != instance ||
+            manuallyChanged(playerFragment, instance) ||
+            playerFragment.player.getCurrentPreferredSubtitle() != null ||
+            getAutoSelectLanguageTagIETF().substringBefore('-').lowercase() != "ko") return
+
+        val available = vm.state.subtitles.filter { sub ->
+            sub.origin == SubtitleOrigin.DOWNLOADED_FILE ||
+                sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO
+        }.filter { sub ->
+            sub.languageCode.orEmpty().lowercase().let { it == "ko" || it.startsWith("ko-") } ||
+                sub.originalName.startsWith("한국어") ||
+                sub.originalName.startsWith("Korean", true)
+        }
+        val chosen = available.minWithOrNull(compareBy<SubtitleData> {
+            subtitlePriority(it, playerFragment.playerView?.player?.currentTracks, null)
+        }) ?: return
+        if (playerFragment.playerView?.player == null) {
+            if (attempts > 0) playerFragment.view?.postDelayed({
+                autoSelectNewKorean(vm, playerFragment, instance, attempts - 1)
+            }, 250L)
+            return
+        }
+        val selected = runCatching {
+            GeneratorPlayer::class.java.getDeclaredMethod(
+                "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
+            ).apply { isAccessible = true }.invoke(playerFragment, chosen, false) as? Boolean
+        }.getOrNull() ?: return
+        if (selected) {
+            val player = playerFragment.player
+            player.saveData()
+            player.reloadPlayer(playerFragment.requireContext())
+            player.handleEvent(CSPlayerEvent.Play)
+        } else if (attempts > 0 &&
+            playerFragment.player.getCurrentPreferredSubtitle() == null) {
+            playerFragment.view?.postDelayed({
+                autoSelectNewKorean(vm, playerFragment, instance, attempts - 1)
+            }, 250L)
+        }
+    }
 
     /** Discover external-download [CS-ID] subtitles for offline playback. */
     private fun scanExternalOfflineSubtitles(vm: PlayerGeneratorViewModel) {
@@ -510,10 +588,14 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     }
             }
             if (found.isNotEmpty() && fragment === playerFragment && vm.state.instance == instance) {
-                vm.modifyState {
-                    val fresh = found.filter { sub -> subtitles.none { it.url == sub.url } }
-                    if (fresh.isEmpty()) this else add(fresh)
-                }
+                val existing = vm.state.subtitles.map { it.url }.toSet()
+                val fresh = found.filter { it.url !in existing }
+                if (fresh.isNotEmpty()) {
+                    vm.modifyState {
+                        if (this.instance != instance) this
+                        else add(fresh.filter { sub -> subtitles.none { it.url == sub.url } })
+                    }
+                 }
             }
         }
     }
