@@ -1738,8 +1738,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
 
                 if (role == Role.DIALOG_GRID || role == Role.DETAIL_RECOMMENDATIONS) {
-                    val baseWidth = (list as? AutofitRecyclerView)?.itemWidth
-                        ?.minus(dp(4))?.takeIf { it > 0 }
+                    // The real recommendation cell can be wider than AutofitRecyclerView.itemWidth.
+                    // Size the 16:9 image from the actual cell to avoid a smaller inset thumbnail.
+                    val actualWidth = if (role == Role.DETAIL_RECOMMENDATIONS && !shorts) {
+                        (view.width - dp(4)).takeIf { it > 0 }
+                    } else null
+                    val baseWidth = actualWidth
+                        ?: (list as? AutofitRecyclerView)?.itemWidth
+                            ?.minus(dp(4))?.takeIf { it > 0 }
                         ?: card.width.takeIf { it > 0 } ?: return
                     val width = if (shorts) {
                         minOf(baseWidth, (HomeChildItemAdapter.maxPosterSize * 1.4f).roundToInt()
@@ -1747,7 +1753,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     } else baseWidth
                     state.setCardWidth(width)
                     state.setImageHeight((width * (if (shorts) 16f / 9f else 9f / 16f)).roundToInt())
-                    if (role == Role.DETAIL_RECOMMENDATIONS) state.setUncroppedImage(!shorts)
                 } else {
                     val wide = HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 } ?: dp(180)
                     val narrow = HomeChildItemAdapter.minPosterSize.takeIf { it > 0 } ?: dp(114)
@@ -1930,7 +1935,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private val cardWidth = card.layoutParams.width
         private val cardHeight = card.layoutParams.height
         private val imageHeight = image.layoutParams.height
-        private val imageScaleType = image.scaleType
         private val titleWidth = title.layoutParams.width
         private var changedTitleWidth = false
         private val horizontal = Build.VERSION.SDK_INT >= 29 && title.isSingleLine
@@ -1974,13 +1978,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             changedImage = true
         }
 
-        fun setUncroppedImage(enabled: Boolean) {
-            val target = if (enabled) ImageView.ScaleType.FIT_CENTER else imageScaleType
-            if (image.scaleType != target) image.scaleType = target
-        }
-
         fun restoreSize() {
-            if (image.scaleType != imageScaleType) image.scaleType = imageScaleType
             if (changedTitleWidth) {
                 val params = title.layoutParams
                 if (params.width != titleWidth) {
