@@ -26,6 +26,7 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -1241,7 +1242,27 @@ internal class ElevatePlayerPanel(
         replaceRows(items)
     }
 
+    private fun traceEmbeddedChoice(stage: String, sub: SubtitleData?, reload: Boolean? = null) {
+        if (sub?.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) return
+        val media = fragment.playerView?.player
+        val tracks = media?.currentTracks?.groups.orEmpty()
+            .filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
+                (0 until group.length).map { index ->
+                    val format = group.getTrackFormat(index)
+                    "${format.id ?: "null"}:supported=${group.isTrackSupported(index)}:selected=${group.isTrackSelected(index)}"
+                }
+            }
+        android.util.Log.i("ElevateEmbeddedTrace",
+            "panel $stage instance=${vm.state.instance} enabled=" +
+                "${ElevateFeaturePrefs.enabled(ctx, ElevateFeature.EMBEDDED_SUBTITLES)} " +
+                "id=${sub.url} nativeId=${sub.getId()} " +
+                "media3=${media?.let(System::identityHashCode)} " +
+                "preferred=${fragment.player.getCurrentPreferredSubtitle()?.url} " +
+                "reload=$reload tracks=$tracks")
+    }
+
     private fun setSubtitle(sub: SubtitleData?) {
+        traceEmbeddedChoice("before", sub)
         browsingSubtitleGroup = false
         beforeImport = null
         resumeAfterFileImport = false
@@ -1254,7 +1275,9 @@ internal class ElevatePlayerPanel(
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
+            traceEmbeddedChoice("afterNative", sub, requiresReload)
             if (requiresReload) {
+                traceEmbeddedChoice("reloadRequested", sub, true)
                 currentLink()?.let { link ->
                     if (wasPlaying) resumeAfterSubtitleReloadInstance = vm.state.instance
                     GeneratorPlayer::class.java.getDeclaredMethod(

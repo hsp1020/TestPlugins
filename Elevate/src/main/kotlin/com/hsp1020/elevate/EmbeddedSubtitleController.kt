@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
 import android.text.SpannableStringBuilder
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -57,6 +58,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var previousEmbedded = emptySet<SubtitleData>()
     private var lastHandledSubtitles: Set<SubtitleData>? = null
     private var lastHandledInstance: Int? = null
+    private var lastTrackTrace: String? = null
+    private val traceTag = "ElevateEmbeddedTrace"
     private var manualOverride = false
     private var panelManualOverride = false
     private var manualSubtitleUrl: String? = null
@@ -163,6 +166,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     /** The integrated panel is a native user selection even without the old dialog. */
     fun onPanelSubtitleSelected(candidate: GeneratorPlayer, subtitle: SubtitleData?) {
+        Log.i(traceTag, "panelManual attached=${candidate === fragment} instance=${model?.state?.instance} id=${subtitle?.url} origin=${subtitle?.origin}")
         if (candidate !== fragment) return
         panelManualOverride = true
         manualOverride = true
@@ -415,6 +419,10 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
+        if (changedSource || changedPlayer) {
+            Log.i(traceTag, "sourceTransition instance=$nextInstance changedSource=$changedSource changedPlayer=$changedPlayer media3=${current?.let(System::identityHashCode)}")
+            lastTrackTrace = null
+        }
         if (changedSource) {
             panelManualOverride = false
             manualOverride = false
@@ -443,18 +451,32 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     private fun markActive(f: GeneratorPlayer, embedded: Set<SubtitleData>): Boolean =
         runCatching {
+            val wanted = embedded.mapTo(mutableSetOf<String>()) { it.url }
             val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
-                ?: return@runCatching false
+            if (helper == null) {
+                Log.i(traceTag, "markActive skipped=helperUnavailable wanted=$wanted")
+                return@runCatching false
+            }
             @Suppress("UNCHECKED_CAST")
             val existing = activeField?.get(helper) as? Set<SubtitleData>
-                ?: return@runCatching false
-            val trackIds = embedded.mapTo(mutableSetOf<String>()) { it.url }
+            if (existing == null) {
+                Log.i(traceTag, "markActive skipped=activeFieldUnavailable wanted=$wanted")
+                return@runCatching false
+            }
+            val before = existing.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+                .mapTo(mutableSetOf<String>()) { it.url }
             val updated = existing.filterNot {
-                it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in trackIds
+                it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in wanted
             }.toSet() + embedded
             if (updated != existing) helper.setActiveSubtitles(updated)
+            @Suppress("UNCHECKED_CAST")
+            val after = activeField?.get(helper) as? Set<SubtitleData>
+            val activeAfter = after.orEmpty().filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+                .mapTo(mutableSetOf<String>()) { it.url }
+            Log.i(traceTag, "markActive wanted=$wanted before=$before after=$activeAfter " +
+                "missing=${wanted - activeAfter} updated=${updated != existing}")
             true
-        }.getOrDefault(false)
+        }.onFailure { Log.w(traceTag, "markActive failed", it) }.getOrDefault(false)
 
     private fun selectEmbedded(tracks: Tracks) {
         val f = fragment ?: return
@@ -463,6 +485,20 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         trackDialog(f)
         restoreManualSubtitle(tracks)
         val subtitles = model?.state?.subtitles ?: return
+        val textTracks = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
+            (0 until group.length).map { index ->
+                val format = group.getTrackFormat(index)
+                "${format.id ?: "null"}:supported=${group.isTrackSupported(index)}:selected=${group.isTrackSelected(index)}"
+            }
+        }
+        val wanted = subtitles.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+            .map { it.url }
+        val trace = "instance=$instance media3=${System.identityHashCode(current)} " +
+            "wanted=$wanted tracks=$textTracks manual=$manualOverride panelManual=$panelManualOverride"
+        if (lastTrackTrace != trace) {
+            lastTrackTrace = trace
+            Log.i(traceTag, "tracks $trace")
+        }
 
         val available = LinkedHashMap<String, Pair<Tracks.Group, Int>>()
         for (group in tracks.groups) {
@@ -505,6 +541,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     fun start() {
+        Log.i(traceTag, "controllerStart")
         cleanExtraCaptions = SubtitlesFragment.getCurrentSavedStyle().removeCaptions
         SubtitlesFragment.applyStyleEvent += captionStyleListener
         application.registerActivityLifecycleCallbacks(this)
@@ -512,6 +549,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     fun stop() {
+        Log.i(traceTag, "controllerStop")
         SubtitlesFragment.applyStyleEvent -= captionStyleListener
         application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
@@ -540,6 +578,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         detach()
         fragment = candidate
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
+        Log.i(traceTag, "watch instance=${model?.state?.instance} " +
+            "media3=${candidate.playerView?.player?.let(System::identityHashCode)}")
         val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
             if (event != null && event.instance == model?.state?.instance) {
                 synchronizeSource()
@@ -602,6 +642,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         previousEmbedded = emptySet()
         lastHandledSubtitles = null
         lastHandledInstance = null
+        lastTrackTrace = null
         manualOverride = false
         panelManualOverride = false
         manualSubtitleUrl = null
