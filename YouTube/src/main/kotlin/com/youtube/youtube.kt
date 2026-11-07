@@ -2028,12 +2028,29 @@ class YoutubeProvider(
                             else title
                         }
                     }
-                    val sources = lockup.getMapKey("contentImage")
+                    // Video lockups nest their actual thumbnail list under thumbnailViewModel.
+                    // The old contentImage.image lookup skipped it and always fell back.
+                    val contentImage = lockup.getMapKey("contentImage")
+                    val primarySources = contentImage?.getMapKey("thumbnailViewModel")
                         ?.getMapKey("image")?.getListKey("sources")
-                    poster = YoutubeUtils.getBestThumbnail(sources)
+                        ?.takeIf { it.isNotEmpty() }
+                    val sources = primarySources ?: contentImage?.getMapKey("image")
+                        ?.getListKey("sources")
+                    val wide = sources?.asReversed()?.firstOrNull { source ->
+                        val entry = source as? Map<*, *> ?: return@firstOrNull false
+                        val width = (entry["width"] as? Number)?.toDouble() ?: return@firstOrNull false
+                        val height = (entry["height"] as? Number)?.toDouble() ?: return@firstOrNull false
+                        height > 0 && width / height in 1.70..1.85
+                    } as? Map<*, *>
+                    val wideUrl = wide?.get("url") as? String
+                    poster = wideUrl?.let { if (it.startsWith("//")) "https:$it" else it }
+                        ?: YoutubeUtils.getBestThumbnail(sources)
                         ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     if (traceRecommendationThumbnail)
-                        logRecommendationSource("lockup", videoId, sources, poster)
+                        logRecommendationSource(
+                            if (primarySources != null) "lockup.thumbnailViewModel" else "lockup.legacy",
+                            videoId, sources, poster
+                        )
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
