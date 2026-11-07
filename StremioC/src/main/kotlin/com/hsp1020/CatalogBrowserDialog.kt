@@ -1501,6 +1501,7 @@ internal class CatalogBrowserDialog(
         root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
             gravity = Gravity.BOTTOM
         })
+        BrowserPosterTrace.start(activity)
         grid.adapter = adapter
         posterProbe.start()
         grid.addItemDecoration(catalogEndDecoration)
@@ -1564,6 +1565,7 @@ internal class CatalogBrowserDialog(
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
             posterProbe.stop()
+            BrowserPosterTrace.stop()
             grid.adapter = null
             onDismiss()
             (homeTitleFocus ?: tvOriginFocus)?.takeIf { it.isAttachedToWindow }?.let { focus ->
@@ -1634,6 +1636,7 @@ internal class CatalogBrowserDialog(
         offset = 0
         autoFillCount = 0
         items.clear()
+        BrowserPosterTrace.clearCards()
         seen.clear()
         pageSignatures.clear()
         adapter.submitList(emptyList())
@@ -1836,6 +1839,7 @@ internal class CatalogBrowserDialog(
             StremioCMetaPerf.log("BROWSER_SNAPSHOT", StremioCMetaPerf.key(next.url),
                 "origin=home reuse=${home.items.size} genre=none")
             items.addAll(home.items)
+            BrowserPosterTrace.watch(home.items)
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
@@ -1996,6 +2000,7 @@ internal class CatalogBrowserDialog(
                     return@launch
                 }
                 val fresh = page.filter { seen.add(it.url) }
+                BrowserPosterTrace.watch(fresh)
                 val repeated = !pageSignatures.add(page.map { it.url })
                 items.addAll(fresh)
                 offset += rawCount 
