@@ -455,10 +455,39 @@ internal object PosterWipe {
         if (image.drawable == null) image.setImageResource(R.drawable.default_cover)
     }
 
-    /** Warm the existing Coil cache without attaching or modifying an ImageView. */
-    suspend fun prefetch(context: Context, url: String, width: Int, height: Int): Result {
+    /** Warm native cards using the existing singleton Coil loader and native request headers. */
+    suspend fun prefetchNative(
+        context: Context, url: String, width: Int, height: Int,
+        headers: Map<String, String>? = null
+    ): Result {
         val outcome = try {
-            loadSharedImage(context, url, Size(width, height), Scale.FILL, "actor_prefetch")
+            val networkHeaders = NetworkHeaders.Builder().apply {
+                this["User-Agent"] = USER_AGENT
+                headers?.forEach { (key, value) -> this[key] = value }
+            }.build()
+            val request = ImageRequest.Builder(context.applicationContext).data(url)
+                .size(Size(width, height)).scale(Scale.FILL).precision(Precision.INEXACT)
+                .httpHeaders(networkHeaders).build()
+            SingletonImageLoader.get(context.applicationContext).execute(request)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return Result(false, error = failure.javaClass.simpleName)
+        }
+        return when (outcome) {
+            is SuccessResult -> Result(true, source = outcome.dataSource.name)
+            is ErrorResult -> Result(false, error = outcome.throwable.javaClass.simpleName)
+            else -> Result(false, error = "no_image")
+        }
+    }
+
+    /** Warm custom artwork without attaching or modifying an ImageView. */
+    suspend fun prefetch(
+        context: Context, url: String, width: Int, height: Int,
+        origin: String = "actor_prefetch"
+    ): Result {
+        val outcome = try {
+            loadSharedImage(context, url, Size(width, height), Scale.FILL, origin)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

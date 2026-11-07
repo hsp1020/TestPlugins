@@ -715,6 +715,7 @@ internal class CatalogBrowserDialog(
     }
     private val grid = AutofitRecyclerView(activity)
     private val posterProbe = CatalogPosterProbe(grid, "browser") { items }
+    private val posterPreloader = CatalogPosterPreloader("browser")
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
@@ -1565,6 +1566,7 @@ internal class CatalogBrowserDialog(
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
             posterProbe.stop()
+            posterPreloader.close()
             BrowserPosterTrace.stop()
             grid.adapter = null
             onDismiss()
@@ -1636,6 +1638,7 @@ internal class CatalogBrowserDialog(
         offset = 0
         autoFillCount = 0
         items.clear()
+        posterPreloader.reset()
         BrowserPosterTrace.clearCards()
         seen.clear()
         pageSignatures.clear()
@@ -1840,6 +1843,7 @@ internal class CatalogBrowserDialog(
                 "origin=home reuse=${home.items.size} genre=none")
             items.addAll(home.items)
             BrowserPosterTrace.watch(home.items)
+            posterPreloader.enqueue(activity, home.items)
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
@@ -2001,6 +2005,7 @@ internal class CatalogBrowserDialog(
                 }
                 val fresh = page.filter { seen.add(it.url) }
                 BrowserPosterTrace.watch(fresh)
+                posterPreloader.enqueue(activity, fresh)
                 val repeated = !pageSignatures.add(page.map { it.url })
                 items.addAll(fresh)
                 offset += rawCount 

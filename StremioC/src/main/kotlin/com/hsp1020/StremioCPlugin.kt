@@ -257,6 +257,7 @@ class StremioCPlugin : Plugin() {
 
     override fun beforeUnload() {
         isUnloaded = true
+        CatalogPosterPreloads.home.reset()
         reloadGeneration++
         reloadScope.cancel()
         pluginIoScope.cancel()

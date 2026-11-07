@@ -2582,6 +2582,7 @@ open class StremioC(
 
             val nextSkip = currentSkip + resultPair.second
             filteredItems.forEach { cursors[it.url] = nextSkip }
+            CatalogPosterPreloads.home.enqueue(CloudStreamApp.context, filteredItems)
 
             newHomePageResponse(
                 listOf(HomePageList(request.name, filteredItems)),
