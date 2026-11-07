@@ -1,6 +1,11 @@
 package com.hsp1020.elevate
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
+import android.os.Build
+import android.os.Process
+import android.util.Log
 import com.lagradost.cloudstream3.ui.player.PlayerView
 import com.lagradost.cloudstream3.ui.player.AbstractPlayerFragment
 import androidx.cardview.widget.CardView
@@ -109,6 +114,7 @@ class ElevatePlugin : Plugin() {
 
     override fun load(context: Context) {
         val application = context.applicationContext as? Application ?: return
+        logProcessExitHistoryOnce(application)
         val token = generation.incrementAndGet()
         openSettings = { ctx ->
             (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
@@ -143,6 +149,54 @@ class ElevatePlugin : Plugin() {
                 android.util.Log.e("Elevate", "Feature initialization failed", failure)
             }
         }
+    }
+
+    /** One diagnostic snapshot per app process; plugin reloads in the same process do not repeat it. */
+    private fun logProcessExitHistoryOnce(application: Application) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val pid = Process.myPid()
+        val processKey = "$pid:${Process.getStartElapsedRealtime()}"
+        val prefs = application.getSharedPreferences("ElevateExitHistory", Context.MODE_PRIVATE)
+        if (prefs.getString("logged_process", null) == processKey) return
+        prefs.edit().putString("logged_process", processKey).apply()
+
+        Thread({
+            try {
+                val manager = application.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val records = manager.getHistoricalProcessExitReasons(application.packageName, 0, 0)
+                Log.i("ElevateExitHistory", "currentPid=$pid historyCount=${records.size} (newest first; PSS/RSS are last samples, not peak memory)")
+                records.take(32).forEachIndexed { index, info ->
+                    val reason = when (info.reason) {
+                        ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+                        ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+                        ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+                        ApplicationExitInfo.REASON_CRASH -> "CRASH"
+                        ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+                        ApplicationExitInfo.REASON_ANR -> "ANR"
+                        ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INITIALIZATION_FAILURE"
+                        ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
+                        ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCE_USAGE"
+                        ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+                        ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+                        ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+                        ApplicationExitInfo.REASON_OTHER -> "OTHER"
+                        ApplicationExitInfo.REASON_FREEZER -> "FREEZER"
+                        ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
+                        ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
+                        else -> "UNKNOWN"
+                    }
+                    val time = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", java.util.Locale.US)
+                        .format(java.util.Date(info.timestamp))
+                    val description = info.description?.replace('\n', ' ')?.replace('\r', ' ')?.take(240) ?: "-"
+                    Log.i("ElevateExitHistory",
+                        "exit[$index] pid=${info.pid} process=${info.processName} time=$time " +
+                            "timestampMs=${info.timestamp} reason=$reason(${info.reason}) status=${info.status} " +
+                            "importance=${info.importance} pssKb=${info.pss} rssKb=${info.rss} description=$description")
+                }
+            } catch (failure: Throwable) {
+                Log.w("ElevateExitHistory", "Unable to query process exit history", failure)
+            }
+        }, "ElevateExitHistory").start()
     }
 
     private fun enabled(feature: ElevateFeature): Boolean =
