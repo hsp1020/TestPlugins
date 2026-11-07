@@ -1283,8 +1283,8 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
-        const val HOME_FOREGROUND_CONCURRENCY = 6
-        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 6
+        const val HOME_FOREGROUND_CONCURRENCY = 12
+        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 12
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
         private const val HOME_RESULTS_REUSE_MS = 60_000L
         private data class CachedHomeResult(val result: Pair<List<SearchResponse>, Int>, val savedAt: Long)

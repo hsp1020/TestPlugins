@@ -42,6 +42,10 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewTreeObserver
 import android.widget.ImageView
+import coil3.result
+import coil3.request.ImageResult
+import coil3.request.SuccessResult
+import coil3.request.ErrorResult
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
@@ -2059,10 +2063,13 @@ internal class CatalogPosterProbe(
 ) {
     private data class Observation(
         val cardKey: String,
+        val posterKey: String,
         val image: ImageView?,
         var drawable: android.graphics.drawable.Drawable?,
         val firstAt: Long,
-        var shown: Boolean = false
+        var shown: Boolean = false,
+        var coilResult: ImageResult? = null,
+        var coilVisible: Boolean = false
     )
     private val seen = java.util.IdentityHashMap<View, Observation>()
     private var active = false
@@ -2109,7 +2116,9 @@ internal class CatalogPosterProbe(
                 StremioCMetaPerf.log("CARD_BIND", cardKey,
                     "surface=$surface surfaceKey=$surfaceKey position=$position " +
                         "posterKey=${StremioCMetaPerf.key(original)} kind=$kind hasView=${img != null}")
-                seen[card] = Observation(cardKey, img, img?.drawable, now)
+                seen[card] = Observation(
+                    cardKey, StremioCMetaPerf.key(original), img, img?.drawable, now
+                )
                 if (img?.drawable != null) {
                     StremioCMetaPerf.log("CARD_DRAWABLE", cardKey,
                         "surface=$surface state=initial sinceBindMs=0 " +
@@ -2118,7 +2127,40 @@ internal class CatalogPosterProbe(
             }
             val state = seen[card] ?: continue
             val image = state.image ?: continue
+            val result = image.result
+            if (state.coilResult !== result) {
+                state.coilResult = result
+                state.coilVisible = false
+                if (result != null) {
+                    val dataKey = StremioCMetaPerf.key(result.request.data.toString())
+                    val matchesPoster = dataKey == state.posterKey
+                    when (result) {
+                        is SuccessResult -> StremioCMetaPerf.log("CARD_COIL_RESULT", cardKey,
+                            "surface=$surface source=${result.dataSource} " +
+                                "sinceBindMs=${now - state.firstAt} " +
+                                "matched=$matchesPoster dataKey=$dataKey " +
+                                "memoryKey=${result.memoryCacheKey != null} " +
+                                "diskKey=${result.diskCacheKey != null} " +
+                                "sampled=${result.isSampled} placeholderCached=${result.isPlaceholderCached}")
+                        is ErrorResult -> StremioCMetaPerf.log("CARD_COIL_ERROR", cardKey,
+                            "surface=$surface sinceBindMs=${now - state.firstAt} " +
+                                "matched=$matchesPoster dataKey=$dataKey " +
+                                "reason=${result.throwable.javaClass.simpleName}")
+                    }
+                }
+            }
             val drawable = image.drawable
+            if (result is SuccessResult && !state.coilVisible &&
+                StremioCMetaPerf.key(result.request.data.toString()) == state.posterKey &&
+                drawable != null && image.isShown && image.alpha > 0f &&
+                image.width > 0 && image.height > 0) {
+                state.coilVisible = true
+                StremioCMetaPerf.log("CARD_COIL_VISIBLE", cardKey,
+                    "surface=$surface source=${result.dataSource} " +
+                        "sinceBindMs=${now - state.firstAt} " +
+                        "size=${drawable.intrinsicWidth}x${drawable.intrinsicHeight} " +
+                        "note=result_ready_view_shown")
+            }
             if (state.drawable !== drawable) {
                 state.drawable = drawable
                 StremioCMetaPerf.log("CARD_DRAWABLE", cardKey,
