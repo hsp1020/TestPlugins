@@ -2708,6 +2708,7 @@ open class StremioC(
         var fetchedKitsuId: String? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
+        var resolvedTmdbMediaType: String? = null
 
         if (originalMappingId != null) {
             val candidate = run {
@@ -2728,6 +2729,7 @@ open class StremioC(
             if (resolved != null) {
                 resolvedImdbId = resolved.imdbId
                 resolvedTmdbId = resolved.tmdbId?.toString()
+                resolvedTmdbMediaType = resolved.tmdbMediaType
                 fetchedAniListId = resolved.aniListId
                 fetchedMalId = resolved.malId
                 fetchedKitsuId = resolved.kitsuId
@@ -2830,6 +2832,7 @@ open class StremioC(
             fetchedMalId = fetchedMalId,
             fetchedKitsuId = fetchedKitsuId,
             resolvedTmdbId = resolvedTmdbId,
+            resolvedTmdbMediaType = resolvedTmdbMediaType,
             resolvedIdHolder = resolvedIdHolder,
             requestedAnimeId = requestedAnimeId,
             prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
@@ -3394,7 +3397,8 @@ open class StremioC(
         val simklId: Int? = null, val tvdbId: Int? = null,
         val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?,
         val imdbId: String?, val tvdbSeason: Int?, val imdbSeason: Int?,
-        val traktSeason: Int?, val tmdbFromEpisode: Int? = null
+        val traktSeason: Int?, val tmdbFromEpisode: Int? = null,
+        val tmdbMediaType: String? = null
     )
 
     internal suspend fun seasonTrackerIds(imdbId: String, season: Int): SeasonTrackerIds? {
@@ -3561,6 +3565,11 @@ open class StremioC(
                 malId = ids.get("malId").intOrNull()?.takeIf { it > 0 },
                 aniListId = ids.get("anilistId").intOrNull()?.takeIf { it > 0 },
                 tmdbId = ids.get("themoviedbId").intOrNull()?.takeIf { it > 0 },
+                tmdbMediaType = when (data.get("type").textOrNull()?.uppercase()) {
+                    "TV" -> "tv"
+                    "MOVIE" -> "movie"
+                    else -> null
+                },
                 simklId = ids.get("simklId").intOrNull()?.takeIf { it > 0 },
                 tvdbId = ids.get("thetvdbId").intOrNull()?.takeIf { it > 0 },
                 tmdbSeason = tmdbSeason,
@@ -4889,6 +4898,7 @@ open class StremioC(
             fetchedMalId: Int? = null,
             fetchedKitsuId: String? = null,
             resolvedTmdbId: String? = null,
+            resolvedTmdbMediaType: String? = null,
             resolvedIdHolder: Array<String?>? = null,
             requestedAnimeId: String? = null,
             prefetchedAnimeMapping: Deferred<AnimeSeasonMapping?>? = null,
@@ -4929,14 +4939,23 @@ open class StremioC(
                     ?: detailedEntry.id?.takeIf { nonstandardType && it.startsWith("tmdb:") }
                         ?.removePrefix("tmdb:")
             var tmdbType = provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type)
+            if (nonstandardType) {
+                tmdbType = when {
+                    tmdbIdStr != null && tmdbIdStr == resolvedTmdbId -> resolvedTmdbMediaType
+                    tmdbIdStr != null && tmdbIdStr == extraAnimeMapping?.tmdbId?.toString() ->
+                        extraAnimeMapping?.tmdbMediaType
+                    else -> null
+                }
+            }
             if (tmdbType != null && tmdbIdStr == null && finalImdbId?.startsWith("tt") == true &&
                 preFetchedFind?.second == tmdbType && preFetchedFindImdbId == finalImdbId) {
                 tmdbIdStr = preFetchedFind.first
             }
             val lookupImdbId = finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) }
             val lookupMediaType = tmdbType
+            val needsTmdbFind = if (nonstandardType) tmdbType == null else tmdbIdStr == null
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (
-                (tmdbIdStr == null || nonstandardType) && lookupImdbId != null
+                needsTmdbFind && lookupImdbId != null
             ) {
                 async(Dispatchers.IO) {
                     provider.fetchTmdbFindForLoad(lookupImdbId, lookupMediaType)
@@ -5010,17 +5029,29 @@ open class StremioC(
 
             if (findApiDeferred != null) {
                 val findResult = run { findApiDeferred.await() }
-                if (findResult != null && (tmdbType == null || findResult.second == tmdbType)) {
-                    if (tmdbIdStr == null) tmdbIdStr = findResult.first
-                    if (tmdbType == null && tmdbIdStr == findResult.first) tmdbType = findResult.second
+                if (findResult != null && (nonstandardType || findResult.second == tmdbType)) {
+                    if (nonstandardType) {
+                        // Keep the IMDb find result's ID and type together.
+                        tmdbIdStr = findResult.first
+                        tmdbType = findResult.second
+                    } else if (tmdbIdStr == null) tmdbIdStr = findResult.first
                 }
             }
-            if (nonstandardType && tmdbType == null && tmdbIdStr != null) {
-                // No IMDb match: retain the legacy single-movie/episodic fallback.
-                tmdbType = if (isSingleMovie(finalType, finalVideos) || finalVideos.isNullOrEmpty())
-                    "movie" else "tv"
+            var probedTmdbDetail: TmdbDetailResponse? = null
+            if (nonstandardType && tmdbType == null &&
+                tmdbIdStr?.toIntOrNull()?.let { it > 0 } == true) {
+                // Direct TMDB ID with no type: check actual endpoints, never video counts.
+                for (candidate in listOf("movie", "tv")) {
+                    val detail = provider.fetchTmdbDetailForLoad(tmdbIdStr!!, candidate)
+                    if (detail != null) {
+                        tmdbType = candidate
+                        probedTmdbDetail = detail
+                        break
+                    }
+                }
             }
-            val resolvedSimklJob = simklJob ?: if (nonstandardType) StremioC.requestSimklSuggestions(
+            val resolvedSimklJob = simklJob ?: if (nonstandardType &&
+                (tmdbType == "movie" || tmdbType == "tv")) StremioC.requestSimklSuggestions(
                 if (tmdbType == "movie") "movie" else "series",
                 tmdbIdStr, finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) },
                 recommendationMalId
@@ -5030,7 +5061,7 @@ open class StremioC(
             if (tmdbType != null && tmdbIdStr != null) {
                 try {
                     val refinedMediaType = tmdbType
-                    val safePrefetchedDetail = preFetchedDetail?.takeIf {
+                    val safePrefetchedDetail = probedTmdbDetail ?: preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
                     tmdbData = run {
