@@ -331,7 +331,11 @@ class ElevateSettingsFragment : DialogFragment() {
                         }
                         if (selected != null && saved == null) ExternalDownloads.clearSelection(ctx)
                         var unselected = saved == null || apps.none { it.second == saved }
-                        addView(object : Spinner(ctx) {
+                        val selectorRow = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                        }
+                        selectorRow.addView(object : Spinner(ctx) {
                             private var openedByUser = false
                             override fun performClick(): Boolean {
                                 openedByUser = true
@@ -368,8 +372,21 @@ class ElevateSettingsFragment : DialogFragment() {
                             }
                             setSelection(apps.indexOfFirst { it.second == saved }.coerceAtLeast(0))
                         }, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                         ))
+                        selectorRow.addView(android.widget.Button(ctx).apply {
+                            text = "Sync Now"
+                            isAllCaps = false
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                            applyElevateNativeFont()
+                            minimumWidth = 0
+                            minimumHeight = 0
+                            setPadding(dp(12), 0, dp(12), 0)
+                            setOnClickListener { ExternalDownloads.syncNow(ctx.applicationContext) }
+                        }, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)
+                        ).apply { marginStart = dp(10) })
+                        addView(selectorRow)
                     }
                 } else null
                 row.addView(SwitchCompat(ctx).apply {

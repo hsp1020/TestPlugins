@@ -494,11 +494,11 @@ internal object ExternalDownloads {
     fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) =
         handoffBatch(activity, listOf(queued to link))
 
-    @Synchronized private fun register(c: Context, p: Pending, name: String, size: Long, base: String?) {
-        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return
+    @Synchronized private fun register(c: Context, p: Pending, name: String, size: Long, base: String?): Boolean {
+        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return false
         if (VideoDownloadManager.getDownloadFileInfo(c, p.id) != null) {
             removePending(c, p.id)
-            return
+            return false
         }
         // The same metadata keys and filesystem resolution used by native downloads.
         c.setKey(
@@ -506,7 +506,7 @@ internal object ExternalDownloads {
             DownloadObjects.DownloadedFileInfo(size, "", name, basePath = base)
         )
         if (VideoDownloadManager.getDownloadFileInfo(c, p.id) == null) {
-            return
+            return false
         }
         c.setKey(
             getFolderName(DOWNLOAD_EPISODE_CACHE, p.parentId.toString()), p.id.toString(),
@@ -523,6 +523,7 @@ internal object ExternalDownloads {
             )
         )
         removePending(c, p.id)
+        return true
     }
 
     private fun isVideo(name: String) =
@@ -604,24 +605,33 @@ internal object ExternalDownloads {
         main.postDelayed(task, delayMs)
     }
 
+    /** A user-triggered scan uses the same matching and registration as automatic recognition. */
+    fun syncNow(c: Context) = checkFolder(c, manual = true)
+
     /** Event-driven scan with a single non-blocking stability delay per batch. */
-    fun checkFolder(c: Context) {
+    fun checkFolder(c: Context, manual: Boolean = false) {
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) {
+            if (manual) toast(c, "Enable External Downloads first.")
             return
         }
         if (!checking.compareAndSet(false, true)) {
+            if (manual) toast(c, "Download scan is already running.")
             return
         }
         scanner.launch {
             var unstableFile = false
+            var registered = 0
+            var scanError: String? = null
             try {
                 val requests = pending(c)
                 if (requests.isEmpty()) {
+                    if (manual) scanError = "No pending external downloads."
                     return@launch
                 }
                 val base = basePath(c)
                 val dir = directory(c, base)
                 if (dir == null) {
+                    if (manual) scanError = "CloudStream download folder unavailable."
                     return@launch
                 }
                 // One directory listing, one lookup map, no nested filtering or per-file sleep.
@@ -668,19 +678,25 @@ internal object ExternalDownloads {
                     if (!name.equals(pending.expectedFile, ignoreCase = true)) {
                         continue
                     }
-                    runCatching { register(c, pending, name, size, base) }
-                        .onFailure {
-                            android.util.Log.w("ElevateExternal", "Failed to register completed file", it)
-                        }
+                    if (runCatching { register(c, pending, name, size, base) }
+                            .onFailure {
+                                android.util.Log.w("ElevateExternal", "Failed to register completed file", it)
+                            }.getOrDefault(false)) registered++
                 }
             } catch (e: Exception) {
                 android.util.Log.w("ElevateExternal", "Cannot inspect CloudStream download folder", e)
+                if (manual) scanError = "Cannot scan CloudStream download folder."
             } finally {
                 checking.set(false)
                 if (unstableFile && unstableRetries < 2) {
                     unstableRetries++
                     scheduleCheck(c, 6_000L)
                 } else if (!unstableFile) unstableRetries = 0
+                if (manual) toast(c, scanError ?: if (registered > 0) {
+                    "Synced $registered download(s) to Library."
+                } else {
+                    "No matching completed files (${pending(c).size} pending)."
+                })
             }
         }
     }
