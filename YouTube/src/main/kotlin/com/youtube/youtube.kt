@@ -1837,7 +1837,10 @@ class YoutubeProvider(
                 }
                 val views = viewRaw.ifBlank { "N/A" }
 
-                val poster = YoutubeUtils.getShortsSearchPoster(videoId)
+                val poster = YoutubeUtils.getBestThumbnail(shortsData.getMapKey("thumbnail"))
+                    ?: YoutubeUtils.getBestThumbnail(shortsData.getMapKey("thumbnailViewModel")?.getMapKey("image"))
+                    ?: YoutubeUtils.getBestThumbnail(shortsData.getMapKey("contentImage")?.getMapKey("image"))
+                    ?: YoutubeUtils.getShortsSearchPoster(videoId)
 
                 val currentList = if (isSearch) searchShorts else homeShorts
                 val contextTag = if (isSearch) "?ctx=search" else "?ctx=home"
@@ -1848,7 +1851,7 @@ class YoutubeProvider(
                 
                 val newShortEp = newEpisode(finalUrl) {
                     this.name = title
-                    this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
+                    this.posterUrl = poster
                     this.description = descText
                 }
                 addToShortsList(currentList, newShortEp)
@@ -3069,9 +3072,10 @@ class YoutubeProvider(
                             vidTitle = "[$membershipLabel] $vidTitle"
                         }
 
-                        val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
-                            ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
-                            ?: YoutubeUtils.buildThumbnailFromId(vidId)
+                        val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"])
+                            ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources"))
+                            ?: if (isShortsTab) YoutubeUtils.getShortsEpisodeThumbnail(vidId)
+                               else YoutubeUtils.buildThumbnailFromId(vidId)
 
                         var metaString = getEpisodeMetaString(renderer)
                         if (metaString.isBlank()) {
@@ -3099,8 +3103,7 @@ class YoutubeProvider(
                         val videoUrl = if (isShortsTab) "$mainUrl/shorts/$vidId" else "$mainUrl/watch?v=$vidId"
                         collectTo.add(newEpisode(videoUrl) {
                             this.name = vidTitle
-                            this.posterUrl = if (isShortsTab)
-                                vidId?.let(YoutubeUtils::getShortsEpisodeThumbnail) ?: thumb else thumb
+                            this.posterUrl = thumb
                             this.description = metaString
                         })
                         break 
@@ -3580,6 +3583,7 @@ class YoutubeProvider(
                 val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                 val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
                 val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
+                Log.i("YouTubeChannel", "event=CHANNEL_OPEN channel=$cleanUrl limit=$maxPagesLimit metadataHtmlRequests=1")
 
                 var channelDescription = channelDescriptionFromData(data)
                 var channelDescSource = if (channelDescription.isNotBlank()) "videos_metadata" else "none"
@@ -3671,23 +3675,41 @@ class YoutubeProvider(
 
                 suspend fun fetchTab(tabUrl: String): List<Episode> {
                     val cacheKey = "$tabUrl|$lang|$maxPagesLimit"
-                    synchronized(channelTabCache) {
+                    val tabName = if (tabUrl.endsWith("/shorts")) "shorts" else "videos"
+                    val startedMs = System.currentTimeMillis()
+                    var cacheStatus = "MISS"
+                    val cachedEpisodes = synchronized(channelTabCache) {
                         val cached = channelTabCache[cacheKey]
                         if (cached != null &&
-                            System.currentTimeMillis() - cached.savedAtMs in 0L..CHANNEL_TAB_REUSE_MS) {
+                            startedMs - cached.savedAtMs in 0L..CHANNEL_TAB_REUSE_MS) {
+                            cacheStatus = "HIT"
                             cached.episodes.map { it.copy() }
                         } else {
-                            if (cached != null) channelTabCache.remove(cacheKey)
+                            if (cached != null) {
+                                cacheStatus = "EXPIRED"
+                                channelTabCache.remove(cacheKey)
+                            }
                             null
                         }
-                    }?.let { return it }
+                    }
+                    if (cachedEpisodes != null) {
+                        Log.i("YouTubeChannel",
+                            "event=CHANNEL_CACHE tab=$tabName status=HIT count=${cachedEpisodes.size} ttlMs=$CHANNEL_TAB_REUSE_MS")
+                        return cachedEpisodes
+                    }
+                    Log.i("YouTubeChannel",
+                        "event=CHANNEL_CACHE tab=$tabName status=$cacheStatus limit=$maxPagesLimit")
                     val tabEpisodes = mutableListOf<Episode>()
                     var cacheable = true
+                    var pagesFetchedLocal = 1
                     try {
                         // The channel header already fetched and parsed /videos.
                         val tabData = if (tabUrl == channelUrl) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
-                            extractYtInitialData(tabHtml) ?: return emptyList()
+                            extractYtInitialData(tabHtml) ?: run {
+                                Log.w("YouTubeChannel", "event=CHANNEL_ERROR tab=$tabName page=1 reason=initial_data_missing")
+                                return emptyList()
+                            }
                         }
 
                         var initialItems: List<*>? = null
@@ -3753,7 +3775,8 @@ class YoutubeProvider(
                             currentToken = findContinuationFromItems(conts)
                         }
 
-                        var pagesFetchedLocal = 1
+                        Log.i("YouTubeChannel",
+                            "event=CHANNEL_INITIAL tab=$tabName page=1 count=${tabEpisodes.size} htmlReused=${tabUrl == channelUrl} next=${!currentToken.isNullOrBlank()}")
                         while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
                             try {
                                 pagesFetchedLocal += 1
@@ -3775,26 +3798,49 @@ class YoutubeProvider(
                                 val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                                 if (jsonResponse == null) {
                                     cacheable = false
+                                    Log.w("YouTubeChannel",
+                                        "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=response_invalid")
                                     break
                                 }
                                 val javaContinuationItems = findContinuationItemsRecursive(jsonResponse)
                                 if (javaContinuationItems == null) {
                                     cacheable = false
+                                    Log.w("YouTubeChannel",
+                                        "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=continuation_items_missing")
                                     break
                                 }
+                                val beforeCount = tabEpisodes.size
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, tabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
+                                Log.i("YouTubeChannel",
+                                    "event=CHANNEL_PAGE tab=$tabName page=$pagesFetchedLocal added=${tabEpisodes.size - beforeCount} total=${tabEpisodes.size} next=${!currentToken.isNullOrBlank()}")
                             } catch (e: Exception) {
                                 cacheable = false
+                                Log.w("YouTubeChannel",
+                                    "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName}")
                                 break
                             }
                         }
-                        if (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit) {
+                        if (!currentToken.isNullOrBlank() && apiKey.isNullOrBlank()) {
+                            cacheable = false
+                            Log.w("YouTubeChannel",
+                                "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=api_key_missing")
+                        } else if (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit) {
                             cacheable = false
                         }
                     } catch (e: Exception) {
                         cacheable = false
+                        Log.w("YouTubeChannel",
+                            "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName}")
                         logError(e)
+                    }
+                    val duplicates = tabEpisodes.size - tabEpisodes.distinctBy {
+                        YoutubeUtils.extractYoutubeId(it.data) ?: it.data
+                    }.size
+                    val stopReason = when {
+                        !cacheable -> "error"
+                        pagesFetchedLocal >= maxPagesLimit -> "limit"
+                        else -> "end_of_feed"
                     }
                     if (cacheable && tabEpisodes.isNotEmpty()) {
                         synchronized(channelTabCache) {
@@ -3803,6 +3849,10 @@ class YoutubeProvider(
                             )
                         }
                     }
+                    Log.i("YouTubeChannel",
+                        "event=CHANNEL_RESULT tab=$tabName pages=$pagesFetchedLocal limit=$maxPagesLimit " +
+                            "total=${tabEpisodes.size} duplicates=$duplicates stop=$stopReason " +
+                            "cacheStored=${cacheable && tabEpisodes.isNotEmpty()} elapsedMs=${System.currentTimeMillis() - startedMs}")
                     return tabEpisodes
                 }
                 
@@ -3814,6 +3864,8 @@ class YoutubeProvider(
 
                 val videosEpisodes = pair.first
                 val shortsEpisodes = pair.second
+                Log.i("YouTubeChannel",
+                    "event=CHANNEL_TOTAL channel=$cleanUrl videos=${videosEpisodes.size} shorts=${shortsEpisodes.size} limit=$maxPagesLimit")
 
                 val allEpisodes = mutableListOf<Episode>()
 

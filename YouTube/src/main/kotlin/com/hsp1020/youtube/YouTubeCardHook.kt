@@ -135,6 +135,83 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var pendingTimeSeek: PendingTimeSeek? = null
     private var seekPlayer: Media3Player? = null
     private var seekListener: Media3Player.Listener? = null
+    private var seekHostView: Any? = null
+    private var seekHostOriginalCallback: Any? = null
+    private var seekHostCallbackProxy: Any? = null
+
+    private fun restoreTimeSeekHostCallback() {
+        val view = seekHostView
+        val original = seekHostOriginalCallback
+        val wrapper = seekHostCallbackProxy
+        if (view != null && original != null && wrapper != null) {
+            runCatching {
+                val getter = view.javaClass.getMethod("getCallbacks")
+                if (getter.invoke(view) === wrapper) {
+                    view.javaClass.getMethod("setCallbacks", getter.returnType).invoke(view, original)
+                }
+            }.onFailure { Log.w("YouTubeTimestamp", "event=callback_restore_failed", it) }
+        }
+        seekHostView = null
+        seekHostOriginalCallback = null
+        seekHostCallbackProxy = null
+    }
+
+    /** Preserve the native callback while observing its PlayerAttachedEvent dispatch. */
+    private fun observeTimeSeekPlayerAttachment(fragment: GeneratorPlayer, onAttached: () -> Unit) {
+        var owner: Class<*>? = fragment.javaClass
+        var view: Any? = null
+        while (owner != null && view == null) {
+            val field = try { owner.getDeclaredField("playerHostView") }
+                catch (_: NoSuchFieldException) { null }
+            if (field != null) {
+                view = runCatching {
+                    field.isAccessible = true
+                    field.get(fragment)
+                }.getOrNull()
+            }
+            owner = owner.superclass
+        }
+        if (view == null) {
+            logTimeSeek("callback_wait", "reason=player_host_missing")
+            return
+        }
+        if (seekHostView === view && seekHostCallbackProxy != null) return
+        restoreTimeSeekHostCallback()
+        try {
+            val getter = view.javaClass.getMethod("getCallbacks")
+            val original = getter.invoke(view) ?: run {
+                logTimeSeek("callback_wait", "reason=native_callback_missing")
+                return
+            }
+            val listenerType = getter.returnType
+            val wrapper = java.lang.reflect.Proxy.newProxyInstance(
+                listenerType.classLoader, arrayOf(listenerType)
+            ) { proxy, method, args ->
+                when (method.name) {
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "equals" -> proxy === args?.firstOrNull()
+                    "toString" -> "YouTubeTimeSeekCallback"
+                    else -> {
+                        // Native player functionality must always execute first.
+                        val result = method.invoke(original, *(args ?: emptyArray()))
+                        if (method.name == "playerUpdated") {
+                            logTimeSeek("player_attached",
+                                "playerPresent=${args?.firstOrNull() != null}")
+                            onAttached()
+                        }
+                        result
+                    }
+                }
+            }
+            view.javaClass.getMethod("setCallbacks", listenerType).invoke(view, wrapper)
+            seekHostView = view
+            seekHostOriginalCallback = original
+            seekHostCallbackProxy = wrapper
+            logTimeSeek("callback_installed", "host=${System.identityHashCode(view)}")
+        } catch (error: Exception) {
+            logTimeSeek("callback_install_failed", "type=${error.javaClass.simpleName}")
+        }
+    }
 
     private fun detachTimeSeekListener() {
         seekListener?.let { listener -> seekPlayer?.removeListener(listener) }
@@ -152,10 +229,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 "reason=$reason videoId=${it.videoId} positionMs=${it.positionMs}")
         }
         detachTimeSeekListener()
+        restoreTimeSeekHostCallback()
         pendingTimeSeek = null
     }
 
-    /** The existing player event path supplies the loaded media; no polling. */
+    /** Native player attachment and existing state observers; no polling. */
     private fun watchPendingTimeSeek(fragment: Fragment) {
         val pending = pendingTimeSeek ?: return
         if (fragment.javaClass.name != PLAYER_SCREEN) return
@@ -175,13 +253,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     "expectedId=${current.videoId} duration=${mediaPlayer.duration}")
             if (meta?.apiName != "YouTube" ||
                 YoutubeUtils.extractYoutubeId(meta.data) != current.videoId) {
-                Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=episode_mismatch")
-                clearPendingTimeSeek("episode_mismatch")
+                logTimeSeek("seek_wait", "reason=episode_mismatch")
+                // Player metadata may still describe the preceding item during startup.
                 return
             }
             if (!mediaPlayer.isCurrentMediaItemSeekable) {
-                Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=not_seekable")
-                clearPendingTimeSeek("not_seekable")
+                logTimeSeek("seek_wait", "reason=not_seekable")
+                // Wait for the next timeline/player-state change.
                 return
             }
             val duration = mediaPlayer.duration
@@ -194,6 +272,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             clearPendingTimeSeek("applied")
         }
         fun attachToReadyPlayer() {
+            if (pendingTimeSeek != null && seekHostView == null) {
+                observeTimeSeekPlayerAttachment(playerFragment) { attachToReadyPlayer() }
+            }
             if (pendingTimeSeek == null || this.playerFragment !== fragment || !fragment.isAdded) {
                 logTimeSeek("attach_skipped",
                     "pending=${pendingTimeSeek != null} active=${this.playerFragment === fragment} added=${fragment.isAdded}")
@@ -218,6 +299,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             if (args?.firstOrNull() == Media3Player.STATE_READY) seekWhenReady(mediaPlayer)
                             null
                         }
+                        "onTimelineChanged", "onMediaItemTransition" -> {
+                            if (mediaPlayer.playbackState == Media3Player.STATE_READY) seekWhenReady(mediaPlayer)
+                            null
+                        }
                         "hashCode" -> System.identityHashCode(proxy)
                         "equals" -> proxy === args?.firstOrNull()
                         "toString" -> "YouTubeTimeSeekListener"
@@ -233,7 +318,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 seekWhenReady(mediaPlayer)
             }
         }
-        // Both are existing native state transitions; no synthetic timer.
+        // Register before link results: the actual Media3 instance is attached later.
+        observeTimeSeekPlayerAttachment(playerFragment) { attachToReadyPlayer() }
         model.loadingLinks.observe(fragment.viewLifecycleOwner) { attachToReadyPlayer() }
         model.currentLinks.observe(fragment.viewLifecycleOwner) { attachToReadyPlayer() }
         attachToReadyPlayer()
@@ -909,6 +995,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (playerFragment === f) {
+                detachTimeSeekListener()
+                restoreTimeSeekHostCallback()
+            }
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->

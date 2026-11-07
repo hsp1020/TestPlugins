@@ -70,7 +70,7 @@ object YoutubeUtils {
     }
 
     fun getShortsSearchPoster(videoId: String): String =
-        "https://i.ytimg.com/vi/$videoId/oardefault.jpg"
+        "https://i.ytimg.com/vi/$videoId/oar2.jpg"
 
     fun getShortsEpisodeThumbnail(videoId: String): String {
         return getShortsSearchPoster(videoId)
