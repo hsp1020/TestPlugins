@@ -47,7 +47,7 @@ import kotlin.math.max
 
 /** Keep the native cover visible until Coil finishes; only the decoded artwork wipes in. */
 internal object PosterWipe {
-    internal data class Result(val success: Boolean, val source: String = "", val error: String = "")
+    internal data class Result(val success: Boolean, val error: String = "")
     private data class Running(
         val url: String, val base: Drawable?, val animator: ValueAnimator, val overlay: WipeDrawable
     )
@@ -217,19 +217,19 @@ internal object PosterWipe {
             return Result(false, error = failure.javaClass.simpleName)
         }
         return when (outcome) {
-            is SuccessResult -> Result(true, source = outcome.dataSource.name)
+            is SuccessResult -> Result(true)
             is ErrorResult -> Result(false, error = outcome.throwable.javaClass.simpleName)
             else -> Result(false, error = "no_image")
         }
     }
 
-    suspend fun load(image: ImageView, url: String, origin: String = "library", valid: () -> Boolean): Result {
+    suspend fun load(image: ImageView, url: String, valid: () -> Boolean): Result {
         // Match the native ImageView's size/scale to reuse Coil cache entries.
         // ViewSizeResolver waits for layout instead of decoding at an incorrect 1x1 size.
         val outcome = try {
             if (!image.isAttachedToWindow || !valid()) return Result(false, error = "stale")
             if (isDisplayed(image, url))
-                return Result(true, source = "UNCHANGED")
+                return Result(true)
             val scale = when (image.scaleType) {
                 ImageView.ScaleType.CENTER_CROP, ImageView.ScaleType.FIT_XY -> Scale.FILL
                 else -> Scale.FIT
@@ -251,7 +251,7 @@ internal object PosterWipe {
             return Result(false, error = outcome.throwable.javaClass.simpleName)
         val success = outcome as? SuccessResult ?: return Result(false, error = "no_image")
         if (isDisplayed(image, url))
-            return Result(true, source = success.dataSource.name)
+            return Result(true)
         val custom = success.image.asDrawable(image.resources).mutate()
         cancel(image)
         val previous = image.drawable
@@ -261,7 +261,7 @@ internal object PosterWipe {
         if (image.width <= 0 || image.height <= 0) {
             image.setImageDrawable(custom)
             recordDisplayed(image, url, custom)
-            return Result(true, source = success.dataSource.name)
+            return Result(true)
         }
         image.setImageDrawable(previous ?: image.context.getDrawable(R.drawable.default_cover))
         val wipe = WipeDrawable(custom)
@@ -284,6 +284,6 @@ internal object PosterWipe {
             }
         })
         animation.start()
-        return Result(true, source = success.dataSource.name)
+        return Result(true)
     }
 }

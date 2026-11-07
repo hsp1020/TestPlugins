@@ -9,8 +9,6 @@ import android.graphics.Color
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.os.Build
-import android.os.SystemClock
-import android.util.Log
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View

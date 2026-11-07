@@ -39,7 +39,6 @@ import android.app.Application
 import android.app.Dialog
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
-import android.os.SystemClock
 import android.view.animation.LinearInterpolator
 import android.os.Build
 import android.content.Context

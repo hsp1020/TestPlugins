@@ -314,7 +314,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                                 PosterWipe.ensurePlaceholder(image)
                                 loads.remove(image)?.cancel()
                                 loads[image] = scope.launch {
-                                    val result = PosterWipe.load(image, poster, "actor") {
+                                    val result = PosterWipe.load(image, poster) {
                                         applied[image] == value && setting.ready
                                     }
                                     if (applied[image] == value && !result.success &&
@@ -450,7 +450,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
             if (covers[image] !== cover || revision != cover.generation ||
                 !image.isAttachedToWindow) return
-            val result = PosterWipe.load(image, poster, "recommendation") {
+            val result = PosterWipe.load(image, poster) {
                 covers[image] === cover && revision == cover.generation
             }
             if (covers[image] !== cover || revision != cover.generation ||
