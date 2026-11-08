@@ -975,6 +975,13 @@ internal object ElevateActorInformation {
                             .put("id", credit.id)
                             .put("type", if (movie) "movie" else "tv")
                             .toString()
+                        "com.megix.CineStreamProvider" -> withContext(Dispatchers.IO) {
+                            ElevateIdResolver.imdbForTmdb(credit.id.toString(), movie)
+                        }?.let { imdb ->
+                            JSONObject().put("id", imdb)
+                                .put("type", if (movie) "movie" else "series")
+                                .toString()
+                        }
                         "com.megix.CineSimklProvider" -> withContext(Dispatchers.IO) {
                             ElevateIdResolver.simklForTmdb(credit.id, movie)
                         }?.let { (id, type) -> "https://simkl.com/$type/$id" }

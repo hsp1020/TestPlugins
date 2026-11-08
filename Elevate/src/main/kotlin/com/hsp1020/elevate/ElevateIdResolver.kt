@@ -60,32 +60,40 @@ internal object ElevateIdResolver {
     }.getOrNull()?.takeIf(String::isNotBlank)
 
 
-    /** Resolve an exact TMDB credit ID to a CineSimkl URL identity, not a title match. */
+    /** Resolve a TMDB credit ID through Simkl's exact-ID 301 redirect. */
     suspend fun simklForTmdb(tmdbId: Int, movie: Boolean): Pair<String, String>? {
         if (tmdbId <= 0) return null
-        val clientId = simklClientId() ?: return null
+        val clientId = simklClientId() ?: AccountManager.syncApis
+            .firstOrNull { it.idPrefix == "simkl" }?.authData()
+            ?.let { SimklApi.getHeaders(it.token)["simkl-api-key"] }
+            ?: return null
         return try {
             withTimeoutOrNull(9_000L) {
-                val response = app.get("https://api.simkl.com/search/id",
-                    params = mapOf("tmdb" to tmdbId.toString(), "client_id" to clientId),
-                    timeout = 8L)
-                if (response.code !in 200..299) return@withTimeoutOrNull null
-                val results = JSONArray(response.text)
-                for (index in 0 until results.length()) {
-                    val row = results.optJSONObject(index) ?: continue
-                    val ids = row.optJSONObject("ids") ?: continue
-                    if (ids.optString("tmdb").toIntOrNull() != tmdbId) continue
-                    val segment = when (row.optString("type")) {
-                        "movie" -> if (movie) "movies" else null
-                        "tv" -> if (!movie) "tv" else null
-                        "anime" -> if (!movie) "anime" else null
-                        else -> null
-                    } ?: continue
-                    val simkl = ids.optString("simkl").toLongOrNull()
-                        ?.takeIf { it > 0L }?.toString() ?: continue
-                    return@withTimeoutOrNull simkl to segment
-                }
-                null
+                val response = app.get("https://api.simkl.com/redirect",
+                    params = mapOf(
+                        "to" to "simkl",
+                        "tmdb" to tmdbId.toString(),
+                        "type" to if (movie) "movie" else "tv",
+                        "client_id" to clientId,
+                        "app-name" to "elevate",
+                        "app-version" to "1.0"
+                    ),
+                    headers = mapOf("User-Agent" to "Elevate/1.0"),
+                    timeout = 8L, allowRedirects = false)
+                if (response.code !in 300..399) return@withTimeoutOrNull null
+                val location = response.headers["Location"]
+                    ?: response.headers["location"]
+                    ?: return@withTimeoutOrNull null
+                val destination = Uri.parse(location)
+                if (destination.host?.lowercase() !in setOf("simkl.com", "www.simkl.com"))
+                    return@withTimeoutOrNull null
+                val path = destination.pathSegments
+                val segment = path.getOrNull(0) ?: return@withTimeoutOrNull null
+                if (if (movie) segment != "movies" else segment !in setOf("tv", "anime"))
+                    return@withTimeoutOrNull null
+                val id = path.getOrNull(1)?.toLongOrNull()
+                    ?.takeIf { it > 0L }?.toString() ?: return@withTimeoutOrNull null
+                id to segment
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
