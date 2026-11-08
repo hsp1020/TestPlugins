@@ -153,7 +153,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         var custom: String? = null, var failed: Boolean = false,
         var fallback: PosterIds? = null, var fallbackMovie: Boolean = false,
         var fallbackAttempted: Boolean = false,
-        var alternativePoster: String? = null
+        var alternativePosters: MutableList<String> = mutableListOf()
     )
 
     private inner class Screen(val list: RecyclerView) {
@@ -264,11 +264,11 @@ internal class RecommendationPosterHook(private val application: Application) :
                 return
             }
             unavailable.add(poster)
-            val alternatePoster = cover.alternativePoster?.takeIf { it != poster && it !in unavailable }
-            cover.alternativePoster = null
-            if (alternatePoster != null) {
-                cover.custom = alternatePoster
-                loadCustom(image, cover, alternatePoster)
+            while (cover.alternativePosters.isNotEmpty()) {
+                val alternate = cover.alternativePosters.removeAt(0)
+                if (alternate == poster || alternate in unavailable) continue
+                cover.custom = alternate
+                loadCustom(image, cover, alternate)
                 return
             }
             val fallback = cover.fallback?.takeUnless { cover.fallbackAttempted }
@@ -282,10 +282,16 @@ internal class RecommendationPosterHook(private val application: Application) :
                 val selected = mapped?.preferImdb(cover.fallbackMovie)
                 val version = if (config.service == PosterService.XRDB)
                     ElevateXrdbVersion.resolve(config) else null
-                val next = selected?.let { config.image(it, cover.fallbackMovie, version) }
-                if (next != null && next != poster && next !in unavailable) {
-                    cover.custom = next
-                    loadCustom(image, cover, next)
+                val options = listOfNotNull(
+                    selected?.let { config.image(it, cover.fallbackMovie, version) },
+                    selected?.takeIf { it.imdb != null && it.tmdb != null }?.let {
+                        config.image(it.copy(imdb = null), cover.fallbackMovie, version)
+                    }
+                ).distinct().filter { it != poster && it !in unavailable }
+                if (options.isNotEmpty()) {
+                    cover.alternativePosters.addAll(options.drop(1))
+                    cover.custom = options.first()
+                    loadCustom(image, cover, options.first())
                     return
                 }
             }
@@ -318,6 +324,8 @@ internal class RecommendationPosterHook(private val application: Application) :
             covers[image] = current
             val (ids, simkl) = directIds(card)
             val config = setting
+            val sourceAnimeId = if (config.service == PosterService.XRDB)
+                xrdbOriginalAnimeId(card.url) else null
             // Some providers label every search card as Movie but keep the real
             // media type in the card URL (for example TMDB recommendations).
             val mediaType = runCatching { JSONObject(card.url).optString("type") }
@@ -358,28 +366,28 @@ internal class RecommendationPosterHook(private val application: Application) :
                         (candidate.imdb == null && candidate.tmdb == null))
                     // One existing AIOStreams mapping for the season, shared by all
                     // poster services that require an IMDb/TMDB artwork identifier.
-                    val season = if (animeIdentity) {
+                    val season = if (animeIdentity && sourceAnimeId == null) {
                         withContext(Dispatchers.IO) { animeIds(candidate) }
                     } else null
-                    val posterIds = when {
-                        season != null -> season
-                        config.service == PosterService.XRDB && animeIdentity ->
-                            candidate.copy(imdb = null, tmdb = null)
-                        else -> candidate
-                    }
-                    val selected = posterIds.preferImdb(mapped.movie)
+                    // Never discard a verified IMDb/TMDB ID when mapping fails.
+                    val posterIds = season ?: candidate
+                    val selected = if (sourceAnimeId != null) posterIds
+                        else posterIds.preferImdb(mapped.movie)
                     val version = if (config.service == PosterService.XRDB)
                         ElevateXrdbVersion.resolve(config) else null
-                    val primary = config.image(selected, mapped.movie, version)
-                    val alternative = if (selected.tmdb != null && selected.imdb != null)
-                        config.image(selected.copy(imdb = null), mapped.movie, version)
-                    else null
-                    val poster = primary?.takeUnless { it in unavailable }
-                        ?: alternative?.takeUnless { it in unavailable }
-                    current.alternativePoster = alternative?.takeIf {
-                        poster == primary && it != primary
-                    }
-                    if (animeIdentity &&
+                    val primary = config.image(selected, mapped.movie, version, sourceAnimeId)
+                    val alternatives = listOfNotNull(
+                        if (sourceAnimeId != null && selected.imdb != null)
+                            config.image(selected, mapped.movie, version) else null,
+                        if (selected.imdb != null && selected.tmdb != null)
+                            config.image(selected.copy(imdb = null), mapped.movie, version)
+                        else null
+                    )
+                    val posters = listOfNotNull(primary).plus(alternatives).distinct()
+                        .filter { it !in unavailable }
+                    val poster = posters.firstOrNull()
+                    current.alternativePosters = posters.drop(1).toMutableList()
+                    if (sourceAnimeId != null || animeIdentity &&
                         (config.service == PosterService.XRDB ||
                             season != null && (candidate.imdb != null || candidate.tmdb != null))) {
                         // XRDB anime IDs fall back through AIOStreams; other poster

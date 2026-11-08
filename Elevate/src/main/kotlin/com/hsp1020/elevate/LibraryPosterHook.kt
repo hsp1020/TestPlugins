@@ -414,35 +414,64 @@ internal class LibraryPosterHook(private val appContext: Application) :
             !xrdbVersionChecked) return
         pending[image] = scope.launch {
             try {
-                val ids = withContext(Dispatchers.IO) {
-                    resolve(item, setting.service == PosterService.XRDB)
-                        ?.preferImdb(item.type == TvType.Movie || item.type == TvType.AnimeMovie)
-                }
+                val movie = item.type == TvType.Movie || item.type == TvType.AnimeMovie
+                val sourceAnimeId = if (setting.service == PosterService.XRDB)
+                    xrdbOriginalAnimeId(item.url, item.syncId) else null
+                val version = if (setting.service == PosterService.XRDB) xrdbVersion else null
+                // Explicit XRDB anime IDs load first, without waiting for a mapping.
+                val ids = if (sourceAnimeId == null) withContext(Dispatchers.IO) {
+                    resolve(item, setting.service == PosterService.XRDB)?.preferImdb(movie)
+                } else null
                 if (revision != token || bound[image] !== marker ||
                     !image.isAttachedToWindow) return@launch
-                val poster = ids?.let { setting.image(it, item.type == TvType.Movie,
-                    if (setting.service == PosterService.XRDB) xrdbVersion else null) }
-                if (poster == null) {
-                    showNative(image, id)
-                    return@launch
+
+                suspend fun attempt(poster: String): Boolean? {
+                    if (poster in unavailable) return false
+                    val entry = marker.copy(url = poster)
+                    bound[image] = entry
+                    val result = PosterWipe.load(image, poster) {
+                        revision == token && bound[image] === entry
+                    }
+                    if (bound[image] !== entry || result.error == "stale") return null
+                    if (result.success) return true
+                    unavailable.add(poster)
+                    return false
                 }
-                if (poster in unavailable) {
-                    showNative(image, id)
-                    return@launch
-                }
-                val entry = marker.copy(url = poster)
-                bound[image] = entry
-                val result = PosterWipe.load(image, poster) {
-                    revision == token && bound[image] === entry
-                }
-                if (bound[image] === entry && result.error != "stale") {
-                    if (result.success) showNative(image, id)
-                    else {
-                        unavailable.add(poster)
-                        // Native cover remains visible on failure.
-                        showNative(image, id)
+
+                val tried = HashSet<String>()
+                val primary = setting.image(ids ?: PosterIds(), movie, version, sourceAnimeId)
+                if (primary != null) {
+                    tried.add(primary)
+                    when (attempt(primary)) {
+                        true -> { showNative(image, id); return@launch }
+                        null -> return@launch
+                        false -> Unit
                     }
                 }
+                if (revision != token || bound[image]?.identity != id ||
+                    !image.isAttachedToWindow) return@launch
+                val fallbackIds = if (sourceAnimeId != null) withContext(Dispatchers.IO) {
+                    resolve(item, true)?.preferImdb(movie)
+                } else ids
+                if (revision != token || bound[image]?.identity != id ||
+                    !image.isAttachedToWindow) return@launch
+                val alternatives = listOfNotNull(
+                    if (sourceAnimeId != null) fallbackIds?.let {
+                        setting.image(it, movie, version)
+                    } else null,
+                    fallbackIds?.takeIf { it.imdb != null && it.tmdb != null }?.let {
+                        setting.image(it.copy(imdb = null), movie, version)
+                    }
+                ).distinct()
+                for (poster in alternatives) {
+                    if (!tried.add(poster)) continue
+                    when (attempt(poster)) {
+                        true -> { showNative(image, id); return@launch }
+                        null -> return@launch
+                        false -> Unit
+                    }
+                }
+                showNative(image, id)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -707,6 +736,32 @@ internal data class PosterIds(
     }
 }
 
+/** Only source identities, not incidental MAL/AniList/Kitsu metadata IDs. */
+internal fun xrdbOriginalAnimeId(url: String, syncId: String? = null): String? {
+    val pattern = Regex("^(mal|kitsu|anilist):([1-9][0-9]*)$", RegexOption.IGNORE_CASE)
+    fun explicit(value: String?): String? = value?.trim()?.let(pattern::matchEntire)
+        ?.let { "${it.groupValues[1].lowercase()}:${it.groupValues[2]}" }
+
+    explicit(url)?.let { return it }
+    val json = runCatching { org.json.JSONObject(url) }.getOrNull()
+    for (field in listOf("id", "url", "syncId")) {
+        explicit(json?.optString(field))?.let { return it }
+    }
+    val uri = runCatching { Uri.parse(url) }.getOrNull()
+    val kind = when (uri?.host?.lowercase()?.removePrefix("www.")) {
+        "myanimelist.net" -> "mal"
+        "anilist.co" -> "anilist"
+        "kitsu.app", "kitsu.io" -> "kitsu"
+        else -> null
+    }
+    if (kind != null && uri?.pathSegments?.firstOrNull() == "anime") {
+        val numeric = uri.pathSegments.getOrNull(1)?.toLongOrNull()
+            ?: syncId?.toLongOrNull()
+        if (numeric != null && numeric > 0L) return "${kind}:${numeric}"
+    }
+    return explicit(syncId)
+}
+
 internal data class PosterConfig(
     val service: PosterService,
     val key: String,
@@ -717,15 +772,19 @@ internal data class PosterConfig(
 ) {
     val ready get() = if (service == PosterService.XRDB) xrdbBase.isNotBlank() else key.isNotBlank()
 
-    fun image(ids: PosterIds, isMovie: Boolean, version: String? = null): String? {
-        if (!ready || !ids.available) return null
+    fun image(
+        ids: PosterIds, isMovie: Boolean, version: String? = null,
+        originalAnimeId: String? = null
+    ): String? {
+        if (!ready || (!ids.available && (service != PosterService.XRDB ||
+                originalAnimeId == null))) return null
         val kind = if (isMovie) "movie" else "series"
         if (service == PosterService.XRDB) {
             val base = Uri.parse(xrdbBase.trim().trimEnd('/'))
             if (base.scheme != "https" || base.host.isNullOrBlank() ||
                 !base.userInfo.isNullOrBlank() || !base.query.isNullOrBlank() ||
                 !base.fragment.isNullOrBlank()) return null
-            val artworkId = ids.imdb
+            val artworkId = originalAnimeId ?: ids.imdb
                 ?: ids.tmdb?.let { "tmdb:${kind}:${it}" }
                 ?: ids.mal?.let { "mal:${it}" }
                 ?: ids.anilist?.let { "anilist:${it}" }
