@@ -33,24 +33,42 @@ internal object ElevateIdResolver {
     private val simklFlights = mutableMapOf<String, Deferred<Mapping?>>()
     private val tmdbCache = LinkedHashMap<String, Cached<String?>>()
     private val tmdbFlights = mutableMapOf<String, Deferred<String?>>()
+    private val imdbCache = LinkedHashMap<String, Cached<String?>>()
+    private val imdbFlights = mutableMapOf<String, Deferred<String?>>()
+
+    internal fun tmdbApiKey(): String? = runCatching {
+        Class.forName("com.lagradost.cloudstream3.ui.search.SearchSuggestionApi")
+            .getDeclaredField("TMDB_API_KEY").apply { isAccessible = true }
+            .get(null) as? String
+    }.getOrNull()?.takeIf(String::isNotBlank)
+
+    private fun simklClientId(): String? = runCatching {
+        SimklApi::class.java.getDeclaredField("CLIENT_ID")
+            .apply { isAccessible = true }.get(null) as? String
+    }.getOrNull()?.takeIf(String::isNotBlank)
+
 
     suspend fun simkl(rawId: String, movie: Boolean, route: String? = null): Mapping? {
         val id = rawId.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
         val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-            ?.authData() ?: return null
-        val headers = SimklApi.getHeaders(auth.token)
-        val clientId = headers["simkl-api-key"]?.takeIf(String::isNotBlank) ?: return null
+            ?.authData()
+        val clientId = simklClientId()
+            ?: auth?.let { SimklApi.getHeaders(it.token)["simkl-api-key"] }
+            ?: return null
+        val headers = auth?.let { SimklApi.getHeaders(it.token) }
+            ?: mapOf("simkl-api-key" to clientId)
         val segment = when (route) {
             "movie", "movies" -> "movies"
             "tv", "series", "show", "shows" -> "tv"
             "anime" -> "anime"
             else -> null
         }
-        val key = "${auth.token.hashCode()}:$id:$movie:${segment ?: "lookup"}"
+        val accountKey = auth?.token?.hashCode() ?: 0
+        val key = "$accountKey:$id:$movie:${segment ?: "lookup"}"
         val now = System.currentTimeMillis()
         val flight = synchronized(simklCache) {
             if (segment == null) {
-                val accountPrefix = "${auth.token.hashCode()}:$id:$movie:"
+                val accountPrefix = "$accountKey:$id:$movie:"
                 val known = listOf("movies", "tv", "anime").mapNotNull { type ->
                     simklCache[accountPrefix + type]?.takeIf {
                         now - it.at in 0 until 3_600_000L
@@ -117,7 +135,7 @@ internal object ElevateIdResolver {
                 synchronized(simklCache) {
                     val entry = Cached(System.currentTimeMillis(), found)
                     simklCache[key] = entry
-                    if (found != null) simklCache["${auth.token.hashCode()}:$id:$movie:${found.segment}"] = entry
+                    if (found != null) simklCache["$accountKey:$id:$movie:${found.segment}"] = entry
                     if (simklCache.size > 96) simklCache.remove(simklCache.keys.first())
                 }
                 // Only unambiguous movie/TV identifiers can seed TMDB-to-IMDb.
@@ -125,7 +143,7 @@ internal object ElevateIdResolver {
                     found.tmdb != null) {
                     synchronized(tmdbCache) {
                         val type = if (found.movie) "movie" else "tv"
-                        tmdbCache["$"+"{type}:$"+"{found.tmdb}"] =
+                        tmdbCache["${type}:${found.tmdb}"] =
                             Cached(System.currentTimeMillis(), found.imdb)
                         if (tmdbCache.size > 256) tmdbCache.remove(tmdbCache.keys.first())
                     }
@@ -154,11 +172,7 @@ internal object ElevateIdResolver {
             }?.let { return it.value }
             tmdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 val found = try {
-                    val apiKey = runCatching {
-                        Class.forName("com.lagradost.cloudstream3.ui.search.SearchSuggestionApi")
-                            .getDeclaredField("TMDB_API_KEY").apply { isAccessible = true }
-                            .get(null) as? String
-                    }.getOrNull()?.takeIf(String::isNotBlank)
+                    val apiKey = tmdbApiKey()
                     if (apiKey == null) null else tmdbLimiter.withPermit {
                         withTimeoutOrNull(8_000L) {
                         val type = if (movie) "movie" else "tv"
@@ -188,6 +202,58 @@ internal object ElevateIdResolver {
         flight.start()
         return flight.await()
     }
+
+    /** Public Simkl ID lookup, independent of the user's Simkl login state. */
+    suspend fun tmdbForImdb(rawImdb: String, movie: Boolean): String? {
+        val imdb = rawImdb.takeIf(imdbPattern::matches) ?: return null
+        val clientId = simklClientId() ?: return null
+        val key = "${if (movie) "movie" else "tv"}:$imdb"
+        val now = System.currentTimeMillis()
+        val task = synchronized(imdbCache) {
+            imdbCache[key]?.takeIf {
+                now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
+            }?.let { return it.value }
+            imdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                val result = try {
+                    simklLimiter.withPermit {
+                        withTimeoutOrNull(10_000L) {
+                            val response = app.get("https://api.simkl.com/search/id",
+                                params = mapOf("client_id" to clientId, "imdb" to imdb),
+                                headers = mapOf("simkl-api-key" to clientId), timeout = 8L)
+                            val rows = JSONArray(response.text)
+                            (0 until rows.length()).mapNotNull(rows::optJSONObject)
+                                .firstNotNullOfOrNull { entry ->
+                                    val ids = entry.optJSONObject("ids") ?: return@firstNotNullOfOrNull null
+                                    if (ids.optString("imdb") != imdb) return@firstNotNullOfOrNull null
+                                    val kind = entry.optString("type")
+                                    if (kind == "movie" && !movie || kind == "tv" && movie ||
+                                        kind !in setOf("movie", "tv", "anime"))
+                                        return@firstNotNullOfOrNull null
+                                    ids.optString("tmdb").toLongOrNull()
+                                        ?.takeIf { it > 0L }?.toString()
+                                }
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (_: Exception) { null }
+                synchronized(imdbCache) {
+                    imdbCache[key] = Cached(System.currentTimeMillis(), result)
+                    if (imdbCache.size > 256) imdbCache.remove(imdbCache.keys.first())
+                }
+                result
+            }.also { flight ->
+                imdbFlights[key] = flight
+                flight.invokeOnCompletion {
+                    synchronized(imdbCache) {
+                        if (imdbFlights[key] === flight) imdbFlights.remove(key)
+                    }
+                }
+            }
+        }
+        task.start()
+        return task.await()
+    }
+
 }
 
 /** One XRDB version value shared by library, recommendations and actor overlays. */

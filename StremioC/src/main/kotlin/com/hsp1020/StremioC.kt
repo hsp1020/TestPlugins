@@ -2847,7 +2847,6 @@ open class StremioC(
             animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
             seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
-            ActorInformation.alias(this@StremioC, url, loadRes.url)
         }
 
         val libraryOrigins = synchronized(libraryOriginalUrlsByMeta) {
@@ -4349,8 +4348,7 @@ open class StremioC(
         val fetchedEnglishTitle: String?,
         val fetchedVoteAverage: Double? = null,
         val fetchedLogoFallback: Boolean = false,
-        val fetchedGenreIds: List<Int> = emptyList(),
-        val fetchedPeople: List<ActorPersonRef> = emptyList()
+        val fetchedGenreIds: List<Int> = emptyList()
     )
 
     private data class ProviderArtInfo(
@@ -4732,17 +4730,15 @@ open class StremioC(
                         .sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
                     val img = roles.firstNotNullOfOrNull { it.profilePath }
                         ?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                    ActorData(Actor(name, img), roleString = jobs) to
-                        ActorPersonRef(head.id, name, img, true)
-                }?.sortedBy { (item, _) ->
+                    ActorData(Actor(name, img), roleString = jobs)
+                }?.sortedBy { item ->
                     if (item.roleString?.contains("Director, Writer") == true) 1
                     else if (item.roleString?.contains("Director") == true) 2 else 3
                 } ?: emptyList()
             val castPairs = detailRes.credits?.cast?.mapNotNull { cast ->
                 val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
                 val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(actorName, img), roleString = cast.character) to
-                    ActorPersonRef(cast.id, actorName, img, false)
+                ActorData(Actor(actorName, img), roleString = cast.character)
             } ?: emptyList()
             val actorPairs = crewPairs + castPairs
 
@@ -4781,15 +4777,14 @@ open class StremioC(
                         path.dropLast(4) + ".png" else path
                     "https://image.tmdb.org/t/p/w500$rasterPath"
                 },
-                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, actorPairs.map { it.first },
+                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, actorPairs,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
                 extractedEnglishTitle,
                 detailRes.vote_average,
                 selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
-                detailRes.genres.orEmpty().mapNotNull { it.id },
-                actorPairs.map { it.second }
+                detailRes.genres.orEmpty().mapNotNull { it.id }
             )
         }
 
@@ -5290,11 +5285,6 @@ open class StremioC(
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
-                if (!isAnimeMedia) {
-                    ActorInformation.register(
-                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
-                    )
-                }
                 scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, resolvedSimklJob, tmdbIdStr)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
 
@@ -5362,11 +5352,6 @@ open class StremioC(
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
-                if (!isAnimeMedia) {
-                    ActorInformation.register(
-                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty()
-                    )
-                }
                 scheduleRecommendationRefresh(provider, metaUrl, relations, tmdbRecommendations, resolvedSimklJob, tmdbIdStr)
                 return@coroutineScope run { response.apply { attachMappedIds() } }
             }

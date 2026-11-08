@@ -1,0 +1,528 @@
+package com.hsp1020.elevate
+
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import android.view.View
+import android.view.ViewTreeObserver
+import android.widget.TextView
+import android.view.MotionEvent
+import android.view.animation.DecelerateInterpolator
+import androidx.navigation.NavOptions
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
+import androidx.preference.PreferenceManager
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.RecyclerView
+import com.lagradost.cloudstream3.Actor
+import com.lagradost.cloudstream3.ActorData
+import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
+import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.SimklSyncServices
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.syncproviders.AccountManager
+import com.lagradost.cloudstream3.ui.ViewHolderState
+import com.lagradost.cloudstream3.ui.result.ActorAdaptor
+import com.lagradost.cloudstream3.ui.result.ResultData
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
+import java.util.WeakHashMap
+
+/** Universal cast binding based on sync IDs, never on provider names or URL schemas. */
+internal class ElevateActorHook(private val appContext: Application) :
+    Application.ActivityLifecycleCallbacks {
+    private val main = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val bindings = mutableMapOf<Fragment, Binding>()
+    private var host: FragmentActivity? = null
+    private val responseField = runCatching {
+        ResultViewModel2::class.java.getDeclaredField("currentResponse")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private data class CastResult(val actors: List<ActorData>,
+        val people: List<ElevateActorPersonRef>?)
+    private data class Cached(val at: Long, val result: CastResult)
+    private val tmdbCache = LinkedHashMap<String, Cached>()
+    private val tmdbFlights = mutableMapOf<String, Deferred<CastResult?>>()
+
+    private data class Ids(
+        val anilist: String? = null, val mal: String? = null, val kitsu: String? = null,
+        val tmdb: String? = null, val imdb: String? = null, val simkl: String? = null
+    ) {
+        fun hasNonKitsu() = listOf(anilist, mal, tmdb, imdb, simkl).any { it != null }
+    }
+
+    private fun positive(raw: String?): String? =
+        raw?.substringBefore(':')?.toLongOrNull()?.takeIf { it > 0 }?.toString()
+
+    private fun ids(page: ResultData, response: LoadResponse?): Ids {
+        val saved = LoadResponse.readIdFromString(page.syncData["simkl"])
+        fun direct(key: String): String? = response?.syncData?.get(key)
+            ?: page.syncData[key]
+        fun number(key: String) = positive(direct(key)?.removePrefix("$key:"))
+        return Ids(
+            anilist = positive(response?.getAniListId()) ?:
+                positive(saved[SimklSyncServices.AniList]) ?: number("anilist"),
+            mal = positive(response?.getMalId()) ?:
+                positive(saved[SimklSyncServices.Mal]) ?: number("mal"),
+            kitsu = positive(response?.getKitsuId()) ?: number("kitsu"),
+            tmdb = positive(response?.getTMDbId()) ?:
+                positive(saved[SimklSyncServices.Tmdb]) ?: number("tmdb"),
+            imdb = (response?.getImdbId() ?: saved[SimklSyncServices.Imdb] ?: direct("imdb"))
+                ?.takeIf { it.matches(Regex("tt[0-9]{5,10}")) },
+            simkl = positive(saved[SimklSyncServices.Simkl]) ?: number("simkl")
+        )
+    }
+
+    private suspend fun anilist(id: String): CastResult? {
+        val cast = try {
+            withContext(Dispatchers.IO) { AccountManager.aniListApi.load(null, id)?.actors }
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (_: Exception) { null }
+        return cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
+    }
+
+    private suspend fun animeMapped(source: String, id: String): CastResult? {
+        val mapped = ElevateAnimeIdResolver.resolve(source, id) ?: return null
+        return mapped.anilist?.let { anilist(it) }
+    }
+
+    private suspend fun tmdb(raw: String, movie: Boolean): CastResult? {
+        val id = positive(raw) ?: return null
+        val apiKey = ElevateIdResolver.tmdbApiKey() ?: return null
+        val key = "${if (movie) "movie" else "tv"}:$id:${apiKey.hashCode()}"
+        val now = System.currentTimeMillis()
+        val task = synchronized(tmdbCache) {
+            tmdbCache[key]?.takeIf { now - it.at in 0 until 43_200_000L }
+                ?.let { return it.result }
+            tmdbFlights[key] ?: io.async(start = CoroutineStart.LAZY) {
+                val found = try {
+                    withTimeoutOrNull(15_000L) {
+                        val kind = if (movie) "movie" else "tv"
+                        val res = app.get("https://api.themoviedb.org/3/$kind/$id/credits",
+                            params = mapOf("api_key" to apiKey), timeout = 12L)
+                        val json = JSONObject(res.text)
+                        val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
+                        val crew = json.optJSONArray("crew")
+                        if (crew != null) for (i in 0 until crew.length()) {
+                            val obj = crew.optJSONObject(i) ?: continue
+                            val job = obj.optString("job")
+                            if (job != "Director" && job != "Writer") continue
+                            val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
+                            val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
+                            val photo = obj.optString("profile_path")
+                                .takeIf { it.startsWith("/") }
+                                ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                            val existing = pairs.indexOfFirst { it.second.id == personId }
+                            if (existing >= 0) {
+                                val roles = listOfNotNull(pairs[existing].first.roleString, job)
+                                    .flatMap { it.split(", ") }.distinct().joinToString(", ")
+                                pairs[existing] = ActorData(Actor(name, photo), roleString = roles) to
+                                    ElevateActorPersonRef(personId, name, photo, true)
+                            } else pairs += ActorData(Actor(name, photo), roleString = job) to
+                                ElevateActorPersonRef(personId, name, photo, true)
+                        }
+                        val cast = json.optJSONArray("cast")
+                        if (cast != null) for (i in 0 until cast.length()) {
+                            val obj = cast.optJSONObject(i) ?: continue
+                            val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
+                            val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
+                            val photo = obj.optString("profile_path")
+                                .takeIf { it.startsWith("/") }
+                                ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                            pairs += ActorData(Actor(name, photo),
+                                roleString = obj.optString("character").takeIf(String::isNotBlank)) to
+                                ElevateActorPersonRef(personId, name, photo, false)
+                        }
+                        pairs.takeIf { it.isNotEmpty() }?.let { rows ->
+                            CastResult(rows.map { it.first }, rows.map { it.second })
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (_: Exception) { null }
+                if (found != null) synchronized(tmdbCache) {
+                    tmdbCache[key] = Cached(System.currentTimeMillis(), found)
+                    if (tmdbCache.size > 64) tmdbCache.remove(tmdbCache.keys.first())
+                }
+                found
+            }.also { flight ->
+                tmdbFlights[key] = flight
+                flight.invokeOnCompletion {
+                    synchronized(tmdbCache) {
+                        if (tmdbFlights[key] === flight) tmdbFlights.remove(key)
+                    }
+                }
+            }
+        }
+        task.start()
+        return task.await()
+    }
+
+    private suspend fun resolve(page: ResultData, response: LoadResponse?): CastResult? {
+        val ids = ids(page, response)
+        val type = response?.type
+        val kind = runCatching {
+            JSONObject(response?.url ?: page.url).optString("type").lowercase()
+        }.getOrNull()
+        val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
+            (type == TvType.Others && kind == "movie")
+        val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
+            (type in setOf(TvType.Others, TvType.Cartoon) &&
+                (ids.anilist != null || ids.mal != null))
+        // Reuse already loaded native character/voice-actor data without an extra query.
+        if (anime && (ids.anilist != null || ids.mal != null) &&
+            page.actors?.any { it.voiceActor != null } == true)
+            return CastResult(page.actors!!, null)
+        // Kitsu is not a fallback: exclude it entirely when any other valid ID exists.
+        val options = if (anime)
+            listOf("anilist", "mal", "tmdb", "imdb", "simkl") else
+            listOf("tmdb", "imdb", "simkl", "anilist", "mal")
+        for (candidate in options) {
+            val result = when (candidate) {
+                "anilist" -> ids.anilist?.let { anilist(it) }
+                "mal" -> ids.mal?.let { animeMapped("mal", it) }
+                "tmdb" -> ids.tmdb?.let { tmdb(it, movie) }
+                "imdb" -> ids.imdb?.let { imdb ->
+                    ElevateIdResolver.tmdbForImdb(imdb, movie)?.let { tmdb(it, movie) }
+                }
+                "simkl" -> ids.simkl?.let { simkl ->
+                    ElevateIdResolver.simkl(simkl, movie)?.tmdb?.let { tmdb(it, movie) }
+                }
+                else -> null
+            }
+            if (result != null) return result
+        }
+        return if (!ids.hasNonKitsu() && ids.kitsu != null)
+            animeMapped("kitsu", ids.kitsu) else null
+    }
+
+    private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
+        ) {
+            attach(fragment, view)
+            view.post { if (fragment.view === view) attach(fragment, view) }
+        }
+        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            fragment.view?.let { attach(fragment, it) }
+            bindings[fragment]?.render()
+        }
+        override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
+            bindings.remove(fragment)?.stop()
+        }
+    }
+
+    private fun attach(fragment: Fragment, root: View) {
+        if (bindings.containsKey(fragment) ||
+            fragment.javaClass.name !in setOf(
+                "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+                "com.lagradost.cloudstream3.ui.result.ResultFragmentTv")) return
+        val list = root.findViewById<RecyclerView>(R.id.result_cast_items) ?: return
+        bindings[fragment] = Binding(fragment, list).also { it.start() }
+    }
+
+    private inner class Binding(val fragment: Fragment, val list: RecyclerView) {
+        private val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+        private val castText: TextView? =
+            fragment.view?.findViewById(R.id.result_cast_text)
+        private val controller = ElevateActorInformation.Controller(fragment)
+        private val cards = WeakHashMap<View, Pair<ActorData, ElevateActorPersonRef>>()
+        private val press = DecelerateInterpolator()
+        private var longPressed = false
+        private val touch = View.OnTouchListener { card, event ->
+            if (pendingAnimation != null) return@OnTouchListener false
+            val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
+                ?: return@OnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    longPressed = false
+                    portrait.animate().cancel()
+                    portrait.clearAnimation()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                    portrait.animate().scaleX(0.8f).scaleY(0.8f)
+                        .setDuration(200L).setInterpolator(press).start()
+                }
+                MotionEvent.ACTION_UP -> if (!longPressed) portrait.animate().cancel()
+                MotionEvent.ACTION_CANCEL -> if (!longPressed) {
+                    portrait.animate().cancel()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                }
+            }
+            false
+        }
+        private val searchLongPress = View.OnLongClickListener { card ->
+            val adapter = list.adapter as? ActorAdaptor
+            val pos = list.getChildAdapterPosition(card)
+            val actor = if (pos != RecyclerView.NO_POSITION)
+                adapter?.getItemOrNull(pos) else null
+            val voiceShown = actor != null && adapter?.inverted?.get(actor) == true &&
+                !actor.voiceActor?.image.isNullOrBlank()
+            val query = if (voiceShown) actor?.voiceActor?.name else actor?.actor?.name
+            val activity = fragment.activity
+            val nav = activity?.let {
+                it.resources.getIdentifier("navigation_search", "id", it.packageName)
+            } ?: 0
+            if (query.isNullOrBlank() || activity == null || nav == 0)
+                false else {
+                longPressed = true
+                card.findViewById<View>(R.id.voice_actor_image_holder2)?.let {
+                    it.animate().cancel()
+                    it.scaleX = 1f
+                    it.scaleY = 1f
+                }
+                val enter = activity.resources.getIdentifier("enter_anim", "anim",
+                    activity.packageName)
+                val exit = activity.resources.getIdentifier("exit_anim", "anim",
+                    activity.packageName)
+                activity.navigate(nav, Bundle().apply {
+                    putString("search_query", query)
+                    putBoolean("global_detail_search", true)
+                }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                    .setPopEnterAnim(enter).setPopExitAnim(exit).build())
+                true
+            }
+        }
+        private var pageUrl: String? = null
+        private var pageIdentity: String? = null
+        private var people: List<ElevateActorPersonRef>? = null
+        private var lastActors: List<ActorData>? = null
+        private var loadJob: Job? = null
+        private var pendingAnimation: android.view.animation.Animation? = null
+        private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { attachClicks() }
+        private var tree: ViewTreeObserver? = null
+        private val observer = Observer<Resource<ResultData>?> { state ->
+            val page = (state as? Resource.Success<ResultData>)?.value ?: return@Observer
+            update(page)
+        }
+        private fun castEnabled(): Boolean =
+            PreferenceManager.getDefaultSharedPreferences(appContext).getBoolean(
+                appContext.getString(R.string.show_cast_in_details_key), true)
+
+        fun start() {
+            controller.start()
+            model.page.observe(fragment.viewLifecycleOwner, observer)
+            tree = list.viewTreeObserver.also { it.addOnGlobalLayoutListener(layoutListener) }
+            (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
+        }
+        private fun update(page: ResultData) {
+            val response = runCatching { responseField?.get(model) as? LoadResponse }
+                .getOrNull()?.takeIf { it.url == page.url }
+            val ids = ids(page, response)
+            val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown")
+            if (identity == pageIdentity) {
+                attachClicks()
+                return
+            }
+            pageIdentity = identity
+            pageUrl = page.url
+            loadJob?.cancel()
+            people = null
+            lastActors = null
+            cards.clear()
+            val adapter = list.adapter as? ActorAdaptor
+            adapter?.submitList(page.actors.orEmpty())
+            adapter?.let { current ->
+                list.post { if (list.adapter === current) current.notifyDataSetChanged() }
+            }
+            list.visibility = if (castEnabled() && !page.actors.isNullOrEmpty())
+                View.VISIBLE else View.GONE
+            castText?.visibility = if (page.actorsText == null) View.GONE else View.VISIBLE
+            if (!castEnabled()) return
+            loadJob = main.launch {
+                val loaded = resolve(page, response) ?: return@launch
+                if (!fragment.isAdded || pageIdentity != identity ||
+                    (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
+                    !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
+                    return@launch
+                people = loaded.people
+                lastActors = loaded.actors
+                (list.adapter as? ActorAdaptor)?.let { adapter ->
+                    adapter.submitList(loaded.actors)
+                    list.post {
+                        if (list.adapter === adapter && pageIdentity == identity) {
+                            adapter.notifyDataSetChanged()
+                            attachClicks()
+                        }
+                    }
+                }
+                if (castEnabled()) {
+                    list.visibility = View.VISIBLE
+                    castText?.visibility = View.GONE
+                }
+                list.post { attachClicks() }
+            }
+        }
+        fun render() = attachClicks()
+
+        private fun attachClicks() {
+            val refs = people
+            val actors = lastActors
+            if (!actors.isNullOrEmpty() && castEnabled()) {
+                list.visibility = View.VISIBLE
+                castText?.visibility = View.GONE
+            }
+            val adapter = list.adapter as? ActorAdaptor ?: return
+            for (index in 0 until list.childCount) {
+                val card = list.getChildAt(index)
+                val pos = list.getChildAdapterPosition(card)
+                if (pos == RecyclerView.NO_POSITION) continue
+                card.setOnLongClickListener(searchLongPress)
+                // AniList: leave native click and cast/voice-actor inversion untouched.
+                val person = refs?.getOrNull(pos) ?: continue
+                val actor = actors?.getOrNull(pos) ?: continue
+                if (person.id == null || adapter.getItemOrNull(pos) !== actor) continue
+                cards[card] = actor to person
+                card.setOnTouchListener(touch)
+                val click = object : View.OnClickListener {
+                    override fun onClick(view: View) {
+                        if (pendingAnimation != null || pageUrl !=
+                            (model.page.value as? Resource.Success<ResultData>)?.value?.url)
+                            return
+                        val current = list.getChildAdapterPosition(view)
+                        if (current != pos || adapter.getItemOrNull(current) !== actor) return
+                        card.findViewById<View>(R.id.voice_actor_image_holder2)?.let {
+                            it.animate().cancel()
+                            it.scaleX = 1f
+                            it.scaleY = 1f
+                        }
+                        val holder = list.findViewHolderForAdapterPosition(pos)
+                        if (holder is ViewHolderState<*>) {
+                            @Suppress("UNCHECKED_CAST")
+                            adapter.onUpdateContent(holder as ViewHolderState<Any>, actor, pos)
+                            // Core's rebind installs its old click listener.
+                            view.setOnClickListener(this)
+                            view.setOnLongClickListener(searchLongPress)
+                            view.setOnTouchListener(touch)
+                        }
+                        val running = view.findViewById<View>(
+                            R.id.voice_actor_image_holder2)?.animation
+                        if (running == null) controller.click(person, view)
+                        else {
+                            pendingAnimation = running
+                            running.setAnimationListener(object :
+                                android.view.animation.Animation.AnimationListener {
+                                override fun onAnimationStart(a: android.view.animation.Animation?) = Unit
+                                override fun onAnimationRepeat(a: android.view.animation.Animation?) = Unit
+                                override fun onAnimationEnd(a: android.view.animation.Animation?) {
+                                    if (pendingAnimation !== running) return
+                                    pendingAnimation = null
+                                    running.setAnimationListener(null)
+                                    if (fragment.isAdded && view.isAttachedToWindow &&
+                                        list.getChildAdapterPosition(view) == pos &&
+                                        adapter.getItemOrNull(pos) === actor)
+                                        controller.click(person, view)
+                                }
+                            })
+                        }
+                    }
+                }
+                card.setOnClickListener(click)
+                // Long-press always opens the existing in-app CloudStream search.
+            }
+        }
+
+        private fun RecyclerView.childrenToReset() {
+            for (index in 0 until childCount) {
+                getChildAt(index).findViewById<View>(
+                    R.id.voice_actor_image_holder2)?.let { portrait ->
+                    portrait.animate().cancel()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                }
+            }
+        }
+        fun stop() {
+            pendingAnimation?.setAnimationListener(null)
+            pendingAnimation = null
+            list.childrenToReset()
+            loadJob?.cancel()
+            model.page.removeObserver(observer)
+            tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
+            tree = null
+            cards.clear()
+            controller.stop()
+            (list.adapter as? ActorAdaptor)?.let { adapter ->
+                val page = (model.page.value as? Resource.Success<ResultData>)?.value
+                adapter.submitList(page?.actors.orEmpty())
+                list.post {
+                    if (list.adapter === adapter) adapter.notifyDataSetChanged()
+                }
+                list.visibility = if (castEnabled() && !page?.actors.isNullOrEmpty())
+                    View.VISIBLE else View.GONE
+                castText?.visibility = if (page?.actorsText == null) View.GONE else View.VISIBLE
+            }
+        }
+    }
+
+    fun start() {
+        appContext.registerActivityLifecycleCallbacks(this)
+        (CommonActivity.activity as? MainActivity)?.let(::use)
+    }
+
+    private fun use(activity: FragmentActivity) {
+        if (host === activity) return
+        detach()
+        host = activity
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        fun scan(fm: FragmentManager) {
+            fm.fragments.forEach { f ->
+                f.view?.let { attach(f, it) }
+                if (f.isAdded) scan(f.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
+    }
+
+    private fun detach() {
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        bindings.values.toList().forEach { it.stop() }
+        bindings.clear()
+        host = null
+    }
+
+    fun stop() {
+        appContext.unregisterActivityLifecycleCallbacks(this)
+        detach()
+        main.cancel()
+        io.cancel()
+        synchronized(tmdbCache) { tmdbCache.clear() }
+    }
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity) use(activity)
+    }
+    override fun onActivityDestroyed(activity: Activity) {
+        if (host === activity) detach()
+    }
+    override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+}

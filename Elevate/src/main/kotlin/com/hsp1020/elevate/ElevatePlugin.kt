@@ -101,6 +101,7 @@ class ElevatePlugin : Plugin() {
     private var artworkHook: ElevateArtworkHook? = null
     private var libraryPosters: LibraryPosterHook? = null
     private var recommendationPosters: RecommendationPosterHook? = null
+    private var actorHook: ElevateActorHook? = null
     private var thumbnailRatios: OriginalThumbnailRatioHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
@@ -281,6 +282,12 @@ class ElevatePlugin : Plugin() {
         } else {
             subtitleSyncRepair?.stop()
             subtitleSyncRepair = null
+        }
+        if (enabled(ElevateFeature.ACTOR_INFORMATION)) {
+            if (actorHook == null) actorHook = ElevateActorHook(application).also { it.start() }
+        } else {
+            actorHook?.stop()
+            actorHook = null
         }
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
@@ -514,6 +521,8 @@ class ElevatePlugin : Plugin() {
         artworkHook = null
         recommendationPosters?.stop()
         recommendationPosters = null
+        actorHook?.stop()
+        actorHook = null
         libraryPosters?.stop()
         libraryPosters = null
         thumbnailRatios?.stop()

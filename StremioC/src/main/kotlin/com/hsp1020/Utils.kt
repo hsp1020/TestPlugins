@@ -2313,19 +2313,8 @@ internal class RatingPlotImageHook(
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
-        private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
-            .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
-        private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
-        private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
-        private var pendingActorOpenAnimation: android.view.animation.Animation? = null
-
-        private fun cancelPendingActorOpen() {
-            pendingActorOpenAnimation?.setAnimationListener(null)
-            pendingActorOpenAnimation = null
-        }
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
-        private val boundActorCards = mutableSetOf<View>()
 
         private fun bindGenreClicks() {
             val group = genreGroup ?: return
@@ -2353,181 +2342,10 @@ internal class RatingPlotImageHook(
             }
         }
 
-        private fun openActorSearch(query: String) {
-            if (query.isBlank()) return
-            val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
-            if (id == 0) return
-            val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
-            val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
-            fragment.activity?.navigate(id, Bundle().apply {
-                putString("search_query", query)
-                putBoolean("global_detail_search", true)
-            }, NavOptions.Builder()
-                .setEnterAnim(enter).setExitAnim(exit)
-                .setPopEnterAnim(enter).setPopExitAnim(exit)
-                .build())
-        }
-        // The native click expands 0.8 -> 1.0 in 200ms.
-        // Start the reverse press feedback immediately on ACTION_DOWN so the
-        // portrait reaches 0.8 before Android's normal long-click timeout.
-        private val castPressInterpolator = android.view.animation.DecelerateInterpolator()
-        private var castLongPressHandled = false
-        private val castPressTouch = View.OnTouchListener { card, event ->
-            if (pendingActorOpenAnimation != null) return@OnTouchListener false
-            val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
-                ?: return@OnTouchListener false
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    castLongPressHandled = false
-                    portrait.animate().cancel()
-                    portrait.clearAnimation()
-                    portrait.scaleX = 1f
-                    portrait.scaleY = 1f
-                    portrait.animate().scaleX(0.8f).scaleY(0.8f)
-                        .setDuration(200L)
-                        .setInterpolator(castPressInterpolator)
-                        .start()
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    // Do not jump to 1.0 here: onClick hands off to the native
-                    // 0.8 -> 1.0 scale animation in the same UI turn.
-                    if (!castLongPressHandled) portrait.animate().cancel()
-                }
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    // A successful long-click keeps the image at 0.8 while
-                    // navigating; only an abandoned press resets immediately.
-                    if (!castLongPressHandled) restoreCastPress(card)
-                }
-            }
-            // Preserve Android's normal click/long-click gesture recognition.
-            false
-        }
-        private fun restoreCastPress(card: View) {
-            card.findViewById<View>(R.id.voice_actor_image_holder2)?.let { portrait ->
-                portrait.animate().cancel()
-                portrait.scaleX = 1f
-                portrait.scaleY = 1f
-            }
-        }
-        private val castClick = object : View.OnClickListener {
-            override fun onClick(card: View) {
-                // Keep the first actor-dialog click until its native animation completes.
-                if (pendingActorOpenAnimation != null) return
-                val list = castItems ?: return
-                val position = list.getChildAdapterPosition(card)
-                if (position == RecyclerView.NO_POSITION) return
-                val adapter = list.adapter as? ActorAdaptor ?: return
-                val actor = adapter.getItemOrNull(position) ?: return
-                val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
-                val page = (model.page.value as? Resource.Success<ResultData>)?.value
-                val nativeAnimeCast = page != null &&
-                    (StremioC.animeAudioByUrl[page.url] == true ||
-                        detailUrl?.let { StremioC.animeAudioByUrl[it] } == true) &&
-                    !ActorInformation.hasTmdbPerson(page.url, model.currentRepo?.api as? StremioC,
-                        page, position, actor)
-                val holder = list.findViewHolderForAdapterPosition(position)
-                // Reset the property transform immediately before the native
-                // click animation. No intermediate 1.0 frame is rendered.
-                restoreCastPress(card)
-                if (nativeAnimeCast) {
-                    if (holder is ViewHolderState<*>) {
-                        @Suppress("UNCHECKED_CAST")
-                        val nativeHolder = holder as ViewHolderState<Any>
-                        adapter.inverted[actor] = adapter.inverted[actor] != true
-                        adapter.onUpdateContent(nativeHolder, actor, position)
-                        // Native rebind restores its browser-search handler.
-                        card.setOnClickListener(this)
-                        card.setOnLongClickListener(castLongClick)
-                    }
-                    return
-                }
-                if (holder is ViewHolderState<*>) {
-                    @Suppress("UNCHECKED_CAST")
-                    val nativeHolder = holder as ViewHolderState<Any>
-                    adapter.onUpdateContent(nativeHolder, actor, position)
-                    // Core rebinds its default click and long-click handlers.
-                    // Restore StremioC's actor dialog and in-app person search.
-                    card.setOnClickListener(this)
-                    card.setOnLongClickListener(castLongClick)
-                }
-                // Wait for the native portrait's 200ms scale animation, not a guessed delay.
-                val runningAnimation = card.findViewById<View>(
-                    R.id.voice_actor_image_holder2
-                )?.animation
-                if (runningAnimation == null) {
-                    actorInformation.click(position, actor, card)
-                } else {
-                    pendingActorOpenAnimation = runningAnimation
-                    runningAnimation.setAnimationListener(object :
-                        android.view.animation.Animation.AnimationListener {
-                        override fun onAnimationStart(animation: android.view.animation.Animation?) = Unit
-                        override fun onAnimationRepeat(animation: android.view.animation.Animation?) = Unit
-                        override fun onAnimationEnd(animation: android.view.animation.Animation?) {
-                            if (pendingActorOpenAnimation !== runningAnimation) return
-                            pendingActorOpenAnimation = null
-                            runningAnimation.setAnimationListener(null)
-                            if (!fragment.isAdded || !card.isAttachedToWindow ||
-                                list.getChildAdapterPosition(card) != position ||
-                                adapter.getItemOrNull(position) !== actor) return
-                            actorInformation.click(position, actor, card)
-                        }
-                    })
-                }
-            }
-        }
-        private val castLongClick = View.OnLongClickListener { card ->
-            if (pendingActorOpenAnimation != null) return@OnLongClickListener true
-            val list = castItems
-            val position = list?.getChildAdapterPosition(card) ?: RecyclerView.NO_POSITION
-            if (position != RecyclerView.NO_POSITION) {
-                val adapter = list?.adapter as? ActorAdaptor
-                val actor = adapter?.getItemOrNull(position)
-                if (actor != null) {
-                    // The native cast adapter flips its main photo using inverted,
-                    // but leaves actor_name unchanged. Search the visible photo's owner.
-                    val voiceShown = adapter.inverted[actor] == true &&
-                        !actor.voiceActor?.image.isNullOrBlank()
-                    val query = (if (voiceShown) actor.voiceActor?.name else actor.actor.name)
-                        ?.trim().orEmpty()
-                    if (query.isNotBlank()) {
-                        castLongPressHandled = true
-                        openActorSearch(query)
-                    }
-                }
-            }
-            // No valid search target: do not leave a consumed long-press scaled.
-            if (!castLongPressHandled) restoreCastPress(card)
-            true
-        }
-        // Bind on actual layout changes, never on every draw frame.
-        // RecyclerView click handlers resolve the current adapter position at
-        // click time, so recycled cards do not need per-frame rebinding.
         private val detailLayout = ViewTreeObserver.OnGlobalLayoutListener {
-            if (fragment.isAdded) {
-                castItems?.takeIf { it.isShown }?.let { list ->
-                    val children = (0 until list.childCount).map(list::getChildAt).toSet()
-                    for (card in children) {
-                        boundActorCards.add(card)
-                        // A native item rebind may replace both listeners even on the
-                        // same attached card; restore only at actual layout boundaries.
-                        card.setOnClickListener(castClick)
-                        card.setOnLongClickListener(castLongClick)
-                        card.setOnTouchListener(castPressTouch)
-                    }
-                    val removed = boundActorCards.filterNot(children::contains)
-                    for (card in removed) {
-                        card.setOnClickListener(null)
-                        card.setOnLongClickListener(null)
-                        card.setOnTouchListener(null)
-                        restoreCastPress(card)
-                        boundActorCards.remove(card)
-                    }
-                }
-                bindGenreClicks()
-            }
+            if (fragment.isAdded) bindGenreClicks()
         }
         fun start() {
-            actorInformation.start()
             val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             fun applyRecommendation(update: StremioC.Companion.RecommendationUpdate) {
                 val page = (model.page.value as? Resource.Success<ResultData>)?.value
@@ -2551,15 +2369,12 @@ internal class RatingPlotImageHook(
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
             view.addTextChangedListener(this)
-            if (castItems != null || genreGroup != null)
+            if (genreGroup != null)
                 root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
             detailLayout.onGlobalLayout()
         }
         fun detach() {
-            castLongPressHandled = false
-            cancelPendingActorOpen()
             seasonSyncProbe.stop()
-            actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(detailLayout)
             boundGenreChips.keys.forEach { chip ->
@@ -2569,13 +2384,6 @@ internal class RatingPlotImageHook(
                 chip.isFocusable = false
             }
             boundGenreChips.clear()
-            boundActorCards.forEach { card ->
-                card.setOnClickListener(null)
-                card.setOnLongClickListener(null)
-                card.setOnTouchListener(null)
-                restoreCastPress(card)
-            }
-            boundActorCards.clear()
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit

@@ -30,6 +30,8 @@ internal enum class ElevateFeature(
 ) {
     DETAIL_SEARCH("Navigation & Search", "Native Detail Search",
         "Open full CloudStream search from the title details and retain back navigation."),
+    ACTOR_INFORMATION("Navigation & Search", "Actor Information",
+        "Show a shared TMDB actor dialog and native AniList character/voice cast from sync IDs."),
     PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
         "Use saved provider order on Home and Search, including related search providers."),
     LOCALIZED_SEARCH_SUGGESTIONS("Navigation & Search", "Localized Search Suggestions",

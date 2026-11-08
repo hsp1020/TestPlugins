@@ -15,6 +15,7 @@ dependencies {
     compileOnly("com.github.LagradOst:SafeFile:0.0.8")
     compileOnly("androidx.navigation:navigation-common:2.9.8")
     compileOnly("androidx.navigation:navigation-fragment:2.9.8")
+    compileOnly("com.facebook.shimmer:shimmer:0.5.0")
     compileOnly("androidx.media3:media3-ui:1.9.3")
     compileOnly("androidx.media3:media3-exoplayer:1.9.3")
     compileOnly("androidx.constraintlayout:constraintlayout:2.0.1")

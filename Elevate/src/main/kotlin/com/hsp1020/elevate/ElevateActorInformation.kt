@@ -1,4 +1,4 @@
-package com.hsp1020
+package com.hsp1020.elevate
 
 import android.content.Context
 import android.content.res.ColorStateList
@@ -31,6 +31,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.navigation.fragment.findNavController
+import androidx.navigation.NavOptions
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.USER_AGENT
@@ -41,7 +43,6 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
@@ -51,7 +52,9 @@ import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.ui.search.SearchHelper
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.ui.settings.getCurrentLocale
+import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.withContext
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
@@ -69,70 +72,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal data class ActorPersonRef(
+internal data class ElevateActorPersonRef(
     val id: Int?,
     val name: String,
     val photo: String?,
     val preferCrew: Boolean
 )
 
-internal object ActorInformation {
-    private data class Snapshot(
-        val providerUrl: String,
-        val detailUrl: String,
-        val actors: List<ActorData>,
-        val people: List<ActorPersonRef>
-    )
-
-    private val snapshots = object : LinkedHashMap<String, Snapshot>(100, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Snapshot>) = size > 100
-    }
-    private fun key(source: String, detail: String) = stremioManifestUrl(source) + "|" + detail
-
-    @Synchronized
-    fun register(
-        provider: StremioC, url: String, actors: List<ActorData>?,
-        people: List<ActorPersonRef>
-    ) {
-        if (actors.isNullOrEmpty() || actors.size != people.size) return
-        snapshots[key(provider.mainUrl, url)] =
-            Snapshot(stremioManifestUrl(provider.mainUrl), url, actors, people)
-    }
-
-    @Synchronized
-    fun alias(provider: StremioC, from: String, to: String) {
-        if (from == to) return
-        val original = snapshots[key(provider.mainUrl, to)] ?: return
-        snapshots[key(provider.mainUrl, from)] = original
-    }
-
-    @Synchronized
-    private fun resolve(
-        url: String?,
-        repo: StremioC?,
-        page: ResultData,
-        position: Int,
-        item: ActorData
-    ): Pair<String, ActorPersonRef>? {
-        if (position < 0 || page.actors?.getOrNull(position) !== item) return null
-
-        val matches = snapshots.values.distinct().filter { snapshot ->
-            snapshot.actors === page.actors && snapshot.actors.getOrNull(position) === item &&
-                snapshot.people.getOrNull(position)?.name == item.actor.name &&
-                (url == null || snapshot.detailUrl == url || page.url == snapshot.detailUrl ||
-                    snapshots[key(snapshot.providerUrl, url)] === snapshot)
-        }
-        val matched = matches.singleOrNull()
-            ?: return null
-        if (repo != null && stremioManifestUrl(repo.mainUrl) != matched.providerUrl &&
-            matches.size != 1) return null
-        return matched.providerUrl to matched.people[position]
-    }
-
-    @Synchronized
-    fun hasTmdbPerson(url: String?, repo: StremioC?, page: ResultData, position: Int, item: ActorData): Boolean =
-        resolve(url, repo, page, position, item) != null
-
+internal object ElevateActorInformation {
     private data class CacheEntry(val bytes: ByteArray, val time: Long)
     private val cache = LinkedHashMap<String, CacheEntry>(50, 0.75f, true)
     private var cacheBytes = 0L
@@ -142,8 +89,8 @@ internal object ActorInformation {
     private val sharedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val TTL = 12L * 60 * 60 * 1000
 
-    private fun configuration(): Pair<String, String> =
-        StremioTmdb.apiKey to StremioTmdb.language()
+    private fun configuration(context: Context): Pair<String, String> =
+        ElevateIdResolver.tmdbApiKey().orEmpty() to getCurrentLocale(context)
 
     private suspend fun request(
         personId: Int, endpoint: String, language: String, apiKey: String
@@ -152,7 +99,7 @@ internal object ActorInformation {
         val url = android.net.Uri.parse("https://api.themoviedb.org/3/person/" + personId + endpoint)
             .buildUpon().appendQueryParameter("language", language)
             .appendQueryParameter("api_key", apiKey).build().toString()
-        val response = StremioC.customSession.get(url, timeout = 15L)
+        val response = app.get(url, timeout = 15L)
         if (response.code !in 200..299) {
             throw IllegalStateException(when (response.code) {
                 401 -> "TMDB API key was rejected (401)"
@@ -246,18 +193,18 @@ internal object ActorInformation {
     }
 
 
-    internal class Controller(private val fragment: Fragment, private val sourceUrl: String?) {
+    internal class Controller(private val fragment: Fragment) {
         private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
-        private val stateKey = "stremioc_actor_info_return"
+        private val stateKey = "elevate_actor_info_return"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         private var dialog: AppCompatDialog? = null
         private var originActorFocus: View? = null
         private var focusedCreditKey: String? = null
-        private var detailHandoff: StremioDetailHandoff? = null
+        private var detailHandoff: ElevateActorHandoff? = null
         private var originState: androidx.lifecycle.SavedStateHandle? = null
         private var requestJob: kotlinx.coroutines.Job? = null
         private var preserve = false
-        private var currentPerson: ActorPersonRef? = null
+        private var currentPerson: ElevateActorPersonRef? = null
         private var currentSource: String? = null
         private var currentOrigin: String? = null
         private var scroll: ScrollView? = null
@@ -274,18 +221,13 @@ internal object ActorInformation {
             model.page.observe(fragment.viewLifecycleOwner, pageObserver)
         }
 
-        fun click(position: Int, item: ActorData, originCard: View? = null) {
+        fun click(person: ElevateActorPersonRef, originCard: View? = null) {
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
             originActorFocus = if (isLayout(TV)) originCard else null
             focusedCreditKey = null
-            val provider = model.currentRepo?.api as? StremioC
-            val actualUrl = sourceUrl ?: page.url
-            val ref = resolve(actualUrl, provider, page, position, item)
             bioExpanded = false
             creditScroll.clear()
-            if (ref == null) {
-                show(null, ActorPersonRef(null, item.actor.name, item.actor.image, false), page.url)
-            } else show(ref.first, ref.second, page.url)
+            show(null, person, page.url)
         }
 
         private fun state(): androidx.lifecycle.SavedStateHandle? =
@@ -321,7 +263,7 @@ internal object ActorInformation {
             val raw = state()?.get<String>(stateKey) ?: return
             val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
             if (obj.optString("origin") != page.url) return
-            val ref = ActorPersonRef(
+            val ref = ElevateActorPersonRef(
                 obj.optInt("id").takeIf { it > 0 },
                 obj.optString("name"),
                 obj.optString("photo").takeIf { it.isNotBlank() && it != "null" },
@@ -345,7 +287,7 @@ internal object ActorInformation {
                 this.text = text
                 textSize = size
                 setTextColor(fragment.requireContext().colorFromAttribute(R.attr.textColor))
-                if (strong) applyStremioCNativeFont(bold = true)
+                if (strong) applyElevateNativeFont(bold = true)
                 setPadding(dp(8), dp(6), dp(8), dp(6))
             }
 
@@ -353,7 +295,7 @@ internal object ActorInformation {
             orientation = LinearLayout.VERTICAL
         }
 
-        private fun show(originProvider: String?, actor: ActorPersonRef, origin: String, resumeY: Int = 0) {
+        private fun show(originProvider: String?, actor: ElevateActorPersonRef, origin: String, resumeY: Int = 0) {
             if (!fragment.isAdded || closed) return
             if (dialog?.isShowing == true && currentPerson == actor && currentSource == originProvider) return
             originState = runCatching {
@@ -376,6 +318,7 @@ internal object ActorInformation {
             val nativePosterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
             val nativePosterFlights = mutableMapOf<String, Deferred<coil3.Image?>>()
             val nativePrefetched = HashSet<String>()
+            val customPrefetched = HashSet<String>()
             fun nativePosterUrl(credit: Credit): String? =
                 credit.poster?.takeIf { it.startsWith("/") }
                     ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
@@ -408,21 +351,45 @@ internal object ActorInformation {
                     }
                 }
             }
-            fun ImageView.loadSharedNativePoster(url: String?) {
+            fun ImageView.loadSharedNativePoster(url: String?, credit: Credit) {
                 setImageResource(R.drawable.default_cover)
-                if (url.isNullOrBlank()) return
+                val image = this
                 val initial = drawable
-                nativePrefetched.add(url)
-                val flight = requestNativePoster(url)
+                if (!url.isNullOrBlank()) nativePrefetched.add(url)
+                val flight = url?.let(::requestNativePoster)
                 nativePosterScope.launch {
                     try {
-                        val decoded = flight.await()
-                        if (decoded != null && dialog === windowDialog && drawable === initial)
-                            setImageDrawable(decoded.asDrawable(resources))
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Keep the original placeholder on a failed image request.
+                        val decoded = flight?.await()
+                        if (decoded != null && dialog === windowDialog &&
+                            image.drawable === initial && image.isAttachedToWindow)
+                            image.setImageDrawable(decoded.asDrawable(resources))
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                      catch (_: Exception) { /* Keep native placeholder on failure. */ }
+
+                    // Custom Posters is independent of the Actor Information toggle.
+                    if (dialog !== windowDialog || !image.isAttachedToWindow ||
+                        !ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS))
+                        return@launch
+                    val config = LibraryPosterPrefs.get(activity)
+                    if (!config.ready) return@launch
+                    val movie = credit.media == "movie"
+                    val ids = withContext(Dispatchers.IO) {
+                        PosterIds(tmdb = credit.id.toString()).preferImdb(movie)
+                    }
+                    val version = if (config.service == PosterService.XRDB)
+                        withContext(Dispatchers.IO) { ElevateXrdbVersion.resolve(config) }
+                    else null
+                    val primary = config.image(ids, movie, version)
+                    val fallback = if (ids.imdb != null)
+                        config.image(ids.copy(imdb = null), movie, version)
+                    else null
+                    for (poster in listOfNotNull(primary, fallback).distinct()) {
+                        val result = PosterWipe.load(image, poster) {
+                            dialog === windowDialog && image.isAttachedToWindow &&
+                                ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS) &&
+                                LibraryPosterPrefs.get(activity) == config
+                        }
+                        if (result.success || result.error == "stale") break
                     }
                 }
             }
@@ -430,7 +397,7 @@ internal object ActorInformation {
             var focusedCreditView: View? = null
             val navigation = (activity.supportFragmentManager
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
-            val handoff = StremioDetailHandoff(
+            val handoff = ElevateActorHandoff(
                 activity, windowDialog, navigation,
                 onLeave = {
                     if (dialog === windowDialog) {
@@ -482,7 +449,7 @@ internal object ActorInformation {
                 if (activity.theme.resolveAttribute(
                         android.R.attr.selectableItemBackgroundBorderless, ripple, true
                     ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
-                if (isLayout(TV)) foreground = tvOutlinedForeground(this, null)
+                if (isLayout(TV)) foreground = elevateActorOutlinedForeground(this, null)
                 setOnClickListener { windowDialog.dismiss() }
             }
             heading.addView(back, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.START))
@@ -499,7 +466,7 @@ internal object ActorInformation {
             }
             val bodyFrame = FrameLayout(activity)
             bodyFrame.addView(body, FrameLayout.LayoutParams(-1, -2))
-            val skeleton = StremioLoading(activity, 3)
+            val skeleton = ElevateActorLoading(activity, 3)
             bodyFrame.addView(skeleton, FrameLayout.LayoutParams(-1, -1))
             body.visibility = View.INVISIBLE
             skeleton.loading(true)
@@ -571,7 +538,7 @@ internal object ActorInformation {
                 visibility = View.GONE
                 isClickable = true
                 isFocusable = true
-                foreground = tvOutlinedForeground(this)
+                foreground = elevateActorOutlinedForeground(this)
             }
 
             var biographyReady = false
@@ -678,7 +645,7 @@ internal object ActorInformation {
                 revealBody()
                 return
             }
-            val (key, language) = configuration()
+            val (key, language) = configuration(fragment.requireContext())
             if (key.isBlank()) {
                 biography.text = "CloudStream TMDB API key is unavailable."
                 revealBody()
@@ -690,7 +657,7 @@ internal object ActorInformation {
                 container.addView(label("Retry", 15f, true).apply {
                     isClickable = true
                     isFocusable = true
-                    foreground = tvOutlinedForeground(this)
+                    foreground = elevateActorOutlinedForeground(this)
                     setOnClickListener { retry() }
                 })
             }
@@ -756,7 +723,7 @@ internal object ActorInformation {
                         details.addView(label("Retry profile", 14f, true).apply {
                             isClickable = true
                             isFocusable = true
-                            foreground = tvOutlinedForeground(this)
+                            foreground = elevateActorOutlinedForeground(this)
                             setOnClickListener { begin() }
                         })
                     }
@@ -782,18 +749,32 @@ internal object ActorInformation {
                         val upcoming = all.filter { item -> item.date != null && item.date > today }
                             .sortedBy(Credit::date)
                         if (all.isEmpty()) filmArea.addView(label("No credits available."))
-                        val preloadTargets = LinkedHashSet<String>()
                         val preloadSections = mutableListOf<() -> Unit>()
                         fun preparePosters(entries: List<Credit>, shown: Int) {
                             val end = (shown + 32).coerceAtMost(entries.size)
                             prefetchNative(entries, end)
+                            if (!ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS))
+                                return
+                            val config = LibraryPosterPrefs.get(activity)
+                            if (!config.ready) return
                             entries.take(end).forEach { credit ->
-                                preloadTargets.add(
-                                    "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}"
-                                )
+                                val identity = "${credit.media}:${credit.id}"
+                                if (!customPrefetched.add(identity)) return@forEach
+                                nativePosterScope.launch {
+                                    val movie = credit.media == "movie"
+                                    val ids = withContext(Dispatchers.IO) {
+                                        PosterIds(tmdb = credit.id.toString()).preferImdb(movie)
+                                    }
+                                    val version = if (config.service == PosterService.XRDB)
+                                        withContext(Dispatchers.IO) { ElevateXrdbVersion.resolve(config) }
+                                    else null
+                                    val poster = config.image(ids, movie, version) ?: return@launch
+                                    if (dialog === windowDialog &&
+                                        ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS) &&
+                                        LibraryPosterPrefs.get(activity) == config)
+                                        PosterWipe.prefetch(activity, poster, dp(114), dp(180))
+                                }
                             }
-                            // Standard TMDB identities; no dependency on Elevate classes.
-                            filmArea.tag = "elevate.actor.prefetch.v1" to preloadTargets.toList()
                         }
                         listOf("Popular" to popular, "Latest" to latest,
                             "Upcoming" to upcoming).forEach { (title, entries) ->
@@ -844,11 +825,10 @@ internal object ActorInformation {
                                             addView(ImageView(activity).apply {
                                                 scaleType = ImageView.ScaleType.CENTER_CROP
                                                 isDuplicateParentStateEnabled = true
-                                                foreground = themedPressedForeground(this)
+                                                foreground = elevateActorPressedForeground(this)
                                                 val url = nativePosterUrl(credit)
                                                 // Standard TMDB artwork identity, independent of any plugin settings.
-                                                tag = "tmdb:${if (credit.media == "movie") "movie" else "series"}:${credit.id}" to url
-                                                loadSharedNativePoster(url)
+                                                loadSharedNativePoster(url, credit)
                                             }, ViewGroup.LayoutParams(-1, -1))
                                         }
 
@@ -927,35 +907,49 @@ internal object ActorInformation {
         }
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
-            if (detailHandoff?.isActive == true) return 
-
-            val source = providerUrl ?: (model.currentRepo?.api as? StremioC)
-                ?.mainUrl?.let(::stremioManifestUrl)
-            val provider = getSafeAllProviders().filterIsInstance<StremioC>()
-                .firstOrNull { it.hasMainPage && stremioManifestUrl(it.mainUrl) == source }
-                ?: run {
-                    android.widget.Toast.makeText(fragment.context,
-                        "Original StremioC addon is unavailable.", android.widget.Toast.LENGTH_SHORT).show()
-                    return
-                }
+            if (detailHandoff?.isActive == true || closed) return
             val movie = credit.media == "movie"
-            val payload = StremioC.LoadData(
-                id = "tmdb:" + credit.id, type = if (movie) "movie" else "series",
-                addonUrl = provider.mainUrl
-            )
-            val result = provider.newMovieSearchResponse(
-                credit.title, payload.toJson(), if (movie) TvType.Movie else TvType.TvSeries
-            ) {
-                this.posterUrl = credit.poster?.takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
-            }
-            scroll?.let { save() }
-            val covered = detailHandoff?.begin() == true
-            SearchHelper.handleSearchClickCallback(
-                SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, result))
-            if (!covered) {
-                preserve = true
-                dialog?.dismiss()
+            val provider = model.currentRepo?.api
+            scope.launch {
+                val results = withContext(Dispatchers.IO) {
+                    try { provider?.search(credit.title).orEmpty() }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { emptyList() }
+                }
+                val creditYear = credit.date?.take(4)?.toIntOrNull()
+                val matching = results.filter { item ->
+                    item.name.equals(credit.title, ignoreCase = true) &&
+                        (item.type in setOf(TvType.Movie, TvType.AnimeMovie)) == movie &&
+                        (creditYear == null || item.year == creditYear)
+                }
+                val candidate = matching.singleOrNull()
+                if (!fragment.isAdded || closed || dialog?.isShowing != true) return@launch
+                scroll?.let { save() }
+                if (candidate == null) {
+                    val activity = fragment.activity ?: return@launch
+                    val searchId = activity.resources.getIdentifier("navigation_search", "id",
+                        activity.packageName)
+                    if (searchId == 0) return@launch
+                    preserve = true
+                    dialog?.dismiss()
+                    val enter = activity.resources.getIdentifier("enter_anim", "anim",
+                        activity.packageName)
+                    val exit = activity.resources.getIdentifier("exit_anim", "anim",
+                        activity.packageName)
+                    activity.navigate(searchId, Bundle().apply {
+                        putString("search_query", credit.title)
+                        putBoolean("global_detail_search", true)
+                    }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                        .setPopEnterAnim(enter).setPopExitAnim(exit).build())
+                } else {
+                    val covered = detailHandoff?.begin() == true
+                    SearchHelper.handleSearchClickCallback(
+                        SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, candidate))
+                    if (!covered) {
+                        preserve = true
+                        dialog?.dismiss()
+                    }
+                }
             }
         }
 

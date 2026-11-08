@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
@@ -12,8 +11,6 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewTreeObserver
-import android.view.inspector.WindowInspector
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -64,11 +61,6 @@ internal class RecommendationPosterHook(private val application: Application) :
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val screens = mutableMapOf<Fragment, Screen>()
-    private val windows = IdentityHashMap<View, TaggedWindow>()
-    private var focusTree: ViewTreeObserver? = null
-    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
-        main.post { discoverWindows() }
-    }
     private var host: FragmentActivity? = null
     private var setting = LibraryPosterPrefs.get(application)
     private var revision = 0
@@ -89,7 +81,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                 revision++
                 unavailable.clear()
                 screens.values.toList().forEach { it.refresh() }
-                windows.values.toList().forEach { it.refresh() }
             }
         }
     }
@@ -133,11 +124,6 @@ internal class RecommendationPosterHook(private val application: Application) :
         detach()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
-        activity.window.decorView.viewTreeObserver.let { tree ->
-            focusTree = tree
-            if (tree.isAlive) tree.addOnWindowFocusChangeListener(focusListener)
-        }
-        main.post { discoverWindows() }
         fun scan(manager: FragmentManager) {
             for (fragment in manager.fragments) {
                 fragment.view?.let { attach(fragment, it) }
@@ -149,10 +135,6 @@ internal class RecommendationPosterHook(private val application: Application) :
 
     private fun detach() {
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
-        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
-        focusTree = null
-        windows.values.toList().forEach { it.close() }
-        windows.clear()
         screens.values.toList().forEach { it.close() }
         screens.clear()
         host = null
@@ -163,187 +145,6 @@ internal class RecommendationPosterHook(private val application: Application) :
         if (screens[fragment]?.list === list) return
         screens.remove(fragment)?.close()
         screens[fragment] = Screen(list).also { it.open() }
-    }
-
-    /**
-     * Observe ordinary TMDB-identified image views in dialogs. The images expose
-     * standard TMDB media identities, not plugin objects, callbacks or settings.
-     */
-    private fun discoverWindows() {
-        val activity = host ?: return
-        val roots: List<View> = if (Build.VERSION.SDK_INT >= 29) {
-            WindowInspector.getGlobalWindowViews()
-        } else runCatching {
-            val type = Class.forName("android.view.WindowManagerGlobal")
-            val manager = type.getMethod("getInstance").invoke(null)
-            @Suppress("UNCHECKED_CAST")
-            type.getDeclaredField("mViews").apply { isAccessible = true }
-                .get(manager) as List<View>
-        }.getOrDefault(emptyList())
-        val active = roots.filter { root ->
-            root !== activity.window.decorView && root.isAttachedToWindow &&
-                owner(root.context) === activity
-        }.toSet()
-        windows.keys.toList().filter { it !in active }.forEach {
-            windows.remove(it)?.close()
-        }
-        active.forEach { window ->
-            if (!windows.containsKey(window)) {
-                windows[window] = TaggedWindow(window).also { it.open() }
-            }
-        }
-    }
-
-    private fun owner(context: Context): Activity? {
-        var current = context
-        repeat(12) {
-            if (current is Activity) return current
-            current = (current as? ContextWrapper)?.baseContext ?: return null
-        }
-        return null
-    }
-
-    private inner class TaggedWindow(private val root: View) {
-        private val applied = IdentityHashMap<ImageView, Pair<String, String?>>()
-        private val loads = IdentityHashMap<ImageView, Job>()
-        private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { scan() }
-        private val prefetched = HashSet<String>()
-        private val prefetchJobs = mutableListOf<Job>()
-        private var tree: ViewTreeObserver? = null
-
-        private fun clearPreloads() {
-            prefetchJobs.forEach { it.cancel() }
-            prefetchJobs.clear()
-            prefetched.clear()
-        }
-
-        private fun schedulePreloads(identities: List<*>) {
-            prefetchJobs.removeAll { it.isCompleted }
-            val density = root.resources.displayMetrics.density
-            identities.forEach { identity ->
-                val match = (identity as? String)?.let { TMDB_ARTWORK.matchEntire(it) }
-                    ?: return@forEach
-                val movie = match.groupValues[1] == "movie"
-                // Reserve the identity synchronously; scan() runs on every layout.
-                if (!prefetched.add(match.value)) return@forEach
-                val config = setting
-                prefetchJobs.add(scope.launch {
-                    if (!root.isAttachedToWindow || !config.ready) return@launch
-                    val tmdb = match.groupValues[2]
-                    val ids = PosterIds(tmdb = tmdb).preferImdb(movie)
-                    val version = if (config.service == PosterService.XRDB)
-                        ElevateXrdbVersion.resolve(config) else null
-                    if (!root.isAttachedToWindow || setting != config) return@launch
-                    val poster = config.image(ids, movie, version)
-                        ?: return@launch
-                    if (poster !in unavailable) {
-                        PosterWipe.prefetch(root.context, poster,
-                            (114 * density).toInt(), (180 * density).toInt())
-                    }
-                })
-            }
-        }
-
-        fun open() {
-            root.viewTreeObserver.let {
-                tree = it
-                if (it.isAlive) it.addOnGlobalLayoutListener(layoutListener)
-            }
-            scan()
-        }
-
-        fun close() {
-            tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
-            tree = null
-            clearPreloads()
-            loads.values.toList().forEach { it.cancel() }
-            loads.clear()
-            applied.forEach { (image, data) ->
-                PosterWipe.cancel(image)
-                restore(image, data.second)
-            }
-            applied.clear()
-        }
-
-        fun refresh() {
-            clearPreloads()
-            loads.values.toList().forEach { it.cancel() }
-            loads.clear()
-            applied.forEach { (image, data) ->
-                PosterWipe.cancel(image)
-                restore(image, data.second)
-            }
-            applied.clear()
-            scan()
-        }
-
-        private fun restore(image: ImageView, original: String?) {
-            if (!image.isAttachedToWindow) return
-            if (original.isNullOrBlank()) image.loadImage(R.drawable.default_cover)
-            else image.loadImage(original) { crossfade(false) }
-        }
-
-        private fun scan() {
-            if (!setting.ready || !root.isAttachedToWindow) return
-            val found = IdentityHashMap<ImageView, Boolean>()
-            var actorPreloads: List<*>? = null
-            fun walk(view: View) {
-                val tag = view.tag as? Pair<*, *>
-                if (tag?.first == "elevate.actor.prefetch.v1")
-                    actorPreloads = tag.second as? List<*>
-                if (view is ImageView) {
-                    val data = view.tag as? Pair<*, *>
-                    val identity = data?.first as? String
-                    val match = identity?.let { TMDB_ARTWORK.matchEntire(it) }
-                    if (match != null) {
-                        found[view] = true
-                        val original = data?.second as? String
-                        val value = identity!! to original
-                        if (applied[view] != value) {
-                            val movie = match.groupValues[1] == "movie"
-                            val config = setting
-                            applied[view] = value
-                            val image = view
-                            PosterWipe.cancel(image)
-                            PosterWipe.ensurePlaceholder(image)
-                            loads.remove(image)?.cancel()
-                            loads[image] = scope.launch {
-                                val tmdb = match.groupValues[2]
-                                val ids = PosterIds(tmdb = tmdb).preferImdb(movie)
-                                val version = if (config.service == PosterService.XRDB)
-                                    ElevateXrdbVersion.resolve(config) else null
-                                if (applied[image] == value && setting == config &&
-                                    image.isAttachedToWindow) {
-                                    val primary = config.image(ids, movie, version)
-                                    val alternate = if (ids.imdb != null)
-                                        config.image(PosterIds(tmdb = tmdb), movie, version)
-                                    else null
-                                    for (poster in listOfNotNull(primary, alternate).distinct()) {
-                                        if (poster in unavailable) continue
-                                        val result = PosterWipe.load(image, poster) {
-                                            applied[image] == value && setting == config
-                                        }
-                                        if (result.success || result.error == "stale") break
-                                        unavailable.add(poster)
-                                    }
-                                }
-                                loads.remove(image)
-                            }
-                        }
-                    }
-                }
-                if (view is ViewGroup) {
-                    for (index in 0 until view.childCount) walk(view.getChildAt(index))
-                }
-            }
-            walk(root)
-            actorPreloads?.let(::schedulePreloads)
-            applied.keys.toList().filter { it !in found }.forEach { image ->
-                loads.remove(image)?.cancel()
-                PosterWipe.cancel(image)
-                applied.remove(image)
-            }
-        }
     }
 
     private data class Cover(
@@ -862,7 +663,6 @@ internal class RecommendationPosterHook(private val application: Application) :
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) {
             use(activity)
-            main.post { discoverWindows() }
         }
     }
     override fun onActivityDestroyed(activity: Activity) {
@@ -882,6 +682,5 @@ internal class RecommendationPosterHook(private val application: Application) :
         val ANILIST = Regex("anilist:([0-9]+)")
         val KITSU = Regex("kitsu:([0-9]+)")
         val SIMKL = Regex("simkl:([0-9]+)")
-        val TMDB_ARTWORK = Regex("tmdb:(movie|series):([0-9]+)")
     }
 }
