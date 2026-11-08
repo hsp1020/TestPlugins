@@ -239,14 +239,6 @@ internal class ElevateActorHook(private val appContext: Application) :
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
         trace("RESOLVE_START", "url=${page.url.take(140)} type=$type ids=$ids season=$selectedSeason multi=$multiSeason anime=$anime")
-        // Resolve selected seasons independently, never apply a series-wide anime
-        // character list to another season just because it is present on LoadResponse.
-        if (anime && !movie && selectedSeason != null && ids.imdb != null) {
-            val mapping = ElevateAnimeIdResolver.resolveImdbSeason(ids.imdb, selectedSeason)
-            val seasonal = mapping?.anilist?.let { anilist(it) }
-            trace("ANIME_SEASON_RESULT", "imdb=${ids.imdb} season=$selectedSeason anilist=${mapping?.anilist} actors=${seasonal?.actors?.size ?: 0}")
-            if (seasonal != null) return seasonal
-        }
         val options = if (anime) {
             if (multiSeason) emptyList() else listOf("anilist", "mal")
         } else listOf("tmdb", "imdb", "simkl")
@@ -266,6 +258,14 @@ internal class ElevateActorHook(private val appContext: Application) :
             }
             trace("RESOLVE_STEP_RESULT", "candidate=$candidate actors=${result?.actors?.size ?: 0}")
             if (result != null) return result
+        }
+        // A single-season anime page already carries its own title-specific IDs.
+        // Consult the IMDb season mapping only for multi-season pages or as a fallback.
+        if (anime && !movie && selectedSeason != null && ids.imdb != null) {
+            val mapping = ElevateAnimeIdResolver.resolveImdbSeason(ids.imdb, selectedSeason)
+            val seasonal = mapping?.anilist?.let { anilist(it) }
+            trace("ANIME_SEASON_RESULT", "imdb=${ids.imdb} season=$selectedSeason anilist=${mapping?.anilist} actors=${seasonal?.actors?.size ?: 0}")
+            if (seasonal != null) return seasonal
         }
         return if (anime && !multiSeason && !ids.hasNonKitsu() && ids.kitsu != null)
             animeMapped("kitsu", ids.kitsu) else null
