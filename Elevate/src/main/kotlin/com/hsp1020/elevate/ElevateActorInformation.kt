@@ -61,6 +61,7 @@ import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -201,7 +202,10 @@ internal object ElevateActorInformation {
     internal class Controller(private val fragment: Fragment) {
         private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
         private val stateKey = "elevate_actor_info_return"
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main +
+            CoroutineExceptionHandler { _, error ->
+                Log.e("ElevateActorTrace", "DIALOG_COROUTINE_FAILURE", error)
+            })
         private var dialog: AppCompatDialog? = null
         private var originActorFocus: View? = null
         private var focusedCreditKey: String? = null
@@ -819,7 +823,12 @@ internal object ElevateActorInformation {
                                                     focusedCreditKey = focusKey
                                                     focusedCreditView = it
                                                 }
-                                                openCredit(originProvider, credit, it)
+                                                try {
+                                                    openCredit(originProvider, credit, it)
+                                                } catch (error: Throwable) {
+                                                    if (error is VirtualMachineError || error is ThreadDeath) throw error
+                                                    Log.e("ElevateActorTrace", "CREDIT_CLICK_FAILURE id=${credit.id} media=${credit.media}", error)
+                                                }
                                             }
                                             if (isLayout(TV)) setOnFocusChangeListener { focusedView, focused ->
                                                 if (focused && position >= shown - 3) focusedView.post {
@@ -921,18 +930,25 @@ internal object ElevateActorInformation {
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
             if (detailHandoff?.isActive == true || closed) return
             val movie = credit.media == "movie"
-            val provider = model.currentRepo?.api
+            Log.d("ElevateActorTrace", "CREDIT_OPEN id=${credit.id} media=${credit.media} title=${credit.title} origin=$providerUrl")
             scope.launch {
+                try {
+                val provider = model.currentRepo?.api
+                Log.d("ElevateActorTrace", "CREDIT_SEARCH_START id=${credit.id} provider=${provider?.javaClass?.simpleName}")
                 val results = withContext(Dispatchers.IO) {
                     try { provider?.search(credit.title).orEmpty() }
                     catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { emptyList() }
+                    catch (error: Exception) {
+                        Log.e("ElevateActorTrace", "CREDIT_SEARCH_FAILURE id=${credit.id}", error)
+                        emptyList()
+                    }
                 }
                 val matching = results.filter { item ->
                     item.name.equals(credit.title, ignoreCase = true) &&
                         (item.type in setOf(TvType.Movie, TvType.AnimeMovie)) == movie
                 }
                 val candidate = matching.singleOrNull()
+                Log.d("ElevateActorTrace", "CREDIT_SEARCH_RESULT id=${credit.id} results=${results.size} exact=${matching.size} route=${if (candidate == null) "search" else "detail"}")
                 if (!fragment.isAdded || closed || dialog?.isShowing != true) return@launch
                 scroll?.let { save() }
                 if (candidate == null) {
@@ -940,6 +956,7 @@ internal object ElevateActorInformation {
                     val searchId = activity.resources.getIdentifier("navigation_search", "id",
                         activity.packageName)
                     if (searchId == 0) return@launch
+                    Log.d("ElevateActorTrace", "CREDIT_NAV_SEARCH id=${credit.id} destination=$searchId")
                     preserve = true
                     dialog?.dismiss()
                     val enter = activity.resources.getIdentifier("enter_anim", "anim",
@@ -953,12 +970,20 @@ internal object ElevateActorInformation {
                         .setPopEnterAnim(enter).setPopExitAnim(exit).build())
                 } else {
                     val covered = detailHandoff?.begin() == true
+                    Log.d("ElevateActorTrace", "CREDIT_NAV_DETAIL id=${credit.id} covered=$covered api=${candidate.apiName}")
                     SearchHelper.handleSearchClickCallback(
                         SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, candidate))
                     if (!covered) {
                         preserve = true
                         dialog?.dismiss()
                     }
+                }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    if (error is VirtualMachineError || error is ThreadDeath) throw error
+                    detailHandoff?.close()
+                    Log.e("ElevateActorTrace", "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
                 }
             }
         }
