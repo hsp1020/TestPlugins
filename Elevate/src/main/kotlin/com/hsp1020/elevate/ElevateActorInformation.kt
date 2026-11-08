@@ -916,11 +916,9 @@ internal object ElevateActorInformation {
                     catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { emptyList() }
                 }
-                val creditYear = credit.date?.take(4)?.toIntOrNull()
                 val matching = results.filter { item ->
                     item.name.equals(credit.title, ignoreCase = true) &&
-                        (item.type in setOf(TvType.Movie, TvType.AnimeMovie)) == movie &&
-                        (creditYear == null || item.year == creditYear)
+                        (item.type in setOf(TvType.Movie, TvType.AnimeMovie)) == movie
                 }
                 val candidate = matching.singleOrNull()
                 if (!fragment.isAdded || closed || dialog?.isShowing != true) return@launch
