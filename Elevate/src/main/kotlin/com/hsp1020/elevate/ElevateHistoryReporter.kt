@@ -14,8 +14,6 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
 import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
 import com.lagradost.cloudstream3.SimklSyncServices
-import com.lagradost.cloudstream3.syncproviders.AccountManager
-import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.function.Consumer
@@ -58,7 +56,6 @@ import java.util.UUID
 internal class ElevateHistoryReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
-    private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
     private val downloadedMappings = LinkedHashMap<String, Pair<Long, Item>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queue = Channel<Report>(64)
@@ -579,67 +576,11 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     }
 
     private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> {
-        if (id.toLongOrNull()?.let { it > 0L } != true) return emptyMap()
-        val key = (if (movie) "movie:" else "series:") + id
-        val now = System.currentTimeMillis()
-        simklMappings[key]?.takeIf {
-            now - it.first < (if (it.second.isEmpty()) 300_000L else 3_600_000L)
-        }?.let { return it.second }
-        val ids = try {
-            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-                ?.authData()
-            if (auth == null) {
-                emptyMap()
-            } else {
-                val headers = SimklApi.getHeaders(auth.token)
-                val clientId = headers["simkl-api-key"]
-                if (clientId.isNullOrBlank()) emptyMap() else {
-                    val params = mapOf("client_id" to clientId)
-                    val search = org.json.JSONArray(app.get("https://api.simkl.com/search/id",
-                        params = params + ("simkl" to id), headers = headers, timeout = 15L).text)
-                    val item = (0 until search.length()).mapNotNull { search.optJSONObject(it) }
-                        .firstOrNull {
-                            it.optJSONObject("ids")?.optString("simkl") == id &&
-                                when (it.optString("type")) {
-                                    "movie" -> movie
-                                    "tv" -> !movie
-                                    "anime" -> true
-                                    else -> false
-                                }
-                        }
-                    val segment = when (item?.optString("type")) {
-                        "movie" -> "movies"
-                        "tv" -> "tv"
-                        "anime" -> "anime"
-                        else -> null
-                    }
-                    if (segment == null) emptyMap() else {
-                        val detail = org.json.JSONObject(app.get(
-                            "https://api.simkl.com/" + segment + "/" + id,
-                            params = params, headers = headers, timeout = 15L).text)
-                        val externalIds = detail.optJSONObject("ids")
-                        val isMovie = when (segment) {
-                            "movies" -> true
-                            "tv" -> false
-                            else -> detail.optString("anime_type").equals("movie", true)
-                        }
-                        if (externalIds == null || externalIds.optString("simkl") != id ||
-                            isMovie != movie) emptyMap() else buildMap {
-                            externalIds.optString("imdb").takeIf { it.matches(Regex("tt[0-9]+")) }
-                                ?.let { put("imdb", it) }
-                            externalIds.optString("tmdb").takeIf {
-                                it.toLongOrNull()?.let { n -> n > 0L } == true
-                            }?.let { put("tmdb", it) }
-                        }
-                    }
-                }
-            }
-        } catch (error: Exception) {
-            emptyMap()
+        val mapped = ElevateIdResolver.simkl(id, movie) ?: return emptyMap()
+        return buildMap {
+            mapped.imdb?.let { put("imdb", it) }
+            mapped.tmdb?.let { put("tmdb", it) }
         }
-        simklMappings[key] = now to ids
-        if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
-        return ids
     }
 
 

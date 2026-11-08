@@ -40,8 +40,6 @@ import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.Resource
-import com.lagradost.cloudstream3.syncproviders.AccountManager
-import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
@@ -84,7 +82,6 @@ internal class ElevateMdbRatings(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, Cached>) = size > 300
     }
     private val inflight = mutableMapOf<Key, Deferred<List<String>>>()
-    private val simklMappings = LinkedHashMap<String, Pair<Long, Key?>>()
     private val icons = linkedMapOf(
         "Ⓜ️" to "rating_mal", "⭐" to "rating_imdb",
         "🟢" to "rating_letterboxd", "Ⓣ" to "rating_trakt",
@@ -249,67 +246,14 @@ internal class ElevateMdbRatings(
         return flight.await()
     }
 
-    // Resolve Simkl-only titles with the same authenticated ID route as History Sync.
+    // Reuse one verified Simkl ID mapping across MDB, history and poster features.
     private suspend fun resolveSimkl(id: String, movie: Boolean, hash: Int): Key? {
-        if (id.toLongOrNull()?.let { it > 0 } != true) return null
-        val lookup = listOf(id, movie, hash).joinToString("|")
-        val now = System.currentTimeMillis()
-        synchronized(simklMappings) {
-            simklMappings[lookup]?.takeIf {
-                now - it.first < if (it.second == null) 300_000L else 3_600_000L
-            }?.let { return it.second }
+        val mapped = ElevateIdResolver.simkl(id, movie) ?: return null
+        return when {
+            mapped.imdb != null -> Key("imdb", mapped.imdb, movie, hash)
+            mapped.tmdb != null -> Key("tmdb", mapped.tmdb, movie, hash)
+            else -> null
         }
-        val found = try {
-            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }?.authData()
-            val headers = auth?.let { SimklApi.getHeaders(it.token) }
-            val clientId = headers?.get("simkl-api-key")
-            if (headers == null || clientId.isNullOrBlank()) null else {
-                val params = mapOf("client_id" to clientId)
-                val result = JSONArray(app.get("https://api.simkl.com/search/id",
-                    params = params + ("simkl" to id), headers = headers, timeout = 15L).text)
-                val match = (0 until result.length()).mapNotNull { result.optJSONObject(it) }
-                    .firstOrNull {
-                        it.optJSONObject("ids")?.optString("simkl") == id &&
-                            when (it.optString("type")) {
-                                "movie" -> movie
-                                "tv" -> !movie
-                                "anime" -> true
-                                else -> false
-                            }
-                    }
-                val segment = when (match?.optString("type")) {
-                    "movie" -> "movies"
-                    "tv" -> "tv"
-                    "anime" -> "anime"
-                    else -> null
-                }
-                if (segment == null) null else {
-                    val detail = JSONObject(app.get("https://api.simkl.com/" + segment + "/" + id,
-                        params = params, headers = headers, timeout = 15L).text)
-                    val ids = detail.optJSONObject("ids")
-                    val isMovie = if (segment == "movies") true else if (segment == "tv") false
-                        else detail.optString("anime_type").equals("movie", true)
-                    if (ids == null || ids.optString("simkl") != id || isMovie != movie) null
-                    else {
-                        val imdb = ids.optString("imdb").takeIf(imdbPattern::matches)
-                        val tmdb = ids.optString("tmdb").takeIf {
-                            it.toLongOrNull()?.let { number -> number > 0 } == true
-                        }
-                        when {
-                            imdb != null -> Key("imdb", imdb, movie, hash)
-                            tmdb != null -> Key("tmdb", tmdb, movie, hash)
-                            else -> null
-                        }
-                    }
-                }
-            }
-        } catch (e: CancellationException) { throw e }
-          catch (_: Exception) { null }
-        synchronized(simklMappings) {
-            simklMappings[lookup] = System.currentTimeMillis() to found
-            if (simklMappings.size > 48) simklMappings.remove(simklMappings.keys.first())
-        }
-        return found
     }
 
     /** Map Kitsu/MAL/AniList through AIOStreams; preserve Simkl for Simkl-only IDs. */
@@ -1101,7 +1045,6 @@ internal class ElevateMdbRatings(
         bindings.clear()
         io.cancel()
         synchronized(cache) { cache.clear() }
-        synchronized(simklMappings) { simklMappings.clear() }
     }
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) use(activity)

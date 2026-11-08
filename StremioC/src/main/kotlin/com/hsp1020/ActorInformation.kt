@@ -378,7 +378,7 @@ internal object ActorInformation {
             val nativePrefetched = HashSet<String>()
             fun nativePosterUrl(credit: Credit): String? =
                 credit.poster?.takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                    ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
             fun requestNativePoster(url: String): Deferred<coil3.Image?> =
                 nativePosterFlights[url] ?: nativePosterScope.async(Dispatchers.IO) {
                     val request = ImageRequest.Builder(activity.applicationContext)
@@ -947,7 +947,7 @@ internal object ActorInformation {
                 credit.title, payload.toJson(), if (movie) TvType.Movie else TvType.TvSeries
             ) {
                 this.posterUrl = credit.poster?.takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                    ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
             }
             scroll?.let { save() }
             val covered = detailHandoff?.begin() == true

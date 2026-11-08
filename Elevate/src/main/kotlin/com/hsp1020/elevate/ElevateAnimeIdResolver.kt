@@ -2,6 +2,12 @@ package com.hsp1020.elevate
 
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
@@ -20,6 +26,8 @@ internal object ElevateAnimeIdResolver {
         "aio.atbphosting.com", "aiostreams.stremio.ru", "aiostreams.viren070.me"
     )
     private val limiter = Semaphore(3)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val flights = mutableMapOf<String, Deferred<Mapping?>>()
     private val cache = object : LinkedHashMap<String, Pair<Long, Mapping?>>(48, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, Mapping?>>) =
             size > 96
@@ -41,7 +49,13 @@ internal object ElevateAnimeIdResolver {
                 now - it.first < if (it.second == null) 300_000L else 86_400_000L
             }?.let { return it.second }
         }
-        val found = try {
+        val flight = synchronized(cache) {
+            cache[key]?.takeIf {
+                System.currentTimeMillis() - it.first in 0 until
+                    if (it.second == null) 300_000L else 86_400_000L
+            }?.let { return it.second }
+            flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                val found = try {
             withTimeoutOrNull(15_000L) {
                 limiter.withPermit {
                     var result: Mapping? = null
@@ -75,7 +89,16 @@ internal object ElevateAnimeIdResolver {
             }
         } catch (e: CancellationException) { throw e }
           catch (_: Exception) { null }
-        synchronized(cache) { cache[key] = System.currentTimeMillis() to found }
-        return found
+                synchronized(cache) { cache[key] = System.currentTimeMillis() to found }
+                found
+            }.also { task ->
+                flights[key] = task
+                task.invokeOnCompletion {
+                    synchronized(cache) { if (flights[key] === task) flights.remove(key) }
+                }
+            }
+        }
+        flight.start()
+        return flight.await()
     }
 }

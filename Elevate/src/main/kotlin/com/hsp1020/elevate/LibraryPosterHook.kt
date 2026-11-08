@@ -41,7 +41,6 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.SyncAPI
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
@@ -50,7 +49,6 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import java.net.URI
 import java.util.WeakHashMap
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -58,21 +56,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import coil3.request.crossfade
 import coil3.request.placeholder
 import coil3.dispose
-import org.json.JSONObject
 
 internal class LibraryPosterHook(private val appContext: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val semaphore = Semaphore(10)
-    private val mapCache = ConcurrentHashMap<String, CacheEntry>()
     private val unavailable = mutableSetOf<String>()
     private val bound = WeakHashMap<ImageView, Binding>()
     private val pending = mutableMapOf<ImageView, Job>()
@@ -88,7 +80,6 @@ internal class LibraryPosterHook(private val appContext: Application) :
     private var xrdbCheckAt = 0L
     private var xrdbCheck: Job? = null
 
-    private data class CacheEntry(val value: PosterIds?, val time: Long)
     private data class Binding(
         val identity: String, val url: String, val original: String?,
         val headers: Map<String, String>?, val generation: Int
@@ -153,7 +144,6 @@ internal class LibraryPosterHook(private val appContext: Application) :
         appContext.unregisterActivityLifecycleCallbacks(this)
         detachActivity()
         scope.cancel()
-        mapCache.clear()
     }
 
     private fun use(activity: FragmentActivity) {
@@ -421,23 +411,24 @@ internal class LibraryPosterHook(private val appContext: Application) :
         // Do not start an unversioned XRDB image before the initial profile lookup.
         if (setting.service == PosterService.XRDB && setting.xrdbProfile.isNotBlank() &&
             !xrdbVersionChecked) return
-        val version = xrdbVersion
         pending[image] = scope.launch {
             try {
                 val ids = withContext(Dispatchers.IO) {
-                    resolve(item, setting.service == PosterService.XRDB)
+                    val mapped = resolve(item, setting.service == PosterService.XRDB)
+                    if (setting.service == PosterService.XRDB && mapped?.imdb == null &&
+                        mapped?.tmdb != null) {
+                        mapped.copy(imdb = ElevateIdResolver.imdbForTmdb(
+                            mapped.tmdb, item.type == TvType.Movie))
+                    } else mapped
                 }
                 if (revision != token || bound[image] !== marker ||
                     !image.isAttachedToWindow) return@launch
-                val originalPoster = ids?.let { setting.image(it, item.type == TvType.Movie) }
-                if (originalPoster == null) {
+                val poster = ids?.let { setting.image(it, item.type == TvType.Movie,
+                    if (setting.service == PosterService.XRDB) xrdbVersion else null) }
+                if (poster == null) {
                     showNative(image, id)
                     return@launch
                 }
-                val poster = if (setting.service == PosterService.XRDB && version != null) {
-                    Uri.parse(originalPoster).buildUpon().appendQueryParameter("v", version)
-                        .build().toString()
-                } else originalPoster
                 if (poster in unavailable) {
                     showNative(image, id)
                     return@launch
@@ -504,7 +495,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
         if (xrdbCheckAt != 0L && now - xrdbCheckAt in 0 until 5_000L) return
         xrdbCheckAt = now
         xrdbCheck = scope.launch {
-            val token = withContext(Dispatchers.IO) { fetchXrdbVersion(snapshot) }
+            val token = withContext(Dispatchers.IO) { ElevateXrdbVersion.resolve(snapshot) }
             if (config != snapshot || library?.view == null) return@launch
             val initial = !xrdbVersionChecked
             xrdbVersionChecked = true
@@ -525,49 +516,6 @@ internal class LibraryPosterHook(private val appContext: Application) :
             bound.clear()
             unavailable.clear()
             rescan()
-        }
-    }
-
-    private suspend fun fetchXrdbVersion(snapshot: PosterConfig): String? {
-        val base = Uri.parse(snapshot.xrdbBase.trim().trimEnd('/'))
-        if (base.scheme != "https" || base.host.isNullOrBlank() ||
-            !base.userInfo.isNullOrEmpty() || !base.query.isNullOrEmpty() ||
-            !base.fragment.isNullOrEmpty()) return null
-
-        fun valid(value: String?): String? =
-            value?.takeIf { XRDB_VERSION.matches(it) }
-
-        val headers = if (snapshot.xrdbRenderKey.isBlank()) emptyMap() else
-            mapOf("Authorization" to "Bearer ${snapshot.xrdbRenderKey}")
-        val profileUrl = base.buildUpon().appendPath("profile")
-            .appendPath(snapshot.xrdbProfile).build().toString()
-        try {
-            val body = app.get(profileUrl, headers = headers, timeout = 6L).text
-            valid(JSONObject(body).optString("versionToken"))?.let { return it }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            // Password-protected profiles cannot expose the profile API without a password.
-        }
-
-        // The public XRDB Stremio metadata endpoint embeds the current version
-        // in meta.poster, including for password-protected profiles.
-        val fallback = base.buildUpon().appendPath("stremio")
-            .appendPath("c").appendPath(snapshot.xrdbProfile)
-            .appendPath("meta").appendPath("movie").appendPath("tt0111161.json")
-            .apply {
-                if (snapshot.xrdbRenderKey.isNotBlank()) {
-                    appendQueryParameter("key", snapshot.xrdbRenderKey)
-                }
-            }.build().toString()
-        return try {
-            val body = app.get(fallback, headers = headers, timeout = 8L).text
-            val poster = JSONObject(body).optJSONObject("meta")?.optString("poster")
-            valid(poster?.let { Uri.parse(it).getQueryParameter("v") })
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            null
         }
     }
 
@@ -592,7 +540,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
             syncData?.get("imdb"), syncData?.get("tmdb"),
             syncData?.get("mal"), syncData?.get("anilist"), syncData?.get("kitsu")
         )
-        if (usable(saved)) return saved
+        if (usable(saved) && (canonical(saved) || !forXrdb)) return saved
 
         val source = "${item.url} ${item.syncId}"
         ids(IMDB.find(source)?.value, TMDB.find(source)?.groupValues?.get(1))
@@ -604,7 +552,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
             "anilist.co" -> "anilist"
             "myanimelist.net" -> "mal"
             "kitsu.app" -> "kitsu"
-            else -> return null
+            else -> return if (forXrdb) saved else null
         }
         // CloudStream's Simkl anime cards store the Simkl ID in syncId
         // (and may use a /tv/ URL even for anime). It is never an IMDb/TMDB ID.
@@ -637,70 +585,36 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 }
                 entryIds
             }.getOrNull()
-            if (usable(cached)) return cached
+            if (usable(cached) && canonical(cached)) return cached
             if (cached != null) alternate = cached
+            val remote = ElevateIdResolver.simkl(numeric,
+                item.type == TvType.Movie || item.type == TvType.AnimeMovie)
+            val mapped = remote?.let { ids(it.imdb, it.tmdb, it.mal, it.anilist, it.kitsu) }
+            if (usable(mapped) && canonical(mapped)) return mapped
+            if (mapped != null) alternate = mapped
         } else {
             val direct = when (provider) {
                 "mal" -> ids(null, null, mal = numeric)
                 "anilist" -> ids(null, null, anilist = numeric)
                 else -> ids(null, null, kitsu = numeric)
             }
-            if (usable(direct)) return direct
+            if (usable(direct) && (canonical(direct) || !forXrdb)) return direct
             alternate = direct
         }
 
         // Only unresolved anime IDs enter AIOStreams. Never query its anime
         // endpoint with a raw Simkl ID, as that lookup type is unsupported.
         val candidates = listOfNotNull(
-            alternate?.mal?.let { "malId" to it },
-            alternate?.anilist?.let { "anilistId" to it },
-            alternate?.kitsu?.let { "kitsuId" to it }
+            alternate?.mal?.let { "mal" to it },
+            alternate?.anilist?.let { "anilist" to it },
+            alternate?.kitsu?.let { "kitsu" to it }
         )
         for ((kind, id) in candidates) {
-            val mapping = fetchAnimeIds(kind, id)
-            if (canonical(mapping)) return mapping
+            val mapping = ElevateAnimeIdResolver.resolve(kind, id) ?: continue
+            val result = ids(mapping.imdb, mapping.tmdb)
+            if (canonical(result)) return result
         }
-        return null
-    }
-
-    private suspend fun fetchAnimeIds(kind: String, id: String): PosterIds? {
-        val query = "idType=${kind}&idValue=${id}"
-        fun fresh(entry: CacheEntry): Boolean {
-            val age = System.currentTimeMillis() - entry.time
-            val ttl = if (entry.value == null) 900_000L else 86_400_000L
-            return age >= 0 && age < ttl
-        }
-        mapCache[query]?.takeIf(::fresh)?.let { return it.value }
-        return semaphore.withPermit {
-            mapCache[query]?.takeIf(::fresh)?.let { return@withPermit it.value }
-            val result = withTimeoutOrNull(14_000L) {
-                for (server in ANIME_HOSTS) {
-                    val json = try {
-                        app.get("https://${server}/api/v1/anime?${query}", timeout = 4L).text
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        continue
-                    }
-                    val root = runCatching { JSONObject(json) }.getOrNull() ?: continue
-                    if (!root.optBoolean("success")) continue
-                    if (root.isNull("data")) break
-                    val mapped = root.optJSONObject("data")?.optJSONObject("mappings") ?: continue
-                    // Do not apply a mapping for a different season / anime title.
-                    if (mapped.optString(kind) != id) continue
-                    val imdb = mapped.optString("imdbId").takeIf { IMDB.matches(it) }
-                    val tmdb = mapped.optString("themoviedbId")
-                        .takeIf { it.toLongOrNull()?.let { n -> n > 0 } == true }
-                    if (imdb != null || tmdb != null) {
-                        return@withTimeoutOrNull PosterIds(imdb, tmdb)
-                    }
-                }
-                null
-            }
-            mapCache[query] = CacheEntry(result, System.currentTimeMillis())
-            if (mapCache.size > 500) mapCache.keys.firstOrNull()?.let { mapCache.remove(it) }
-            result
-        }
+        return if (forXrdb) alternate ?: saved else null
     }
 
     override fun onActivityResumed(activity: Activity) {
@@ -720,12 +634,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
     private companion object {
         const val LIBRARY_CLASS = "com.lagradost.cloudstream3.ui.library.LibraryFragment"
-        val XRDB_VERSION = Regex("[a-fA-F0-9]{8}")
         val IMDB = Regex("tt[0-9]{5,10}")
         val TMDB = Regex("tmdb:(?:(?:movie|series|tv):)?([0-9]+)")
-        val ANIME_HOSTS = listOf("aiostreams.elfhosted.com",
-            "aiostreams.fortheweak.cloud", "aiostreamsfortheweebsstable.midnightignite.me",
-            "aio.atbphosting.com", "aiostreams.stremio.ru", "aiostreams.viren070.me")
     }
 }
 
@@ -803,7 +713,7 @@ internal data class PosterConfig(
 ) {
     val ready get() = if (service == PosterService.XRDB) xrdbBase.isNotBlank() else key.isNotBlank()
 
-    fun image(ids: PosterIds, isMovie: Boolean): String? {
+    fun image(ids: PosterIds, isMovie: Boolean, version: String? = null): String? {
         if (!ready || !ids.available) return null
         val kind = if (isMovie) "movie" else "series"
         if (service == PosterService.XRDB) {
@@ -821,6 +731,7 @@ internal data class PosterConfig(
                 .apply {
                     if (xrdbProfile.isNotBlank()) appendQueryParameter("config", xrdbProfile)
                     if (xrdbRenderKey.isNotBlank()) appendQueryParameter("key", xrdbRenderKey)
+                    if (version != null) appendQueryParameter("v", version)
                 }.build().toString()
         }
         if (ids.imdb == null && ids.tmdb == null) return null

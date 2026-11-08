@@ -35,8 +35,6 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.syncproviders.AccountManager
-import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
@@ -57,7 +55,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -76,14 +73,11 @@ internal class RecommendationPosterHook(private val application: Application) :
     private var setting = LibraryPosterPrefs.get(application)
     private var revision = 0
     private val unavailable = mutableSetOf<String>()
-    private val simklLimiter = Semaphore(10)
     private val detailLimiter = Semaphore(10)
     private data class DetailIds(val ids: PosterIds, val simkl: String?, val movie: Boolean)
     private data class DetailLookup(val ids: DetailIds?)
     private val detailMappings = LinkedHashMap<String, Pair<Long, DetailLookup>>()
     private val detailFlights = mutableMapOf<String, Deferred<DetailLookup>>()
-    private val simklMappings = LinkedHashMap<String, Pair<Long, DetailIds?>>()
-    private val simklFlights = mutableMapOf<String, Deferred<DetailIds?>>()
 
     private val preferences = application.getSharedPreferences(LibraryPosterPrefs.FILE, Context.MODE_PRIVATE)
 
@@ -128,10 +122,6 @@ internal class RecommendationPosterHook(private val application: Application) :
         detach()
         scope.cancel()
         unavailable.clear()
-        synchronized(simklMappings) {
-            simklMappings.clear()
-            simklFlights.clear()
-        }
         synchronized(detailMappings) {
             detailMappings.clear()
             detailFlights.clear()
@@ -234,17 +224,24 @@ internal class RecommendationPosterHook(private val application: Application) :
                 val match = (identity as? String)?.let { TMDB_ARTWORK.matchEntire(it) }
                     ?: return@forEach
                 val movie = match.groupValues[1] == "movie"
-                val poster = setting.image(PosterIds(tmdb = match.groupValues[2]), movie)
-                    ?: return@forEach
-                if (poster !in unavailable && prefetched.add(poster)) {
-                    prefetchJobs.add(scope.launch {
-                        if (root.isAttachedToWindow && setting.ready && poster !in unavailable) {
-                            // Match the 114x180dp CENTER_CROP actor ImageViews.
-                            PosterWipe.prefetch(root.context, poster,
-                                (114 * density).toInt(), (180 * density).toInt())
-                        }
-                    })
-                }
+                // Reserve the identity synchronously; scan() runs on every layout.
+                if (!prefetched.add(match.value)) return@forEach
+                val config = setting
+                prefetchJobs.add(scope.launch {
+                    if (!root.isAttachedToWindow || !config.ready) return@launch
+                    val tmdb = match.groupValues[2]
+                    val imdb = if (config.service == PosterService.XRDB)
+                        ElevateIdResolver.imdbForTmdb(tmdb, movie) else null
+                    val version = if (config.service == PosterService.XRDB)
+                        ElevateXrdbVersion.resolve(config) else null
+                    if (!root.isAttachedToWindow || setting != config) return@launch
+                    val poster = config.image(PosterIds(imdb, tmdb), movie, version)
+                        ?: return@launch
+                    if (poster !in unavailable) {
+                        PosterWipe.prefetch(root.context, poster,
+                            (114 * density).toInt(), (180 * density).toInt())
+                    }
+                })
             }
         }
 
@@ -306,24 +303,34 @@ internal class RecommendationPosterHook(private val application: Application) :
                         if (applied[view] != value) {
                             val movie = match.groupValues[1] == "movie"
                             val config = setting
-                            val poster = config.image(PosterIds(tmdb = match.groupValues[2]), movie)
-                            if (poster != null && poster !in unavailable) {
-                                applied[view] = value
-                                val image = view
-                                PosterWipe.cancel(image)
-                                PosterWipe.ensurePlaceholder(image)
-                                loads.remove(image)?.cancel()
-                                loads[image] = scope.launch {
-                                    val result = PosterWipe.load(image, poster) {
-                                        applied[image] == value && setting.ready
-                                    }
-                                    if (applied[image] == value && !result.success &&
-                                        result.error != "stale") {
+                            applied[view] = value
+                            val image = view
+                            PosterWipe.cancel(image)
+                            PosterWipe.ensurePlaceholder(image)
+                            loads.remove(image)?.cancel()
+                            loads[image] = scope.launch {
+                                val tmdb = match.groupValues[2]
+                                val imdb = if (config.service == PosterService.XRDB)
+                                    ElevateIdResolver.imdbForTmdb(tmdb, movie) else null
+                                val version = if (config.service == PosterService.XRDB)
+                                    ElevateXrdbVersion.resolve(config) else null
+                                if (applied[image] == value && setting == config &&
+                                    image.isAttachedToWindow) {
+                                    val ids = PosterIds(imdb, tmdb)
+                                    val primary = config.image(ids, movie, version)
+                                    val alternate = if (imdb != null && config.service == PosterService.XRDB)
+                                        config.image(PosterIds(tmdb = tmdb), movie, version)
+                                    else null
+                                    for (poster in listOfNotNull(primary, alternate).distinct()) {
+                                        if (poster in unavailable) continue
+                                        val result = PosterWipe.load(image, poster) {
+                                            applied[image] == value && setting == config
+                                        }
+                                        if (result.success || result.error == "stale") break
                                         unavailable.add(poster)
-                                        // The original drawable was preserved during loading.
                                     }
-                                    loads.remove(image)
                                 }
+                                loads.remove(image)
                             }
                         }
                     }
@@ -348,7 +355,7 @@ internal class RecommendationPosterHook(private val application: Application) :
         var custom: String? = null, var failed: Boolean = false,
         var fallback: PosterIds? = null, var fallbackMovie: Boolean = false,
         var fallbackAttempted: Boolean = false,
-        var imdbFallback: String? = null
+        var alternativePoster: String? = null
     )
 
     private inner class Screen(val list: RecyclerView) {
@@ -459,8 +466,8 @@ internal class RecommendationPosterHook(private val application: Application) :
                 return
             }
             unavailable.add(poster)
-            val imdbPoster = cover.imdbFallback?.takeIf { it != poster && it !in unavailable }
-            cover.imdbFallback = null
+            val imdbPoster = cover.alternativePoster?.takeIf { it != poster && it !in unavailable }
+            cover.alternativePoster = null
             if (imdbPoster != null) {
                 cover.custom = imdbPoster
                 loadCustom(image, cover, imdbPoster)
@@ -535,9 +542,9 @@ internal class RecommendationPosterHook(private val application: Application) :
                         resolvedIds.imdb != null || resolvedIds.tmdb != null ||
                             config.service == PosterService.XRDB && resolvedIds.available -> initial
                         resolvedSimkl != null -> {
-                            withContext(Dispatchers.IO) {
-                                simklIds(resolvedSimkl, resolvedMovie, simklType)
-                            } ?: initial
+                            ElevateIdResolver.simkl(resolvedSimkl, resolvedMovie, simklType)
+                                ?.let { DetailIds(PosterIds(it.imdb, it.tmdb, it.mal,
+                                    it.anilist, it.kitsu), null, it.movie) } ?: initial
                         }
                         else -> initial
                     }
@@ -549,7 +556,7 @@ internal class RecommendationPosterHook(private val application: Application) :
                         (candidate.imdb == null && candidate.tmdb == null))
                     // One existing AIOStreams mapping for the season, shared by all
                     // poster services that require an IMDb/TMDB artwork identifier.
-                    val season = if (animeIdentity && config.service != PosterService.XRDB) {
+                    val season = if (animeIdentity) {
                         withContext(Dispatchers.IO) { animeIds(candidate) }
                     } else null
                     val posterIds = when {
@@ -558,16 +565,26 @@ internal class RecommendationPosterHook(private val application: Application) :
                             candidate.copy(imdb = null, tmdb = null)
                         else -> candidate
                     }
-                    // Match actor-dialog TMDB URLs when both identifiers are known.
-                    // Keep XRDB anime IDs and the original IMDb-only fallback.
-                    val primaryIds = if (posterIds.tmdb != null)
-                        posterIds.copy(imdb = null) else posterIds
-                    val primary = config.image(primaryIds, mapped.movie)
-                    val imdbPoster = if (posterIds.tmdb != null && posterIds.imdb != null)
-                        config.image(PosterIds(imdb = posterIds.imdb), mapped.movie) else null
+                    val selected = if (config.service == PosterService.XRDB &&
+                        posterIds.imdb == null && posterIds.tmdb != null)
+                        posterIds.copy(imdb = ElevateIdResolver.imdbForTmdb(
+                            posterIds.tmdb, mapped.movie)) else posterIds
+                    val version = if (config.service == PosterService.XRDB)
+                        ElevateXrdbVersion.resolve(config) else null
+                    val primaryIds = if (config.service != PosterService.XRDB &&
+                        selected.tmdb != null) selected.copy(imdb = null) else selected
+                    val alternativeIds = when {
+                        selected.tmdb == null || selected.imdb == null -> null
+                        config.service == PosterService.XRDB -> selected.copy(imdb = null)
+                        else -> PosterIds(imdb = selected.imdb)
+                    }
+                    val primary = config.image(primaryIds, mapped.movie, version)
+                    val alternative = alternativeIds?.let {
+                        config.image(it, mapped.movie, version)
+                    }
                     val poster = primary?.takeUnless { it in unavailable }
-                        ?: imdbPoster?.takeUnless { it in unavailable }
-                    current.imdbFallback = imdbPoster?.takeIf {
+                        ?: alternative?.takeUnless { it in unavailable }
+                    current.alternativePoster = alternative?.takeIf {
                         poster == primary && it != primary
                     }
                     if (animeIdentity &&
@@ -758,106 +775,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                 return PosterIds(mapped.imdb, mapped.tmdb, ids.mal, ids.anilist, ids.kitsu)
         }
         return null
-    }
-
-    /** Simkl ID mapping is shared by concurrent cards; anime's actual media type wins. */
-    private suspend fun simklIds(id: String, movie: Boolean, route: String?): DetailIds? {
-        val directSegment = when (route) {
-            "movie", "movies" -> "movies"
-            "show", "shows", "tv" -> "tv"
-            "anime" -> "anime"
-            else -> null
-        }
-        val key = (directSegment ?: if (movie) "movies" else "tv") + ":" + id
-        val now = System.currentTimeMillis()
-        val cached = synchronized(simklMappings) {
-            simklMappings[key]?.takeIf {
-                now - it.first < if (it.second == null) 300_000L else 3_600_000L
-            }
-        }
-        if (cached != null) return cached.second
-        val flight = synchronized(simklMappings) {
-            simklMappings[key]?.takeIf {
-                System.currentTimeMillis() - it.first < if (it.second == null) 300_000L else 3_600_000L
-            }?.let { return it.second }
-            simklFlights[key] ?: scope.async(Dispatchers.IO) {
-                val found = try {
-                    simklLimiter.withPermit {
-                        // Limit the API work, excluding time queued for a slot.
-                        withTimeoutOrNull(12_000L) {
-                            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-                                ?.authData() ?: return@withTimeoutOrNull null
-                            val headers = SimklApi.getHeaders(auth.token)
-                            val clientId = headers["simkl-api-key"]?.takeIf(String::isNotBlank)
-                                ?: return@withTimeoutOrNull null
-                            val params = mapOf("client_id" to clientId)
-                            // CineSimkl cards already contain the verified Simkl type
-                            // and ID. A direct detail request avoids a redundant ID search.
-                            val segment = directSegment ?: run {
-                                val search = JSONArray(app.get("https://api.simkl.com/search/id",
-                                    params = params + ("simkl" to id),
-                                    headers = headers, timeout = 6L).text)
-                                val match = (0 until search.length()).mapNotNull { search.optJSONObject(it) }
-                                    .firstOrNull {
-                                        it.optJSONObject("ids")?.optString("simkl") == id &&
-                                            when (it.optString("type")) {
-                                                "movie" -> movie
-                                                "tv" -> !movie
-                                                "anime" -> true
-                                                else -> false
-                                            }
-                                    } ?: return@withTimeoutOrNull null
-                                when (match.optString("type")) {
-                                    "movie" -> "movies"
-                                    "tv" -> "tv"
-                                    "anime" -> "anime"
-                                    else -> return@withTimeoutOrNull null
-                                }
-                            }
-                            val detail = JSONObject(app.get("https://api.simkl.com/" +
-                                segment + "/" + id, params = params, headers = headers,
-                                timeout = 6L).text)
-                            val external = detail.optJSONObject("ids") ?: return@withTimeoutOrNull null
-                            val correctType = when (segment) {
-                                "movies" -> true
-                                "tv" -> false
-                                else -> detail.optString("anime_type").equals("movie", true)
-                            }
-                            if (external.optString("simkl") != id ||
-                                (segment != "anime" && correctType != movie)) return@withTimeoutOrNull null
-                            val imdb = external.optString("imdb").takeIf(IMDB_EXACT::matches)
-                            val tmdb = external.optString("tmdb").toLongOrNull()
-                                ?.takeIf { it > 0L }?.toString()
-                            fun numeric(name: String) = external.optString(name)
-                                .toLongOrNull()?.takeIf { it > 0L }?.toString()
-                            PosterIds(imdb, tmdb,
-                                mal = if (segment == "anime") numeric("mal") else null,
-                                anilist = if (segment == "anime") numeric("anilist") else null,
-                                kitsu = if (segment == "anime") numeric("kitsu") else null
-                            ).takeIf { it.available }?.let { DetailIds(it, null, correctType) }
-                        }
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    null
-                }
-                synchronized(simklMappings) {
-                    simklFlights.remove(key)
-                    simklMappings[key] = System.currentTimeMillis() to found
-                    if (simklMappings.size > 64) simklMappings.remove(simklMappings.keys.first())
-                }
-                found
-            }.also { task ->
-                simklFlights[key] = task
-                task.invokeOnCompletion {
-                    synchronized(simklMappings) {
-                        if (simklFlights[key] === task) simklFlights.remove(key)
-                    }
-                }
-            }
-        }
-        return flight.await()
     }
 
     private fun directIds(card: SearchResponse): Pair<PosterIds, String?> {
