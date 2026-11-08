@@ -225,7 +225,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                 timeout = 10L
             )
             val results = JSONObject(response.text).optJSONArray("results") ?: return emptyList()
-            val titles = ArrayList<String>(10)
+            val titles = ArrayList<String>(20)
             for (index in 0 until results.length()) {
                 val item = results.optJSONObject(index) ?: continue
                 if (item.optString("media_type") !in listOf("tv", "movie")) continue
@@ -233,7 +233,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                     ?: item.optString("name").takeIf { it.isNotBlank() }
                     ?: continue
                 if (title !in titles) titles.add(title)
-                if (titles.size == 10) break
+                if (titles.size == 20) break
             }
             titles
         } catch (cancel: CancellationException) {
