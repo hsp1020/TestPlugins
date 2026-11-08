@@ -3913,6 +3913,7 @@ class YoutubeProvider(
 
                         // Apply server-provided browse reload token before any pagination.
                         val mode = channelSortMode(cleanUrl)
+                        var sortedNextToken: String? = null
                         if (mode != ChannelSortMode.LATEST) {
                             val chips = nativeSortChips(tabData)
                             val index = if (mode == ChannelSortMode.POPULAR) 1 else 2
@@ -3936,11 +3937,30 @@ class YoutubeProvider(
                                     interceptor = ytInterceptor
                                 ).parsedSafe<Map<String, Any>>()
                                 val sortedItems = findContinuationItemsRecursive(sorted)
+                                val sortedEpisodes = mutableListOf<Episode>()
                                 if (!sortedItems.isNullOrEmpty()) {
+                                    extractVideosFromItems(sortedItems, sortedEpisodes, tabName == "shorts")
+                                }
+                                if (sortedEpisodes.isNotEmpty()) {
                                     initialItems = sortedItems
                                 } else {
-                                    throw ErrorLoadingException("YouTube channel sorting failed: $tabName / $mode")
+                                    // A reload response may wrap items in a different action.
+                                    // Re-scan every supported renderer, preserving server order.
+                                    val renderers = mutableListOf<Map<*, *>>()
+                                    findAllRenderers(sorted, renderers)
+                                    val flattened = renderers.map { mapOf("lockupViewModel" to it) }
+                                    extractVideosFromItems(flattened, sortedEpisodes, tabName == "shorts")
+                                    if (sortedEpisodes.isNotEmpty()) initialItems = flattened
+                                    Log.i("YouTubeChannel", "event=CHANNEL_SORT_RESPONSE " +
+                                        "tab=$tabName mode=$mode items=${sortedItems?.size ?: 0} " +
+                                        "renderers=${renderers.size} videos=${sortedEpisodes.size} " +
+                                        "keys=${sorted?.keys?.joinToString(",") ?: "null"} " +
+                                        "firstItemKeys=${(sortedItems?.firstOrNull() as? Map<*, *>)?.keys}")
                                 }
+                                if (sortedEpisodes.isEmpty()) {
+                                    throw ErrorLoadingException("YouTube channel sorting returned no playable videos: $tabName / $mode")
+                                }
+                                sortedNextToken = findTokenRecursive(sorted)
                             } else if (tabName == "videos") {
                                 throw ErrorLoadingException("YouTube channel sort token unavailable: $mode")
                             }
@@ -3949,8 +3969,8 @@ class YoutubeProvider(
                             extractVideosFromItems(initialItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
                         }
 
-                        currentToken = findContinuationFromItems(initialItems)
-                        if (currentToken.isNullOrBlank()) {
+                        currentToken = sortedNextToken ?: findContinuationFromItems(initialItems)
+                        if (currentToken.isNullOrBlank() && mode == ChannelSortMode.LATEST) {
                             val conts = findContinuationItemsRecursive(tabData)
                             currentToken = findContinuationFromItems(conts)
                         }
@@ -4018,7 +4038,8 @@ class YoutubeProvider(
                     } catch (e: Exception) {
                         cacheable = false
                         Log.w("YouTubeChannel",
-                            "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName}")
+                            "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName} " +
+                            "message=${e.message?.take(120)}")
                         logError(e)
                     }
                     val duplicates = tabEpisodes.size - tabEpisodes.distinctBy {

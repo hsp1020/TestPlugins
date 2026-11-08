@@ -1203,6 +1203,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
                 pageUrl.contains("/c/") || pageUrl.contains("/user/"))
         private var channelLoading = false
+        private var channelInitialExpansionStarted = false
         private var channelSortButton: TextView? = null
         private var channelSortWatcher: TextWatcher? = null
 
@@ -1564,11 +1565,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             val previous = cached.episodes.size
             cached.episodes = response.episodes
-            provider.cacheChannelResponse(pageUrl, response)
+            // APIRepository retains a separate 10-minute cache keyed by request URL.
+            // Use a unique loader key without changing the canonical response ID.
+            val separator = if (pageUrl.contains("?")) "&" else "?"
+            val refreshUrl = "$pageUrl${separator}cs_youtube_refresh=${System.nanoTime()}"
+            provider.cacheChannelResponse(refreshUrl, response)
             Log.i("YouTubeChannel", "event=CHANNEL_UI_CACHE_UPDATED reason=$reason " +
                 "before=$previous after=${cached.episodes.size} " +
-                "sameObject=${cached === response}")
-            model.load(owner.activity, pageUrl, "YouTube", false,
+                "newLoaderKey=true canonicalUrl=${response.url == pageUrl}")
+            model.load(owner.activity, refreshUrl, "YouTube", false,
                 DubStatus.None, null, loadTrailers = false)
             return true
         }
@@ -1579,16 +1584,22 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 owner.view !== root || screens[owner] !== this ||
                 !root.isAttachedToWindow) return
             val ranges = model.rangeSelections.value.orEmpty()
-            if (ranges.isEmpty() || model.selectedRangeIndex.value != ranges.lastIndex) return
+            if (ranges.isEmpty()) return
             val provider = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
             if (!provider.channelHasMorePages(pageUrl)) return
+            val initialExpansion = !channelInitialExpansionStarted &&
+                provider.channelLoadedPages(pageUrl) == 2 &&
+                model.selectedRangeIndex.value != null &&
+                model.selectedRangeIndex.value!! >= 0
+            if (!initialExpansion && model.selectedRangeIndex.value != ranges.lastIndex) return
+            if (initialExpansion) channelInitialExpansionStarted = true
             val nextPages = (provider.channelLoadedPages(pageUrl) + 5)
                 .coerceAtMost(provider.channelPageLimit())
             if (nextPages <= provider.channelLoadedPages(pageUrl)) return
             val requestedMode = YoutubeProvider.channelSortMode(pageUrl)
             Log.i("YouTubeChannel", "event=CHANNEL_UI_EXPAND_REQUEST " +
                 "pages=${provider.channelLoadedPages(pageUrl)} target=$nextPages " +
-                "ranges=${ranges.size} selected=${model.selectedRangeIndex.value}")
+                "initial=$initialExpansion ranges=${ranges.size} selected=${model.selectedRangeIndex.value}")
             channelLoading = true
             owner.viewLifecycleOwner.lifecycleScope.launch {
                 try {
