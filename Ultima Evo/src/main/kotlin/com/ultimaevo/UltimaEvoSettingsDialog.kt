@@ -134,9 +134,6 @@ class UltimaEvoSettingsDialog : DialogFragment() {
         }
     }
 
-    override fun onCreateDialog(savedInstanceState: Bundle?): android.app.Dialog =
-        AlertDialog.Builder(requireContext()).create()
-
     override fun onStart() {
         super.onStart()
         dialog?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
