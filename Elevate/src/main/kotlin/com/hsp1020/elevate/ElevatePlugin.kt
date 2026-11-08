@@ -90,6 +90,7 @@ class ElevatePlugin : Plugin() {
     private var liveHomeAutoplay: LiveHomeAutoplayHook? = null
     private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
+    private var searchSuggestions: ElevateSearchSuggestionsHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
     private var downloadMetadataCapture: ElevateDownloadMetadataCapture? = null
@@ -295,6 +296,14 @@ class ElevatePlugin : Plugin() {
             searchProviderOrder?.stop()
             searchProviderOrder = null
         }
+        if (enabled(ElevateFeature.LOCALIZED_SEARCH_SUGGESTIONS)) {
+            if (searchSuggestions == null) {
+                searchSuggestions = ElevateSearchSuggestionsHook(application).also { it.start() }
+            }
+        } else {
+            searchSuggestions?.stop()
+            searchSuggestions = null
+        }
         val hideHomeHero = enabled(ElevateFeature.HERO_CAROUSEL)
         if (hideHomeHero) {
             if (homeHero == null) homeHero = HomeHeroToggle(application).also { it.start() }
@@ -485,6 +494,8 @@ class ElevatePlugin : Plugin() {
         nativeRecyclerGuard = null
         searchProviderOrder?.stop()
         searchProviderOrder = null
+        searchSuggestions?.stop()
+        searchSuggestions = null
         audioSelector?.stop()
         audioSelector = null
         skipController?.stop()

@@ -32,6 +32,8 @@ internal enum class ElevateFeature(
         "Open full CloudStream search from the title details and retain back navigation."),
     PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
         "Use saved provider order on Home and Search, including related search providers."),
+    LOCALIZED_SEARCH_SUGGESTIONS("Navigation & Search", "Localized Search Suggestions",
+        "Show TMDB titles in the app language and request suggestions 120ms after typing stops."),
     ARTWORK_TRAILERS("Home & Library", "Detail Backdrop & Trailer Picker",
         "Keep detail backgrounds and logos visible, and play trailers from a separate picker instead of replacing the artwork."),
     HERO_CAROUSEL("Home & Library", "Hide Home Hero Carousel",
