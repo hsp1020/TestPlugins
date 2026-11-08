@@ -1474,18 +1474,103 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     {}
                 ) { which ->
                     val next = modes[which]
-                    if (next != YoutubeProvider.channelSortMode(pageUrl)) {
-                        YoutubeProvider.setChannelSortMode(pageUrl, next)
-                        val current = (model.episodes.value as? Resource.Success)
-                            ?.value?.firstOrNull()
-                        current?.parentId?.let { setResultEpisode(it, 1) }
-                        if (owner.isAdded && owner.view === root) {
-                            model.load(owner.activity, pageUrl, "YouTube", false,
-                                DubStatus.None, null, loadTrailers = false)
+                    val previous = YoutubeProvider.channelSortMode(pageUrl)
+                    if (next != previous && !channelLoading) {
+                        val loaded = activeChannelResponse(model)
+                        if (loaded == null) {
+                            Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=native_response_missing")
+                        } else {
+                            val targetPages = provider.channelLoadedPages(pageUrl)
+                                .coerceAtLeast(2).coerceAtMost(provider.channelPageLimit())
+                            val beforeVideos = loaded.episodes.count { it.season == 1 }
+                            Log.i("YouTubeChannel", "event=CHANNEL_SORT_REQUEST from=$previous to=$next " +
+                                "pages=$targetPages beforeVideos=$beforeVideos")
+                            channelLoading = true
+                            owner.viewLifecycleOwner.lifecycleScope.launch {
+                                try {
+                                    YoutubeProvider.setChannelSortMode(pageUrl, next)
+                                    val response = withContext(Dispatchers.IO) {
+                                        provider.loadChannelPages(pageUrl, targetPages)
+                                    }
+                                    val afterVideos = response?.episodes?.count { it.season == 1 } ?: 0
+                                    if (response == null || afterVideos < minOf(beforeVideos, 30)) {
+                                        Log.w("YouTubeChannel", "event=CHANNEL_SORT_FAILED mode=$next " +
+                                            "reason=missing_videos afterVideos=$afterVideos beforeVideos=$beforeVideos")
+                                        YoutubeProvider.setChannelSortMode(pageUrl, previous)
+                                    } else if (screens[owner] !== this@Screen || !owner.isAdded ||
+                                        owner.view !== root) {
+                                        Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=screen_changed")
+                                        YoutubeProvider.setChannelSortMode(pageUrl, previous)
+                                    } else {
+                                        val current = (model.episodes.value as? Resource.Success)
+                                            ?.value?.firstOrNull()
+                                        if (deliverChannelEpisodes(model, provider, response, "sort")) {
+                                            current?.parentId?.let { setResultEpisode(it, 1) }
+                                            Log.i("YouTubeChannel", "event=CHANNEL_SORT_APPLIED mode=$next " +
+                                                "videos=$afterVideos first=${response.episodes.firstOrNull { it.season == 1 }?.data}")
+                                        } else {
+                                            YoutubeProvider.setChannelSortMode(pageUrl, previous)
+                                        }
+                                    }
+                                } catch (error: Exception) {
+                                    YoutubeProvider.setChannelSortMode(pageUrl, previous)
+                                    Log.w("YouTubeChannel", "event=CHANNEL_SORT_FAILED mode=$next " +
+                                        "reason=${error.javaClass.simpleName}", error)
+                                } finally {
+                                    channelLoading = false
+                                    root.post { bindChannelSort(model) }
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        /**
+         * ResultViewModel2 keeps the exact LoadResponse instance held by APIRepository's
+         * 10-minute cache. Its public page LiveData contains only ResultData, not the
+         * cached response, so update that existing channel instance before reloading.
+         */
+        private fun activeChannelResponse(model: ResultViewModel2): TvSeriesLoadResponse? {
+            val fields = model.javaClass.declaredFields.filter {
+                it.name == "currentResponse" ||
+                    com.lagradost.cloudstream3.LoadResponse::class.java.isAssignableFrom(it.type)
+            }
+            for (field in fields) {
+                val response = runCatching {
+                    field.isAccessible = true
+                    field.get(model) as? TvSeriesLoadResponse
+                }.getOrNull()
+                if (response?.apiName == "YouTube" &&
+                    response.url.substringBefore("?").trimEnd('/') ==
+                    pageUrl.substringBefore("?").trimEnd('/')) return response
+            }
+            return null
+        }
+
+        private fun deliverChannelEpisodes(
+            model: ResultViewModel2,
+            provider: YoutubeProvider,
+            response: TvSeriesLoadResponse,
+            reason: String
+        ): Boolean {
+            val owner = fragment ?: return false
+            val cached = activeChannelResponse(model)
+            if (cached == null) {
+                Log.w("YouTubeChannel", "event=CHANNEL_UI_UPDATE_FAILED reason=$reason " +
+                    "cause=native_cached_response_missing episodes=${response.episodes.size}")
+                return false
+            }
+            val previous = cached.episodes.size
+            cached.episodes = response.episodes
+            provider.cacheChannelResponse(pageUrl, response)
+            Log.i("YouTubeChannel", "event=CHANNEL_UI_CACHE_UPDATED reason=$reason " +
+                "before=$previous after=${cached.episodes.size} " +
+                "sameObject=${cached === response}")
+            model.load(owner.activity, pageUrl, "YouTube", false,
+                DubStatus.None, null, loadTrailers = false)
+            return true
         }
 
         private fun loadMoreChannelIfNeeded(model: ResultViewModel2) {
@@ -1525,11 +1610,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             "added=${owner.isAdded} sameView=${owner.view === root}")
                         return@launch
                     }
-                    provider.cacheChannelResponse(pageUrl, response)
                     Log.i("YouTubeChannel", "event=CHANNEL_UI_RELOAD_REQUEST " +
                         "episodes=${response.episodes.size} beforeRanges=${model.rangeSelections.value.orEmpty().size}")
-                    model.load(owner.activity, pageUrl, "YouTube", false,
-                        DubStatus.None, null, loadTrailers = false)
+                    deliverChannelEpisodes(model, provider, response, "expand")
                 } finally {
                     channelLoading = false
                 }

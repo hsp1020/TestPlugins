@@ -3919,6 +3919,8 @@ class YoutubeProvider(
                             val token = chips?.getOrNull(index)?.let {
                                 safeGet(it, "tapCommand", "innertubeCommand", "continuationCommand", "token") as? String
                             }
+                            Log.i("YouTubeChannel", "event=CHANNEL_SORT_TOKEN tab=$tabName mode=$mode " +
+                                "chips=${chips?.size ?: 0} token=${!token.isNullOrBlank()}")
                             if (!token.isNullOrBlank() && !apiKey.isNullOrBlank()) {
                                 val sorted = app.post(
                                     "$mainUrl/youtubei/v1/browse?key=$apiKey",
