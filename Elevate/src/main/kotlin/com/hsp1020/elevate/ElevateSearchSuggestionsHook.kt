@@ -7,6 +7,7 @@ import android.icu.util.ULocale
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -186,16 +187,35 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             }
 
             override fun onQueryTextChange(query: String): Boolean {
-                val handled = native.onQueryTextChange(query)
-                // Preserve current suggestions until the localized response is ready.
-                // The native job must be canceled without clearSuggestions(), which posts
-                // an empty list and makes the RecyclerView briefly disappear.
-                if (query.length >= 2 && query.isNotBlank()) {
-                    runCatching { (suggestionJobField?.get(model) as? Job)?.cancel() }
+                // Native fetchSuggestions() posts an empty list for a one-character query.
+                // Keep the existing suggestions visible while the new result is loading.
+                if (query.length == 1 && query.isNotBlank()) {
+                    cancelNativeRequest()
+                    showTypingUi()
+                    schedule(query)
+                    return true
                 }
+                val handled = native.onQueryTextChange(query)
+                if (query.isNotBlank()) cancelNativeRequest()
                 schedule(query)
                 return handled
             }
+        }
+
+        private fun cancelNativeRequest() {
+            runCatching { (suggestionJobField?.get(model) as? Job)?.cancel() }
+        }
+
+        private fun showTypingUi() {
+            // Mirror the native SearchFragment's nonempty-query visibility changes.
+            val advanced = PreferenceManager.getDefaultSharedPreferences(view.context)
+                .getBoolean("advanced_search", true)
+            root.findViewById<View>(R.id.search_history_recycler)?.visibility = View.GONE
+            root.findViewById<View>(R.id.search_master_recycler)?.visibility =
+                if (advanced) View.VISIBLE else View.GONE
+            root.findViewById<View>(R.id.search_autofit_results)?.visibility =
+                if (advanced) View.GONE else View.VISIBLE
+            // Do not change the suggestion overlay; the observer shows the new list.
         }
 
         fun open() {
@@ -214,7 +234,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
         private fun schedule(query: String) {
             cancelPending()
-            if (query.isBlank() || query.length < 2) return
+            if (query.isBlank()) return
             val serial = generation
             val language = tmdbLanguage(view.context)
             val task = Runnable {
