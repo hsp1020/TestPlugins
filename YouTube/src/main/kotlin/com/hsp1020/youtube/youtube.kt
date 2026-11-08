@@ -57,12 +57,6 @@ class YoutubeProvider(
     val appPrefs: SharedPreferences?
         get() = sharedPref ?: CloudStreamApp.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
-    data class CustomSection(
-        @JsonProperty("name") var name: String = "",
-        @JsonProperty("url") var url: String = "",
-        @JsonProperty("isEnabled") var isEnabled: Boolean = true
-    )
-    
     data class CachedChip(
         @JsonProperty("name") val name: String,
         @JsonProperty("token") val token: String
