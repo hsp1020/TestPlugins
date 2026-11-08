@@ -1281,10 +1281,8 @@ class SettingsBottomFragment(
         tvImport.makeTvCompatible()
 
         tvExport.setOnClickListener {
-            val isStreamPlayExportActive = isStreamPlayInstalled() &&
-                SettingsRepository.isIntegrationEnabled(sharedPref, SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED)
-            val isCineStreamExportActive = isCineStreamInstalled() &&
-                SettingsRepository.isIntegrationEnabled(sharedPref, SettingsRepository.PREF_KEY_CINESTREAM_ENABLED)
+            val isStreamPlayExportActive = isStreamPlayInstalled()
+            val isCineStreamExportActive = isCineStreamInstalled()
 
             uiScope.launch {
                 try {
@@ -1514,9 +1512,7 @@ class SettingsBottomFragment(
 
                                     recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
 
-                                    val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
-                                    val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
-                                    if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
+                                    if (parsedJson.has("stream_play_data")) {
                                         val streamPlayData = parsedJson.optJSONObject("stream_play_data")
                                         if (streamPlayData != null) {
                                             val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
@@ -1529,9 +1525,7 @@ class SettingsBottomFragment(
                                         }
                                     }
 
-                                    val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
-                                    val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                                    if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                                    if (parsedJson.has("cine_stream_data")) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
