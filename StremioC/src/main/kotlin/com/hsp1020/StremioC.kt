@@ -1548,6 +1548,7 @@ open class StremioC(
         }
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(200)
+        private val tmdbCreditsCache = lruCacheMap<String, Pair<TmdbCreditsResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(300)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
         private val animeMappingCache = lruCacheMap<String, Pair<AnimeSeasonMapping, Long>>(5000)
@@ -1991,6 +1992,33 @@ open class StremioC(
     private fun getActorUrl(link: String?): String? {
         if (link == null) return null
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
+    }
+
+    private suspend fun fetchTmdbCredits(mediaType: String, tmdbId: String): AioCredits? {
+        val url = buildTmdbUrl("/$mediaType/$tmdbId/credits")
+        if (url.isBlank()) return null
+        val cached = stremioCacheMemoryRead(tmdbCreditsCache[url], METADATA_CACHE_TTL)
+        val credits = cached?.first ?: withTimeoutOrNull(12_000L) {
+            runSuspendCatching {
+                val text = fetchSharedMetadataText(url)
+                if (text.isBlank()) null else parseJson<TmdbCreditsResponse>(text).also {
+                    tmdbCreditsCache[url] = Pair(it, System.currentTimeMillis())
+                }
+            }.getOrNull()
+        } ?: return null
+
+        fun person(row: TmdbCreditPerson) = AioPerson(
+            name = row.name, character = row.character,
+            photo = getActorUrl(row.profilePath), tmdbId = row.id
+        )
+        return AioCredits(
+            cast = credits.cast.orEmpty().map(::person),
+            directors = credits.crew.orEmpty()
+                .filter { it.job.equals("Director", ignoreCase = true) }.map(::person),
+            writers = credits.crew.orEmpty()
+                .filter { it.job in setOf("Writer", "Screenplay", "Story", "Teleplay") }
+                .map(::person)
+        )
     }
 
     private suspend fun getManifest(): Manifest? = manifestMutex.withLock {
@@ -4301,7 +4329,8 @@ open class StremioC(
         val fetchedEnglishTitle: String?,
         val fetchedVoteAverage: Double? = null,
         val fetchedLogoFallback: Boolean = false,
-        val fetchedGenreIds: List<Int> = emptyList()
+        val fetchedGenreIds: List<Int> = emptyList(),
+        val fetchedBackdrop: String? = null
     )
 
     private data class ProviderArtInfo(
@@ -4770,7 +4799,9 @@ open class StremioC(
                 extractedEnglishTitle,
                 detailRes.vote_average,
                 selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
-                detailRes.genres.orEmpty().mapNotNull { it.id }
+                detailRes.genres.orEmpty().mapNotNull { it.id },
+                detailRes.backdropPath?.takeIf(String::isNotBlank)
+                    ?.let { "https://image.tmdb.org/t/p/w1280$it" }
             )
         }
 
@@ -4994,7 +5025,8 @@ open class StremioC(
                     target?.let { name to it }
                 }.toMap()
             val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
-            val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
+            val addonBackground = sequenceOf(detailedEntry.background, this@CatalogEntry.background)
+                .firstOrNull { !it.isNullOrBlank() }
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
             val nativeActors = aioActorRows(detailedEntry.appExtras)
@@ -5055,6 +5087,16 @@ open class StremioC(
                 recommendationMalId
             ) else null
 
+            val castTmdbId = tmdbIdStr?.takeIf { it.toIntOrNull()?.let { id -> id > 0 } == true }
+            val castTmdbType = tmdbType?.takeIf { it == "movie" || it == "tv" }
+            val creditsDeferred = if (nativeActors.none { !it.crew } &&
+                castTmdbId != null && castTmdbType != null &&
+                (!nonstandardType || eligibleNonstandardId)) {
+                async(Dispatchers.IO) {
+                    aioActorRows(provider.fetchTmdbCredits(castTmdbType, castTmdbId))
+                }
+            } else null
+
             var tmdbData: FetchedTmdbData? = null
             if (tmdbType != null && tmdbIdStr != null &&
                 (!nonstandardType || eligibleNonstandardId)) {
@@ -5073,6 +5115,7 @@ open class StremioC(
                 }
             }
 
+            val finalBackground = addonBackground ?: tmdbData?.fetchedBackdrop
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
             val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
                 .firstOrNull { !it.isNullOrBlank() }
@@ -5199,6 +5242,11 @@ open class StremioC(
             val finalLogoFallback = stremioLogoNeedsTitle(
                 finalLogo, tmdbData?.fetchedLogo, tmdbData?.fetchedLogoFallback == true
             )
+            val fallbackActors = creditsDeferred?.await().orEmpty()
+            val finalActors = if (nativeActors.isEmpty()) fallbackActors
+                else if (nativeActors.none { !it.crew })
+                    nativeActors + fallbackActors.filter { !it.crew }
+                else nativeActors
 
             fun LoadResponse.attachMappedIds() {
                 val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
@@ -5211,10 +5259,10 @@ open class StremioC(
                     finalKitsuId?.let { syncData["kitsu"] = it.toString() }
                 }
                 apiName = provider.getTargetApiName()
-                if (nativeActors.isNotEmpty()) {
-                    actors = nativeActors.map { it.data }
+                if (finalActors.isNotEmpty()) {
+                    actors = finalActors.map { it.data }
                     syncData["tmdb_people"] = org.json.JSONArray().apply {
-                        nativeActors.forEach { row ->
+                        finalActors.forEach { row ->
                             put(org.json.JSONObject()
                                 .put("name", row.data.actor.name)
                                 .put("id", row.id ?: org.json.JSONObject.NULL)
@@ -5435,7 +5483,10 @@ open class StremioC(
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
-                this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
+                this.posterUrl = thumbnail?.takeIf(String::isNotBlank)
+                    ?: tmdbEp?.stillPath?.takeIf(String::isNotBlank)
+                        ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                    ?: TRANSPARENT_PIXEL
 
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
                 if (type != "movie" && type != "series" && !unknownEpisode) {
@@ -5803,7 +5854,8 @@ private data class TmdbDetailResponse(
     @JsonProperty("release_date") val releaseDate: String? = null, 
     @JsonProperty("first_air_date") val firstAirDate: String? = null, 
     @JsonProperty("status") val status: String? = null, 
-    @JsonProperty("poster_path") val posterPath: String? = null, 
+    @JsonProperty("poster_path") val posterPath: String? = null,
+    @JsonProperty("backdrop_path") val backdropPath: String? = null,
     @JsonProperty("origin_country") val origin_country: List<String>? = null, 
     @JsonProperty("original_language") val original_language: String? = null, 
     @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
@@ -5845,7 +5897,19 @@ private data class TmdbReleaseDate(@JsonProperty("certification") val certificat
 private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
 private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
+private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?, @JsonProperty("still_path") val stillPath: String? = null)
+
+private data class TmdbCreditsResponse(
+    @JsonProperty("cast") val cast: List<TmdbCreditPerson>? = null,
+    @JsonProperty("crew") val crew: List<TmdbCreditPerson>? = null
+)
+private data class TmdbCreditPerson(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("profile_path") val profilePath: String? = null,
+    @JsonProperty("character") val character: String? = null,
+    @JsonProperty("job") val job: String? = null
+)
 
 data class Trailers(
     @JsonProperty("key") val key: String? = null,
