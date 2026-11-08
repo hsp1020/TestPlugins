@@ -44,6 +44,9 @@ import android.animation.ValueAnimator
 import android.view.animation.LinearInterpolator
 import android.os.Build
 import android.content.Context
+import android.icu.util.ULocale
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.ui.settings.getCurrentLocale
 import android.content.res.Resources
 import android.content.res.ColorStateList
 import android.graphics.drawable.Drawable
@@ -2668,11 +2671,36 @@ internal fun parseTrailerYoutubeId(raw: String?): String? {
         candidate?.takeIf(::valid)
     }.getOrNull()
 }
+internal object StremioTmdb {
+    val apiKey: String by lazy {
+        runCatching {
+            Class.forName(
+                "com.lagradost.cloudstream3.ui.search.SearchSuggestionApi",
+                false, CloudStreamApp::class.java.classLoader
+            ).getDeclaredField("TMDB_API_KEY").apply { isAccessible = true }
+                .get(null) as? String
+        }.getOrNull().orEmpty()
+    }
+    private val isoLanguages = Locale.getISOLanguages().toSet()
+    fun language(): String {
+        val context = CloudStreamApp.context ?: return "en-US"
+        val saved = PreferenceManager.getDefaultSharedPreferences(context)
+            .getString(context.getString(R.string.locale_key), null)
+        val locale = Locale.forLanguageTag(
+            (saved?.takeIf { it.isNotBlank() } ?: getCurrentLocale(context)).replace('_', '-')
+        )
+        val language = locale.language.takeIf { it in isoLanguages } ?: return "en-US"
+        val region = locale.country.ifBlank {
+            // CloudStream distinguishes pt (Portugal) from pt-BR (Brazil).
+            if (language == "pt") "PT"
+            else ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
+        }
+        return if (region.length == 2) "${language}-${region}" else language
+    }
+}
+
 internal fun tmdbTrailerLanguages(): List<String> {
-    val configured = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("tmdb_language_code", "en-US")
-        ?.trim()?.replace('_', '-')?.takeIf { it.isNotEmpty() } ?: "en-US"
+    val configured = StremioTmdb.language()
     return listOf(configured, configured.substringBefore('-'), "en")
         .distinctBy { it.lowercase() }
 }

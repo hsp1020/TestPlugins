@@ -148,7 +148,9 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         val language = locale.language
         if (language !in iso639Languages) return null
         val region = locale.country.ifBlank {
-            ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
+            // CloudStream distinguishes pt (Portugal) from pt-BR (Brazil).
+            if (language == "pt") "PT"
+            else ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
         }
         return if (region.length == 2) "${language}-${region}" else language
     }

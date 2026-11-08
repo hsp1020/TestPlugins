@@ -1,6 +1,5 @@
 
 
-import java.util.Properties
 
 version = 1
 
@@ -11,19 +10,6 @@ android {
     buildFeatures {
         buildConfig = true
         viewBinding = true
-    }
-    defaultConfig {
-        val propFile = project.rootProject.file("local.properties")
-
-        val tmdbApiKey = if (propFile.exists()) {
-            val properties = Properties()
-            properties.load(propFile.inputStream())
-            properties.getProperty("TMDB_API") ?: ""
-        } else {
-            System.getenv("TMDB_API") ?: ""
-        }
-
-        buildConfigField("String", "TMDB_API", "\"$tmdbApiKey\"")
     }
 }
 

@@ -345,11 +345,7 @@ private fun JsonNode?.intOrNull(): Int? {
 }
 
 private fun tmdbLogoLanguages(): String {
-    val preferred = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("tmdb_language_code", "en-US")
-        ?.substringBefore('-')?.trim()?.lowercase()
-        ?.takeIf { it.isNotEmpty() } ?: "en"
+    val preferred = StremioTmdb.language().substringBefore('-').lowercase()
     return listOf(preferred, "en").distinct().joinToString(",")
 }
 
@@ -1500,8 +1496,7 @@ open class StremioC(
 
         private fun addonMetaStorageKey(url: String): String {
             val context = CloudStreamApp.context
-            val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-            val language = prefs?.getString("tmdb_language_code", "en-US").orEmpty()
+            val language = StremioTmdb.language()
             val addonBase = url.substringBefore("/meta/")
             val version = context
                 ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
@@ -1997,12 +1992,10 @@ open class StremioC(
 
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
-        val context = CloudStreamApp.context
-        val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
+        val tmdbKey = StremioTmdb.apiKey
+        if (tmdbKey.isBlank()) return ""
         builder.addQueryParameter("api_key", tmdbKey)
-        val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
-        builder.addQueryParameter("language", langCode)
+        builder.addQueryParameter("language", StremioTmdb.language())
         params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
     }
@@ -4599,9 +4592,7 @@ open class StremioC(
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
-            val context = CloudStreamApp.context
-            val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
+            val langCode = StremioTmdb.language()
 
             coroutineScope {
                 val shouldFocusEpisodes = tmdbMediaType == "tv" &&

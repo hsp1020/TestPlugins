@@ -87,51 +87,6 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.withContext
 import java.util.Collections
 
-private class ApiKeyEyeIcon(private val iconColor: Int, private val visible: Boolean, private val iconSize: Int) : Drawable() {
-        private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.8f
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-            color = iconColor
-        }
-
-        override fun draw(canvas: Canvas) {
-            if (bounds.isEmpty) return
-            val scale = minOf(bounds.width(), bounds.height()) / 24f
-            val saved = canvas.save()
-            canvas.translate(bounds.exactCenterX() - 12f * scale, bounds.exactCenterY() - 12f * scale)
-            canvas.scale(scale, scale)
-            val outline = Path().apply {
-                moveTo(2f, 12f)
-                cubicTo(5f, 8f, 8f, 6f, 12f, 6f)
-                cubicTo(16f, 6f, 19f, 8f, 22f, 12f)
-                cubicTo(19f, 16f, 16f, 18f, 12f, 18f)
-                cubicTo(8f, 18f, 5f, 16f, 2f, 12f)
-                close()
-            }
-            canvas.drawPath(outline, pen)
-            canvas.drawCircle(12f, 12f, 3f, pen)
-            if (!visible) canvas.drawLine(3f, 21f, 21f, 3f, pen)
-            canvas.restoreToCount(saved)
-        }
-
-        override fun setAlpha(alpha: Int) {
-            pen.alpha = alpha
-            invalidateSelf()
-        }
-
-        override fun setColorFilter(colorFilter: ColorFilter?) {
-            pen.colorFilter = colorFilter
-            invalidateSelf()
-        }
-
-        @Suppress("DEPRECATION")
-        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
-        override fun getIntrinsicWidth(): Int = iconSize
-        override fun getIntrinsicHeight(): Int = iconSize
-    }
-
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
     val name: String,
@@ -152,10 +107,6 @@ object SettingsRepository {
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     const val PREF_KEY_STREAM_SUBTITLE_URLS = "stream_subtitle_addon_urls"
     const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
-
-    const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
-
-    const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -235,31 +186,6 @@ class SettingsBottomFragment(
     }
     fun dismiss() = settingsDialog.dismiss()
 
-    companion object {
-        val LANGUAGES = listOf(
-            "South Africa (Afrikaans)" to "af-ZA", "United Arab Emirates (Arabic)" to "ar-AE", "Saudi Arabia (Arabic)" to "ar-SA",
-            "Azerbaijan (Azerbaijani)" to "az-AZ", "Bulgaria (Bulgarian)" to "bg-BG", "India (Bengali)" to "bn-IN",
-            "Spain (Catalan)" to "ca-ES", "Czech Republic (Czech)" to "cs-CZ", "United Kingdom (Welsh)" to "cy-GB",
-            "Denmark (Danish)" to "da-DK", "Germany (German)" to "de-DE", "Greece (Greek)" to "el-GR",
-            "United States (English)" to "en-US", "United Kingdom (English)" to "en-GB", "Spain (Spanish)" to "es-ES",
-            "Latin America (Spanish)" to "es-419", "Estonia (Estonian)" to "et-EE", "Spain (Basque)" to "eu-ES",
-            "Iran (Persian)" to "fa-IR", "Finland (Finnish)" to "fi-FI", "Philippines (Filipino)" to "fil-PH",
-            "France (French)" to "fr-FR", "Spain (Galician)" to "gl-ES", "India (Gujarati)" to "gu-IN",
-            "Israel (Hebrew)" to "he-IL", "India (Hindi)" to "hi-IN", "Croatia (Croatian)" to "hr-HR",
-            "Hungary (Hungarian)" to "hu-HU", "Indonesia (Indonesian)" to "id-ID", "Iceland (Icelandic)" to "is-IS",
-            "Italy (Italian)" to "it-IT", "Japan (Japanese)" to "ja-JP", "India (Kannada)" to "kn-IN",
-            "South Korea (Korean)" to "ko-KR", "Lublin (Polish)" to "pl-PL", "Lithuania (Lithuanian)" to "lt-LT",
-            "Latvia (Latvian)" to "lv-LV", "India (Malayalam)" to "ml-IN", "Malaysia (Malay)" to "ms-MY",
-            "Norway (Norwegian)" to "no-NO", "Netherlands (Dutch)" to "nl-NL", "Poland (Polish)" to "pl-PL",
-            "Brazil (Portuguese)" to "pt-BR", "Portugal (Portuguese)" to "pt-PT", "Romania (Romanian)" to "ro-RO",
-            "Russia (Russian)" to "ru-RU", "Slovakia (Slovak)" to "sk-SK", "Slovenia (Slovenian)" to "sl-SI",
-            "Serbia (Serbian)" to "sr-RS", "Sweden (Swedish)" to "sv-SE", "India (Tamil)" to "ta-IN",
-            "India (Telugu)" to "te-IN", "Thailand (Thai)" to "th-TH", "Turkey (Turkish)" to "tr-TR",
-            "Ukraine (Ukrainian)" to "uk-UA", "Vietnam (Vietnamese)" to "vi-VN", "China (Chinese Simplified)" to "zh-CN",
-            "Taiwan (Chinese Traditional)" to "zh-TW"
-        ).sortedBy { it.first.lowercase() }
-    }
-
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
     private val resourceCache = mutableMapOf<String, Int>()
 
@@ -277,7 +203,6 @@ class SettingsBottomFragment(
         val homeSelectable: Boolean = true
     )
 
-    private var searchJob: Job? = null 
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
 
@@ -463,12 +388,9 @@ class SettingsBottomFragment(
         field.backgroundTintList = null
         field.background = getCardBg()
         // Use identical heights and center the input text after applying the themed background.
-        when (field.id) {
-            getCachedResId("etTmdbApiKey", "id"),
-            getCachedResId("etHistorySyncUrl", "id") -> {
-                field.setPadding(dp(12), 0, dp(12), 0)
-                field.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            }
+        if (field.id == getCachedResId("etHistorySyncUrl", "id")) {
+            field.setPadding(dp(12), 0, dp(12), 0)
+            field.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         }
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
@@ -481,7 +403,6 @@ class SettingsBottomFragment(
             field.setOnKeyListener { _, key, event -> field.activateTvInput(key, event) }
         }
         val slot = field.parent as? FrameLayout ?: return
-        val compactApiKey = field.id == getCachedResId("etTmdbApiKey", "id")
         val tagKey = getCachedResId("outline", "drawable")
         if (slot.getTag(tagKey) == true) return
         slot.setTag(tagKey, true)
@@ -489,7 +410,7 @@ class SettingsBottomFragment(
             val visual = dp(28)
             if (field.layoutParams.height != visual)
                 field.layoutParams = field.layoutParams.apply { height = visual }
-            val slotHeight = if (compactApiKey) visual else dp(48)
+            val slotHeight = dp(48)
             slot.minimumHeight = slotHeight
             if (slot.layoutParams.height != slotHeight)
                 slot.layoutParams = slot.layoutParams.apply { height = slotHeight }
@@ -1221,7 +1142,6 @@ class SettingsBottomFragment(
             backHandler = null
             refreshSummaries = null
             hostOwner?.lifecycle?.removeObserver(closeOnDestroy)
-            searchJob?.cancel()
             uiScope.cancel()
             onDismiss()
             }
@@ -1240,13 +1160,12 @@ class SettingsBottomFragment(
                 "layoutHistorySyncUrl",
                 "pageHub", "pageMetadata",
                 "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
-                "rowLanguage", "rowSources", "rowMetadata", "rowBackup"),
+                "rowSources", "rowMetadata", "rowBackup"),
             NestedScrollView::class.java to listOf("settingsViewport"),
             TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack"),
-            ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
-                "btnSelectLanguage"),
+            ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks"),
             ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
-            EditText::class.java to listOf("etTmdbApiKey", "etHistorySyncUrl")
+            EditText::class.java to listOf("etHistorySyncUrl")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1612,17 +1531,6 @@ class SettingsBottomFragment(
         if (historyGear != null) bindAddonActions(settingsDialog, etHistorySyncUrl, historyGear, trash = null)
 
 
-        val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
-        btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
-        btnSelectLanguage.imageTintList = actionIconTint
-        btnSelectLanguage.makeTvCompatible()
-
-        btnSelectLanguage.setOnClickListener {
-            showLanguageSelectDialog()
-        }
-
-        val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
-        etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
         }
@@ -1642,10 +1550,7 @@ class SettingsBottomFragment(
             val count = sourceDraft.count { it.link.isNotBlank() }
             (view.optional("summarySources") as? TextView)?.text =
                 if (count == 0) "No URL entries" else if (count == 1) "1 URL entry" else "$count URL entries"
-            val code = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
-            val names = LANGUAGES.filter { it.second == code }
-            (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
-            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup").forEach { id ->
+            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowBackup").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
                     fun labels(node: View) {
@@ -1700,7 +1605,6 @@ class SettingsBottomFragment(
                 "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
                 view.findView<View>(id).setOnClickListener { showPage(page) }
             }
-            view.findView<View>("rowLanguage").setOnClickListener { btnSelectLanguage.performClick() }
             view.findView<View>("saveAction").setOnClickListener { saveIcon.performClick() }
             back?.setOnClickListener {
                 hideKeyboard(view)
@@ -1712,16 +1616,7 @@ class SettingsBottomFragment(
             }
         }
         saveIcon.setOnClickListener {
-            etTmdbApiKey.error = null
             val context = hostContext
-            val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
-            if (tmdbApiKeyVal.isEmpty()) {
-                showPage(SettingsPage.METADATA, etTmdbApiKey)
-                etTmdbApiKey.error = "TMDB API key is a required field"
-                showToast("TMDB API key is a required field")
-                return@setOnClickListener
-            }
-
             val extraUrlList = sourceDraft.filter { it.link.isNotBlank() }
                 .distinctBy { stremioManifestUrl(it.link.trim()) }
             val invalid = extraUrlList.firstOrNull {
@@ -1735,7 +1630,6 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
             val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray().apply {
                 extraUrlList.forEach { addon ->
                     put(JSONObject().put("name", addon.name.trim()).put("url", addon.link.trim())
@@ -1791,7 +1685,7 @@ class SettingsBottomFragment(
         }
 
         prepareControls(view)
-        if (hub != null) listOf(addlinks, showlinks, saveIcon, btnSelectLanguage).forEach {
+        if (hub != null) listOf(addlinks, showlinks, saveIcon).forEach {
             it.isFocusable = false; it.isClickable = false; it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         val mobile = !isLayout(TV)
@@ -2061,220 +1955,6 @@ class SettingsBottomFragment(
         close.setOnClickListener { dlg.dismiss() }
         dlg.show()
         if (urlError != null) url.error = urlError
-    }
-
-private fun showLanguageSelectDialog() {
-        val context = hostContext
-        val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
-
-        var selectedCode = currentSavedCode
-        var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "United States (English)"
-
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(20))
-            background = getDarkThemeBg()
-        }
-
-        container.addView(TextView(context).apply {
-            text = "TMDB Language"
-            textSize = 18f
-            applyStremioCNativeFont(bold = true)
-            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-            setPadding(0, 0, 0, dp(20))
-            gravity = android.view.Gravity.START
-        })
-
-        val searchBar = EditText(context).apply {
-            hint = "Search language..."
-            setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-            textSize = 14f
-            setPadding(dp(12), 0, dp(12), 0)
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            isSingleLine = true
-            background = getCardBg()
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(35)).apply {
-                setMargins(0, 0, 0, 20)
-            }
-        }
-        container.addView(inputSlot(searchBar))
-
-        val rv = RecyclerView(context).apply {
-            layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                minOf(dp(380), (context.resources.displayMetrics.heightPixels * 0.50f).toInt()))
-        }
-        val languageBody = FrameLayout(context)
-        val noMatches = popupMessage("No matching languages").apply { gravity = Gravity.CENTER; visibility = View.GONE }
-        languageBody.addView(rv); languageBody.addView(noMatches,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
-        container.addView(languageBody)
-
-        class LangAdapter(
-            private val originalList: List<Pair<String, String>>,
-            var selectedCode: String, 
-            private val onClick: (String, String) -> Unit
-        ) : RecyclerView.Adapter<LangAdapter.VH>() {
-
-            private var filteredList = originalList.toMutableList()
-
-            inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: ImageView) : RecyclerView.ViewHolder(view)
-
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-                val rowLayout = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    isClickable = true
-                    isFocusable = true
-                    minimumHeight = dp(48)
-                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                }
-
-                val tvName = TextView(context).apply {
-                    textSize = 14f
-                    maxLines = 2
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                val tvCheck = ImageView(context).apply {
-                    setImageDrawable(getDrawable("addon_check_icon"))
-                    imageTintList = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.colorPrimary))
-                    contentDescription = "Selected language"
-                    setPadding(dp(10), 0, dp(10), 0)
-                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(24))
-                }
-                rowLayout.addView(tvName)
-                rowLayout.addView(tvCheck)
-                rowLayout.background = android.graphics.drawable.StateListDrawable().apply {
-                    addState(intArrayOf(android.R.attr.state_selected), getCardBg())
-                    addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
-                }
-                if (android.os.Build.VERSION.SDK_INT >= 23) {
-                    val ripple = android.util.TypedValue()
-                    if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-                        ripple.resourceId != 0)
-                        rowLayout.foreground = androidx.appcompat.content.res.AppCompatResources
-                            .getDrawable(context, ripple.resourceId)
-                }
-                rowLayout.makeTvCompatible()
-                normalizeTypeface(rowLayout)
-                return VH(rowLayout, tvName, tvCheck)
-            }
-
-            override fun onBindViewHolder(holder: VH, position: Int) {
-                val (langName, code) = filteredList[position]
-                val isSelected = code == selectedCode
-                holder.tvName.text = langName
-
-                updateSelection(holder, isSelected)
-                holder.view.contentDescription = langName
-                holder.tvName.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                holder.tvCheck.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                holder.view.setOnClickListener {
-                    onClick(code, langName)
-                }
-            }
-            private fun updateSelection(holder: VH, selected: Boolean) {
-                holder.tvName.setTextColor(hostContext.colorFromAttribute(
-                    if (selected) HostR.attr.colorPrimary else HostR.attr.textColor
-                ))
-                holder.view.isSelected = selected
-                holder.tvCheck.visibility = if (selected) View.VISIBLE else View.GONE
-            }
-
-            override fun onBindViewHolder(holder: VH, position: Int, payloads: MutableList<Any>) {
-                if (payloads.isEmpty()) super.onBindViewHolder(holder, position, payloads)
-                else updateSelection(holder, filteredList[position].second == selectedCode)
-            }
-
-            fun select(code: String) {
-                if (selectedCode == code) return
-                val previous = filteredList.indexOfFirst { it.second == selectedCode }
-                val next = filteredList.indexOfFirst { it.second == code }
-                selectedCode = code
-                if (previous >= 0) notifyItemChanged(previous, "selection")
-                if (next >= 0 && next != previous) notifyItemChanged(next, "selection")
-            }
-            fun indexOf(code: String) = filteredList.indexOfFirst { it.second == code }
-
-            override fun getItemCount() = filteredList.size
-
-            @SuppressLint("NotifyDataSetChanged")
-            fun filter(query: String) {
-                filteredList = if (query.isBlank()) {
-                    originalList.toMutableList()
-                } else {
-                    originalList.filter { it.first.contains(query, ignoreCase = true) }.toMutableList()
-                }
-                notifyDataSetChanged()
-            }
-        }
-
-        lateinit var adapter: LangAdapter
-        adapter = LangAdapter(LANGUAGES, selectedCode) { code, langName ->
-            selectedCode = code
-            selectedLangName = langName
-            adapter.select(code)
-            val selectedIndex = adapter.indexOf(code)
-            if (isLayout(TV)) {
-                rv.doOnNextLayout {
-                    if (!closing && rv.isShown && searchBar.text.isEmpty()) restoreRow(rv, selectedIndex)
-                }
-            }
-        }
-        rv.adapter = adapter
-
-        val searchWatcher = object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                searchJob?.cancel()
-                searchJob = uiScope.launch {
-                    delay(150) 
-                    val query = s.toString().trim().lowercase()
-                    if (!rv.isAttachedToWindow) return@launch
-                    adapter.filter(query)
-                    noMatches.visibility = if (adapter.itemCount == 0) View.VISIBLE else View.GONE
-                    rv.visibility = if (adapter.itemCount == 0) View.GONE else View.VISIBLE
-                }
-            }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        }
-        searchBar.addTextChangedListener(searchWatcher)
-
-        val footer = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(12), 0, 0)
-        }
-        val applyBtn = dialogButton(context, "Apply", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(8), 0, 0, 0) })
-        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
-        footer.addView(cancelBtn)
-        footer.addView(applyBtn)
-        container.addView(footer)
-
-        val langDialog = AlertDialog.Builder(context).setView(container).create()
-        val selectedIndex = LANGUAGES.indexOfFirst { it.second == selectedCode }
-        setupCustomDialog(langDialog, container, languageBody, 600, initialFocus = {
-            if (selectedIndex >= 0) rv else searchBar
-        })
-        onClose(langDialog) { searchBar.removeTextChangedListener(searchWatcher); searchJob?.cancel(); searchJob = null }
-
-        applyBtn.setOnClickListener {
-            val code = selectedCode
-            val langName = selectedLangName
-
-            val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
-            if (editor.commit() && currentSavedCode != code) {
-                StremioC.invalidateSyncSettingsCache()
-            }
-
-            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-            langDialog.dismiss()
-        }
-        cancelBtn.setOnClickListener { langDialog.dismiss() }
-        langDialog.show()
-        if (isLayout(TV) && selectedIndex >= 0) restoreRow(rv, selectedIndex)
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {

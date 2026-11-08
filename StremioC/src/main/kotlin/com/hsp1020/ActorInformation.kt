@@ -142,11 +142,8 @@ internal object ActorInformation {
     private val sharedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val TTL = 12L * 60 * 60 * 1000
 
-    private fun configuration(context: Context): Pair<String, String> {
-        val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        return (prefs.getString("tmdb_api_key", "") ?: "") to
-            (prefs.getString("tmdb_language_code", "en-US") ?: "en-US")
-    }
+    private fun configuration(): Pair<String, String> =
+        StremioTmdb.apiKey to StremioTmdb.language()
 
     private suspend fun request(
         personId: Int, endpoint: String, language: String, apiKey: String
@@ -681,9 +678,9 @@ internal object ActorInformation {
                 revealBody()
                 return
             }
-            val (key, language) = configuration(activity)
+            val (key, language) = configuration()
             if (key.isBlank()) {
-                biography.text = "Set a TMDB API key in StremioC settings."
+                biography.text = "CloudStream TMDB API key is unavailable."
                 revealBody()
                 return
             }
