@@ -373,37 +373,22 @@ internal object ElevateActorInformation {
                     val config = LibraryPosterPrefs.get(activity)
                     if (!config.ready) return@launch
                     val movie = credit.media == "movie"
-                    if (config.service == PosterService.XRDB)
-                        ElevatePosterTrace.log("actor", "SOURCE", credit.title,
-                            "tmdb=${credit.id} media=${credit.media} date=${credit.date}" +
-                            " originalAnime=none source=tmdb_combined_credits")
                     val ids = withContext(Dispatchers.IO) {
                         PosterIds(tmdb = credit.id.toString()).preferImdb(movie)
                     }
                     val version = if (config.service == PosterService.XRDB)
                         withContext(Dispatchers.IO) { ElevateXrdbVersion.resolve(config) }
                     else null
-                    if (config.service == PosterService.XRDB)
-                        ElevatePosterTrace.log("actor", "MAPPING", credit.title,
-                            "ids=${ElevatePosterTrace.ids(ids)} movie=$movie version=$version")
                     val primary = config.image(ids, movie, version)
                     val fallback = if (ids.imdb != null)
                         config.image(ids.copy(imdb = null), movie, version)
                     else null
                     for (poster in listOfNotNull(primary, fallback).distinct()) {
-                        if (config.service == PosterService.XRDB)
-                            ElevatePosterTrace.log("actor", "REQUEST", credit.title,
-                                "artwork=${ElevatePosterTrace.artwork(poster)}" +
-                                " url=${ElevatePosterTrace.url(poster)}")
                         val result = PosterWipe.load(image, poster) {
                             dialog === windowDialog && image.isAttachedToWindow &&
                                 ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS) &&
                                 LibraryPosterPrefs.get(activity) == config
                         }
-                        if (config.service == PosterService.XRDB)
-                            ElevatePosterTrace.log("actor", "RESULT", credit.title,
-                                "artwork=${ElevatePosterTrace.artwork(poster)}" +
-                                " success=${result.success} error=${result.error}")
                         if (result.success || result.error == "stale") break
                     }
                 }
@@ -784,22 +769,10 @@ internal object ElevateActorInformation {
                                         withContext(Dispatchers.IO) { ElevateXrdbVersion.resolve(config) }
                                     else null
                                     val poster = config.image(ids, movie, version) ?: return@launch
-                                    if (config.service == PosterService.XRDB)
-                                        ElevatePosterTrace.log("actor-prefetch", "MAPPING", credit.title,
-                                            "tmdb=${credit.id} media=${credit.media}" +
-                                            " ids=${ElevatePosterTrace.ids(ids)}" +
-                                            " artwork=${ElevatePosterTrace.artwork(poster)}" +
-                                            " url=${ElevatePosterTrace.url(poster)}")
                                     if (dialog === windowDialog &&
                                         ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS) &&
                                         LibraryPosterPrefs.get(activity) == config)
-                                    {
-                                        val result = PosterWipe.prefetch(activity, poster, dp(114), dp(180))
-                                        if (config.service == PosterService.XRDB)
-                                            ElevatePosterTrace.log("actor-prefetch", "RESULT", credit.title,
-                                                "artwork=${ElevatePosterTrace.artwork(poster)}" +
-                                                " success=${result.success} error=${result.error}")
-                                    }
+                                        PosterWipe.prefetch(activity, poster, dp(114), dp(180))
                                 }
                             }
                         }

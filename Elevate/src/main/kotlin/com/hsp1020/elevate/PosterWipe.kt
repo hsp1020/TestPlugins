@@ -9,9 +9,6 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.content.Context
-import android.net.Uri
-import android.util.Log
-import android.os.SystemClock
 import android.widget.ImageView
 import coil3.SingletonImageLoader
 import coil3.network.NetworkClient
@@ -47,35 +44,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import java.util.WeakHashMap
 import kotlin.math.max
-
-/** Temporary XRDB poster path diagnostics. Sensitive URL keys are redacted. */
-internal object ElevatePosterTrace {
-    private const val TAG = "ElevatePosterTrace"
-
-    fun ids(ids: PosterIds?): String = if (ids == null) "none" else
-        "imdb=${ids.imdb} tmdb=${ids.tmdb} mal=${ids.mal} anilist=${ids.anilist} kitsu=${ids.kitsu}"
-
-    fun artwork(url: String?): String = if (url == null) "none" else
-        runCatching { Uri.parse(url).lastPathSegment?.let { Uri.decode(it) } }.getOrNull() ?: "none"
-
-    fun url(value: String?): String {
-        if (value.isNullOrBlank()) return "none"
-        return runCatching {
-            val uri = Uri.parse(value)
-            if (uri.scheme != "http" && uri.scheme != "https") return@runCatching value
-            val builder = uri.buildUpon().clearQuery()
-            for (name in uri.queryParameterNames)
-                builder.appendQueryParameter(name, if (name.lowercase() in
-                    setOf("key", "api_key", "apikey", "token", "authorization", "access_token"))
-                    "<redacted>" else uri.getQueryParameter(name))
-            builder.build().toString()
-        }.getOrDefault(value)
-    }
-
-    fun log(screen: String, event: String, title: String, detail: String) {
-        Log.d(TAG, "screen=$screen event=$event title=${title.replace('\n', ' ')} $detail")
-    }
-}
 
 /** Keep the native cover visible until Coil finishes; only the decoded artwork wipes in. */
 internal object PosterWipe {
@@ -120,30 +88,7 @@ internal object PosterWipe {
             maxRequests = 64
             maxRequestsPerHost = 32
         }
-        val client = OkHttpClient.Builder().dispatcher(dispatcher).addInterceptor { chain ->
-            val request = chain.request()
-            val trace = request.url.encodedPath.contains("/poster/")
-            val started = SystemClock.elapsedRealtime()
-            try {
-                val response = chain.proceed(request)
-                if (trace) ElevatePosterTrace.log("http", "RESPONSE", "-",
-                    "status=${response.code} ms=${SystemClock.elapsedRealtime() - started}" +
-                    " artwork=${ElevatePosterTrace.artwork(request.url.toString())}" +
-                    " url=${ElevatePosterTrace.url(request.url.toString())}" +
-                    " finalUrl=${ElevatePosterTrace.url(response.request.url.toString())}" +
-                    " contentType=${response.header("Content-Type")}" +
-                    " etag=${response.header("ETag")}")
-                response
-            } catch (failure: IOException) {
-                if (trace) ElevatePosterTrace.log("http", "ERROR", "-",
-                    "ms=${SystemClock.elapsedRealtime() - started}" +
-                    " artwork=${ElevatePosterTrace.artwork(request.url.toString())}" +
-                    " url=${ElevatePosterTrace.url(request.url.toString())}" +
-                    " error=${failure.javaClass.simpleName}")
-                throw failure
-            }
-        }.build()
-        OkHttpNetworkFetcherFactory(client)
+        OkHttpNetworkFetcherFactory(OkHttpClient.Builder().dispatcher(dispatcher).build())
     }
 
     private suspend fun executeImage(

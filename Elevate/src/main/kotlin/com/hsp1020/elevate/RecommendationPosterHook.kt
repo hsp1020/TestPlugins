@@ -149,7 +149,7 @@ internal class RecommendationPosterHook(private val application: Application) :
 
     private data class Cover(
         val key: String, val generation: Int, val original: String?,
-        val headers: Map<String, String>?, val title: String,
+        val headers: Map<String, String>?,
         var custom: String? = null, var failed: Boolean = false,
         var fallback: PosterIds? = null, var fallbackMovie: Boolean = false,
         var fallbackAttempted: Boolean = false,
@@ -255,16 +255,9 @@ internal class RecommendationPosterHook(private val application: Application) :
         private suspend fun loadCustom(image: ImageView, cover: Cover, poster: String) {
             if (covers[image] !== cover || revision != cover.generation ||
                 !image.isAttachedToWindow) return
-            val traceXrdb = setting.service == PosterService.XRDB
-            if (traceXrdb) ElevatePosterTrace.log("recommendation", "REQUEST", cover.title,
-                "artwork=${ElevatePosterTrace.artwork(poster)}" +
-                " url=${ElevatePosterTrace.url(poster)}")
             val result = PosterWipe.load(image, poster) {
                 covers[image] === cover && revision == cover.generation
             }
-            if (traceXrdb) ElevatePosterTrace.log("recommendation", "RESULT", cover.title,
-                "artwork=${ElevatePosterTrace.artwork(poster)}" +
-                " success=${result.success} error=${result.error}")
             if (covers[image] !== cover || revision != cover.generation ||
                 result.error == "stale") return
             if (result.success) {
@@ -302,9 +295,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                     return
                 }
             }
-            if (setting.service == PosterService.XRDB)
-                ElevatePosterTrace.log("recommendation", "NATIVE_FALLBACK", cover.title,
-                    "allCustomCandidatesFailed=true")
             cover.custom = null
             cover.failed = true
             // Native artwork was never replaced on a failed request.
@@ -330,17 +320,12 @@ internal class RecommendationPosterHook(private val application: Application) :
             pending.remove(image)?.cancel()
             PosterWipe.cancel(image)
             PosterWipe.ensurePlaceholder(image)
-            val current = Cover(key, revision, card.posterUrl, card.posterHeaders, card.name)
+            val current = Cover(key, revision, card.posterUrl, card.posterHeaders)
             covers[image] = current
             val (ids, simkl) = directIds(card)
             val config = setting
             val sourceAnimeId = if (config.service == PosterService.XRDB)
                 xrdbOriginalAnimeId(card.url) else null
-            if (config.service == PosterService.XRDB)
-                ElevatePosterTrace.log("recommendation", "SOURCE", card.name,
-                    "provider=${card.apiName} type=${card.type} simkl=$simkl" +
-                    " sourceAnime=$sourceAnimeId ids=${ElevatePosterTrace.ids(ids)}" +
-                    " sourceUrl=${ElevatePosterTrace.url(card.url)}")
             // Some providers label every search card as Movie but keep the real
             // media type in the card URL (for example TMDB recommendations).
             val mediaType = runCatching { JSONObject(card.url).optString("type") }
@@ -390,13 +375,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                         else posterIds.preferImdb(mapped.movie)
                     val version = if (config.service == PosterService.XRDB)
                         ElevateXrdbVersion.resolve(config) else null
-                    if (config.service == PosterService.XRDB)
-                        ElevatePosterTrace.log("recommendation", "MAPPING", card.name,
-                            "candidate=${ElevatePosterTrace.ids(candidate)}" +
-                            " season=${ElevatePosterTrace.ids(season)}" +
-                            " selected=${ElevatePosterTrace.ids(selected)}" +
-                            " animeIdentity=$animeIdentity movie=${mapped.movie}" +
-                            " sourceAnime=$sourceAnimeId version=$version")
                     val primary = config.image(selected, mapped.movie, version, sourceAnimeId)
                     val alternatives = listOfNotNull(
                         if (sourceAnimeId != null && selected.imdb != null)
@@ -408,10 +386,6 @@ internal class RecommendationPosterHook(private val application: Application) :
                     val posters = listOfNotNull(primary).plus(alternatives).distinct()
                         .filter { it !in unavailable }
                     val poster = posters.firstOrNull()
-                    if (config.service == PosterService.XRDB)
-                        ElevatePosterTrace.log("recommendation", "CANDIDATES", card.name,
-                            "urls=${posters.joinToString(" -> ") { ElevatePosterTrace.url(it) }}" +
-                            " artwork=${posters.map(ElevatePosterTrace::artwork)}")
                     current.alternativePosters = posters.drop(1).toMutableList()
                     if (sourceAnimeId != null || animeIdentity &&
                         (config.service == PosterService.XRDB ||
