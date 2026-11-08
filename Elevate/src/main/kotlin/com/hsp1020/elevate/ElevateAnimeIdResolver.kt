@@ -42,7 +42,18 @@ internal object ElevateAnimeIdResolver {
         }
         val id = rawId.removePrefix(source + ":").substringBefore(':')
             .toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
-        val key = field + ":" + id
+        return resolveByField(field, id, null)
+    }
+
+    /** Resolve an IMDb title at the selected season, independently of StremioC. */
+    suspend fun resolveImdbSeason(rawId: String, season: Int): Mapping? {
+        val id = rawId.takeIf { it.matches(Regex("tt[0-9]{5,10}")) } ?: return null
+        if (season <= 0) return null
+        return resolveByField("imdbId", id, season)
+    }
+
+    private suspend fun resolveByField(field: String, id: String, season: Int?): Mapping? {
+        val key = field + ":" + id + (season?.let { ":$it" } ?: "")
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.takeIf {
@@ -61,16 +72,24 @@ internal object ElevateAnimeIdResolver {
                     var result: Mapping? = null
                     for (host in hosts) {
                         val url = "https://" + host + "/api/v1/anime?idType=" + field +
-                            "&idValue=" + id
+                            "&idValue=" + id + (season?.let { "&season=$it" } ?: "")
                         val root = try {
                             JSONObject(app.get(url, timeout = 5L).text)
                         } catch (e: CancellationException) { throw e }
                           catch (_: Exception) { continue }
                         if (!root.optBoolean("success")) continue
-                        val ids = root.optJSONObject("data")?.optJSONObject("mappings")
-                            ?: continue
-                        // Never map an unrelated anime title based on a search result.
+                        val data = root.optJSONObject("data") ?: continue
+                        val ids = data.optJSONObject("mappings") ?: continue
+                        // Match the exact IMDb identity and season validation in StremioC.
                         if (ids.optString(field) != id) continue
+                        if (field == "imdbId" && season != null && season > 1) {
+                            val mappedSeason = listOf("imdb", "tvdb", "trakt", "tmdb")
+                                .firstNotNullOfOrNull { source ->
+                                    data.optJSONObject(source)?.optInt("seasonNumber")
+                                        ?.takeIf { it > 0 }
+                                }
+                            if (mappedSeason != season) continue
+                        }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()
                         val kitsu = positive("kitsuId")

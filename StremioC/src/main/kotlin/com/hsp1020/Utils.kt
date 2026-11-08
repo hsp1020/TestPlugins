@@ -1412,20 +1412,6 @@ internal class RatingPlotImageHook(
                     }
                 }
                 if (!valid(gen, sn)) return@launch
-                if (isAnime == true) {
-                    // StremioC owns season mapping; Elevate only reads the resolved IDs.
-                    val actorIds = if (ids.isEmpty() && sn == sourceSeason?.second)
-                        rawSyncs else ids
-                    val state = JSONObject().put("url", url).put("season", sn)
-                    for (key in listOf("anilist", "mal", "kitsu")) {
-                        actorIds[key]?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
-                            ?.let { state.put(key, it) }
-                    }
-                    runCatching {
-                        fragment.findNavController().currentBackStackEntry?.savedStateHandle
-                            ?.set("elevate_actor_season_ids", state.toString())
-                    }
-                }
                 val matched = if (syncModel != null && seasonNumbers.isNotEmpty())
                     AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
                         .filter { it.authUser() != null }

@@ -33,6 +33,7 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.syncproviders.AccountManager
@@ -53,7 +54,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.WeakHashMap
 
@@ -74,6 +74,8 @@ internal class ElevateActorHook(private val appContext: Application) :
     private data class Cached(val at: Long, val result: CastResult)
     private val tmdbCache = LinkedHashMap<String, Cached>()
     private val tmdbFlights = mutableMapOf<String, Deferred<CastResult?>>()
+    private val anilistCache = LinkedHashMap<String, Cached>()
+    private val anilistFlights = mutableMapOf<String, Deferred<CastResult?>>()
 
     private data class Ids(
         val anilist: String? = null, val mal: String? = null, val kitsu: String? = null,
@@ -105,15 +107,38 @@ internal class ElevateActorHook(private val appContext: Application) :
     }
 
     private suspend fun anilist(id: String): CastResult? {
-        trace("ANILIST_START", "id=$id")
-        val cast = try {
-            withContext(Dispatchers.IO) { AccountManager.aniListApi.load(null, id)?.actors }
-        } catch (cancelled: CancellationException) { throw cancelled }
-          catch (e: Exception) { trace("ANILIST_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}"); null }
-        trace("ANILIST_RESULT", "id=$id count=${cast?.size ?: 0}")
-        return cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
+        val now = System.currentTimeMillis()
+        val flight = synchronized(anilistCache) {
+            anilistCache[id]?.takeIf { now - it.at in 0 until 43_200_000L }
+                ?.let { return it.result }
+            anilistFlights[id] ?: io.async(start = CoroutineStart.LAZY) {
+                trace("ANILIST_START", "id=$id")
+                val cast = try {
+                    AccountManager.aniListApi.load(null, id)?.actors
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (e: Exception) {
+                    trace("ANILIST_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}")
+                    null
+                }
+                trace("ANILIST_RESULT", "id=$id count=${cast?.size ?: 0}")
+                val found = cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
+                if (found != null) synchronized(anilistCache) {
+                    anilistCache[id] = Cached(System.currentTimeMillis(), found)
+                    if (anilistCache.size > 64) anilistCache.remove(anilistCache.keys.first())
+                }
+                found
+            }.also { task ->
+                anilistFlights[id] = task
+                task.invokeOnCompletion {
+                    synchronized(anilistCache) {
+                        if (anilistFlights[id] === task) anilistFlights.remove(id)
+                    }
+                }
+            }
+        }
+        flight.start()
+        return flight.await()
     }
-
     private suspend fun animeMapped(source: String, id: String): CastResult? {
         trace("ANIME_MAP_START", "source=$source id=$id")
         val mapped = ElevateAnimeIdResolver.resolve(source, id)
@@ -201,55 +226,36 @@ internal class ElevateActorHook(private val appContext: Application) :
         return task.await()
     }
 
-    /** Optional TMDB person identities carried by CloudStream's standard syncData. */
-    private fun nativeTmdbPeople(page: ResultData, response: LoadResponse?): CastResult? {
-        val actors = page.actors?.takeIf { it.isNotEmpty() }
-            ?: response?.actors?.takeIf { it.isNotEmpty() } ?: return null
-        val raw = response?.syncData?.get("tmdb_people")
-            ?: page.syncData["tmdb_people"] ?: return null
-        val identities = runCatching { JSONArray(raw) }.getOrNull() ?: return null
-        if (identities.length() != actors.size) return null
-        val refs = actors.mapIndexed { index, actor ->
-            val info = identities.optJSONObject(index) ?: return null
-            if (info.optString("name") != actor.actor.name) return null
-            ElevateActorPersonRef(info.optInt("id").takeIf { it > 0 },
-                actor.actor.name, actor.actor.image, info.optBoolean("crew"))
-        }
-        return CastResult(actors, refs)
-    }
-
+    /** Provider actors remain available only after Elevate API resolution has failed. */
     private suspend fun resolve(page: ResultData, response: LoadResponse?, ids: Ids,
-        selectedSeason: Boolean): CastResult? {
+        selectedSeason: Int?, multiSeason: Boolean): CastResult? {
         val type = response?.type
         val kind = runCatching {
             JSONObject(response?.url ?: page.url).optString("type").lowercase()
         }.getOrNull()
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (type == null || type == TvType.Others) && kind == "movie"
-        trace("RESOLVE_START", "url=${page.url.take(140)} type=$type kind=$kind ids=$ids native=${page.actors?.size ?: 0}")
-        val native = nativeTmdbPeople(page, response)
-        if (!selectedSeason && native != null) {
-            trace("NATIVE_TMDB_CAST", "actors=${native.actors.size} ids=${native.people?.count { it.id != null }}")
-            return native
-        }
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
-        // Reuse already loaded native character/voice-actor data without an extra query.
-        if (!selectedSeason && anime && (ids.anilist != null || ids.mal != null) &&
-            page.actors?.any { it.voiceActor != null } == true)
-            return CastResult(page.actors!!, null)
-        // Kitsu is not a fallback: exclude it entirely when any other valid ID exists.
-        val options = if (anime)
-            listOf("anilist", "mal", "tmdb", "imdb", "simkl") else
-            listOf("tmdb", "imdb", "simkl", "anilist", "mal")
+        trace("RESOLVE_START", "url=${page.url.take(140)} type=$type ids=$ids season=$selectedSeason multi=$multiSeason anime=$anime")
+        // Resolve selected seasons independently, never apply a series-wide anime
+        // character list to another season just because it is present on LoadResponse.
+        if (anime && !movie && selectedSeason != null && ids.imdb != null) {
+            val mapping = ElevateAnimeIdResolver.resolveImdbSeason(ids.imdb, selectedSeason)
+            val seasonal = mapping?.anilist?.let { anilist(it) }
+            trace("ANIME_SEASON_RESULT", "imdb=${ids.imdb} season=$selectedSeason anilist=${mapping?.anilist} actors=${seasonal?.actors?.size ?: 0}")
+            if (seasonal != null) return seasonal
+        }
+        val options = if (anime) {
+            if (multiSeason) emptyList() else listOf("anilist", "mal")
+        } else listOf("tmdb", "imdb", "simkl")
         trace("RESOLVE_ORDER", "anime=$anime movie=$movie options=$options")
         for (candidate in options) {
-            trace("RESOLVE_TRY", "candidate=$candidate hasId=${when(candidate) { "anilist" -> ids.anilist != null; "mal" -> ids.mal != null; "tmdb" -> ids.tmdb != null; "imdb" -> ids.imdb != null; "simkl" -> ids.simkl != null; else -> false }}")
             val result = when (candidate) {
                 "anilist" -> ids.anilist?.let { anilist(it) }
                 "mal" -> ids.mal?.let { animeMapped("mal", it) }
-                "tmdb" -> native?.takeIf { selectedSeason } ?: ids.tmdb?.let { tmdb(it, movie) }
+                "tmdb" -> ids.tmdb?.let { tmdb(it, movie) }
                 "imdb" -> ids.imdb?.let { imdb ->
                     ElevateIdResolver.tmdbForImdb(imdb, movie)?.let { tmdb(it, movie) }
                 }
@@ -258,14 +264,12 @@ internal class ElevateActorHook(private val appContext: Application) :
                 }
                 else -> null
             }
-            trace("RESOLVE_STEP_RESULT", "candidate=$candidate actors=${result?.actors?.size ?: 0} personRefs=${result?.people?.size ?: 0}")
+            trace("RESOLVE_STEP_RESULT", "candidate=$candidate actors=${result?.actors?.size ?: 0}")
             if (result != null) return result
         }
-        trace("RESOLVE_EXHAUSTED", "kitsu=${ids.kitsu} nonKitsu=${ids.hasNonKitsu()}")
-        return if (!ids.hasNonKitsu() && ids.kitsu != null)
+        return if (anime && !multiSeason && !ids.hasNonKitsu() && ids.kitsu != null)
             animeMapped("kitsu", ids.kitsu) else null
     }
-
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
@@ -300,6 +304,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         val list = root.findViewById<RecyclerView>(R.id.result_cast_items)
         trace("ATTACH_CHECK", "fragment=${fragment.javaClass.name} castList=${list != null} adapter=${list?.adapter?.javaClass?.simpleName}")
         if (list == null) return
+        list.visibility = View.GONE
         bindings[fragment] = Binding(fragment, list).also { it.start() }
     }
 
@@ -371,34 +376,11 @@ internal class ElevateActorHook(private val appContext: Application) :
         private var restoringCast = false
         private var pageUrl: String? = null
         private var pageIdentity: String? = null
-        private var mappedSeason: JSONObject? = null
-        private var currentSeasonNumber: Int? = null
-        private val seasonIdsObserver = Observer<String> { raw ->
-            val state = runCatching { JSONObject(raw) }.getOrNull() ?: return@Observer
-            val page = (model.page.value as? Resource.Success<ResultData>)?.value
-                ?: return@Observer
-            if (state.optString("url") != page.url) return@Observer
-            val chosen = currentSeasonNumber
-            if (chosen != null && state.optInt("season") != chosen) return@Observer
-            if (mappedSeason?.toString() == state.toString()) return@Observer
-            mappedSeason = state
-            trace("SEASON_IDS", "season=${state.optInt("season")} url=${page.url.take(100)}")
-            update(page)
-        }
         private fun seasonChanged() {
             val index = model.selectedSeasonIndex.value ?: return
-            val selected = model.seasonSelections.value?.getOrNull(index)?.second ?: return
-            val previous = currentSeasonNumber
-            currentSeasonNumber = selected
-            if (previous == null || previous == selected ||
-                model.currentRepo?.api?.javaClass?.name != "com.hsp1020.StremioC") return
-            mappedSeason = null
-            loadJob?.cancel()
-            people = null
-            lastActors = null
-            pageIdentity = null
-            (list.adapter as? ActorAdaptor)?.submitList(emptyList())
-            list.visibility = View.GONE
+            if (model.seasonSelections.value?.getOrNull(index) == null) return
+            // Identity dedup prevents a request when the same season is selected again.
+            (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
         }
         private val seasonIndexObserver = Observer<Int> { seasonChanged() }
         private val seasonChoicesObserver = Observer<List<*>> { seasonChanged() }
@@ -406,7 +388,13 @@ internal class ElevateActorHook(private val appContext: Application) :
         private var lastActors: List<ActorData>? = null
         private var loadJob: Job? = null
         private var pendingAnimation: android.view.animation.Animation? = null
-        private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { attachClicks() }
+        private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+            if (active && lastActors == null) {
+                if (list.visibility != View.GONE) list.visibility = View.GONE
+                if (castText?.visibility != View.GONE) castText?.visibility = View.GONE
+            }
+            attachClicks()
+        }
         private var tree: ViewTreeObserver? = null
         private var observedAdapter: RecyclerView.Adapter<*>? = null
         private val dataObserver = object : RecyclerView.AdapterDataObserver() {
@@ -437,40 +425,26 @@ internal class ElevateActorHook(private val appContext: Application) :
 
         fun start() {
             active = true
+            list.visibility = View.GONE
+            castText?.visibility = View.GONE
             trace("BIND_START", "fragment=${fragment.javaClass.name} adapter=${list.adapter?.javaClass?.simpleName}")
             controller.start()
             model.page.observe(fragment.viewLifecycleOwner, observer)
             model.selectedSeasonIndex.observe(fragment.viewLifecycleOwner, seasonIndexObserver)
             model.seasonSelections.observe(fragment.viewLifecycleOwner, seasonChoicesObserver)
-            runCatching {
-                fragment.findNavController().currentBackStackEntry?.savedStateHandle
-                    ?.getLiveData<String>("elevate_actor_season_ids")
-                    ?.observe(fragment.viewLifecycleOwner, seasonIdsObserver)
-            }.onFailure { trace("SEASON_OBSERVER_ERROR", it.toString()) }
             tree = list.viewTreeObserver.also { it.addOnGlobalLayoutListener(layoutListener) }
             (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
         }
         private fun update(page: ResultData) {
             val response = runCatching { responseField?.get(model) as? LoadResponse }
                 .getOrNull()?.takeIf { it.url == page.url }
-            if (pageUrl != null && pageUrl != page.url) {
-                mappedSeason = null
-                currentSeasonNumber = null
-            }
-            val season = mappedSeason?.takeIf {
-                it.optString("url") == page.url &&
-                    (currentSeasonNumber == null ||
-                        it.optInt("season") == currentSeasonNumber)
-            }
-            val base = ids(page, response)
-            val ids = if (season == null) base else base.copy(
-                anilist = positive(season.optString("anilist")),
-                mal = positive(season.optString("mal")),
-                kitsu = positive(season.optString("kitsu"))
-            )
+            val season = model.selectedSeasonIndex.value?.takeIf { it >= 0 }
+                ?.let { model.seasonSelections.value?.getOrNull(it)?.second }
+            val multiSeason = (model.seasonSelections.value?.size ?: 0) > 1
+            val ids = ids(page, response)
             trace("PAGE_UPDATE", "url=${page.url.take(140)} response=${response != null} responseType=${response?.type} ids=$ids nativeActors=${page.actors?.size ?: 0} enabled=${castEnabled()}")
             val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown") +
-                "|" + (season?.optInt("season") ?: "default")
+                "|" + (season ?: "pending") + "|" + multiSeason
             if (identity == pageIdentity) {
                 trace("PAGE_SAME", "identity=${identity.take(180)} adapterCount=${list.adapter?.itemCount}")
                 attachClicks()
@@ -486,28 +460,36 @@ internal class ElevateActorHook(private val appContext: Application) :
             lastActors = null
             cards.clear()
             val adapter = list.adapter as? ActorAdaptor
-            adapter?.submitList(page.actors.orEmpty())
-            adapter?.let { current ->
-                list.post { if (list.adapter === current) current.notifyDataSetChanged() }
-            }
-            list.visibility = if (castEnabled() && !page.actors.isNullOrEmpty())
-                View.VISIBLE else View.GONE
-            castText?.visibility = if (page.actorsText == null) View.GONE else View.VISIBLE
+            adapter?.submitList(emptyList())
+            list.visibility = View.GONE
+            castText?.visibility = View.GONE
             if (!castEnabled()) { trace("RESOLVE_SKIPPED", "castDisabled"); return }
+            // Episode-based anime need the native season selection before lookup.
+            // Waiting prevents an initial season-1 cast from flashing on season 2.
+            if (response is TvSeriesLoadResponse &&
+                (response.type in setOf(TvType.Anime, TvType.OVA) ||
+                    (response.type in setOf(TvType.Others, TvType.Cartoon) &&
+                        (ids.anilist != null || ids.mal != null))) && season == null) {
+                trace("SEASON_PENDING", "url=${page.url.take(120)}")
+                return
+            }
             loadJob = main.launch {
                 trace("LOAD_JOB_START", "identity=${identity.take(180)}")
-                val loaded = resolve(page, response, ids, season != null)
-                trace("LOAD_JOB_RESULT", "actors=${loaded?.actors?.size ?: 0} people=${loaded?.people?.size ?: 0}")
-                if (loaded == null) return@launch
+                val loaded = resolve(page, response, ids, season, multiSeason)
+                // API failure is terminal: restore provider actors as the fallback.
+                val fallback = page.actors?.takeIf { it.isNotEmpty() }
+                    ?: response?.actors.orEmpty()
+                val resolved = loaded ?: CastResult(fallback, null)
+                trace("LOAD_JOB_RESULT", "actors=${resolved.actors.size} people=${resolved.people?.size ?: 0} nativeFallback=${loaded == null}")
                 if (!fragment.isAdded || pageIdentity != identity ||
                     (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
                     !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
                     run { trace("LOAD_REJECTED", "added=${fragment.isAdded} sameIdentity=${pageIdentity == identity} enabled=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}"); return@launch }
-                people = loaded.people
-                lastActors = loaded.actors
+                people = resolved.people
+                lastActors = resolved.actors
                 (list.adapter as? ActorAdaptor)?.let { adapter ->
-                    trace("ADAPTER_SUBMIT", "before=${adapter.itemCount} new=${loaded.actors.size} refs=${loaded.people?.size ?: 0}")
-                    adapter.submitList(loaded.actors)
+                    trace("ADAPTER_SUBMIT", "before=${adapter.itemCount} new=${resolved.actors.size} refs=${resolved.people?.size ?: 0}")
+                    adapter.submitList(resolved.actors)
                     list.post {
                         if (list.adapter === adapter && pageIdentity == identity) {
                             trace("ADAPTER_REBIND", "count=${adapter.itemCount} visible=${list.childCount}")
@@ -516,10 +498,11 @@ internal class ElevateActorHook(private val appContext: Application) :
                         }
                     }
                 }
-                if (castEnabled()) {
-                    list.visibility = View.VISIBLE
-                    castText?.visibility = View.GONE
-                }
+                list.visibility = if (castEnabled() && resolved.actors.isNotEmpty())
+                    View.VISIBLE else View.GONE
+                castText?.visibility = if (castEnabled() && loaded == null &&
+                    resolved.actors.isEmpty() && page.actorsText != null)
+                    View.VISIBLE else View.GONE
                 list.post { attachClicks() }
             }
         }
@@ -530,6 +513,10 @@ internal class ElevateActorHook(private val appContext: Application) :
             if (!active || !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) return
             val refs = people
             val actors = lastActors
+            if (actors == null) {
+                if (list.visibility != View.GONE) list.visibility = View.GONE
+                if (castText?.visibility != View.GONE) castText?.visibility = View.GONE
+            }
             if (!actors.isNullOrEmpty() && castEnabled()) {
                 list.visibility = View.VISIBLE
                 castText?.visibility = View.GONE
@@ -651,11 +638,6 @@ internal class ElevateActorHook(private val appContext: Application) :
             model.page.removeObserver(observer)
             model.selectedSeasonIndex.removeObserver(seasonIndexObserver)
             model.seasonSelections.removeObserver(seasonChoicesObserver)
-            runCatching {
-                fragment.findNavController().currentBackStackEntry?.savedStateHandle
-                    ?.getLiveData<String>("elevate_actor_season_ids")
-                    ?.removeObserver(seasonIdsObserver)
-            }
             tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
             tree = null
             observedAdapter?.unregisterAdapterDataObserver(dataObserver)
@@ -710,6 +692,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         main.cancel()
         io.cancel()
         synchronized(tmdbCache) { tmdbCache.clear() }
+        synchronized(anilistCache) { anilistCache.clear() }
     }
     override fun onActivityResumed(activity: Activity) {
         trace("ACTIVITY_RESUMED", "activity=${activity.javaClass.name}")
