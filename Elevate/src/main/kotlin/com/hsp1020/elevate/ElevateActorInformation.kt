@@ -44,6 +44,7 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
@@ -198,6 +199,24 @@ internal object ElevateActorInformation {
         return unique.values.toList()
     }
 
+
+    private fun localizedActorName(info: JSONObject, fallback: String, language: String): String {
+        val name = info.optString("name").takeIf { it.isNotBlank() && it != "null" }
+        val script = when (language.substringBefore('-').lowercase(Locale.ROOT)) {
+            "ko" -> Regex("[가-힣]")
+            "ja" -> Regex("[ぁ-ヿ]")
+            "zh" -> Regex("[㐀-鿿]")
+            else -> null
+        }
+        if (script != null && (name == null || !script.containsMatchIn(name))) {
+            val aliases = info.optJSONArray("also_known_as")
+            if (aliases != null) for (i in 0 until aliases.length()) {
+                val alias = aliases.optString(i)
+                if (alias.isNotBlank() && script.containsMatchIn(alias)) return alias
+            }
+        }
+        return name ?: fallback
+    }
 
     internal class Controller(private val fragment: Fragment) {
         private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
@@ -434,12 +453,12 @@ internal object ElevateActorInformation {
                     }
                 },
                 onReady = {
-
                     if (closed && dialog === windowDialog) {
                         preserve = true
                         windowDialog.dismiss()
                     }
-                }
+                },
+                preserveNestedNavigation = true
             )
             detailHandoff = handoff
             val originalBack = fragment.view?.findViewById<View>(R.id.result_back)
@@ -524,7 +543,8 @@ internal object ElevateActorInformation {
             }
             val details = column()
 
-            details.addView(label(actor.name, 24f, true))
+            val actorNameLabel = label(actor.name, 24f, true)
+            details.addView(actorNameLabel)
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
             var profileLoaded = false
             details.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -714,6 +734,7 @@ internal object ElevateActorInformation {
                     Log.d("ElevateActorTrace", "PERSON_PROFILE_RESULT id=${actor.id} success=${personResult.isSuccess} error=${personResult.exceptionOrNull()?.message}")
                     if (dialog !== windowDialog || generation != ticket) return@launch
                     personResult.onSuccess { info ->
+                        actorNameLabel.text = localizedActorName(info, actor.name, language)
                         val birth = info.optString("birthday").takeIf { it.isNotBlank() && it != "null" }
                         val death = info.optString("deathday").takeIf { it.isNotBlank() && it != "null" }
                         val place = info.optString("place_of_birth").takeIf { it.isNotBlank() && it != "null" }
@@ -929,62 +950,59 @@ internal object ElevateActorInformation {
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
             if (detailHandoff?.isActive == true || closed) return
+            val provider = model.currentRepo?.api
             val movie = credit.media == "movie"
-            Log.d("ElevateActorTrace", "CREDIT_OPEN id=${credit.id} media=${credit.media} title=${credit.title} origin=$providerUrl")
-            scope.launch {
-                try {
-                val provider = model.currentRepo?.api
-                Log.d("ElevateActorTrace", "CREDIT_SEARCH_START id=${credit.id} provider=${provider?.javaClass?.simpleName}")
-                val results = withContext(Dispatchers.IO) {
-                    try { provider?.search(credit.title).orEmpty() }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (error: Exception) {
-                        Log.e("ElevateActorTrace", "CREDIT_SEARCH_FAILURE id=${credit.id}", error)
-                        emptyList()
-                    }
-                }
-                val matching = results.filter { item ->
-                    item.name.equals(credit.title, ignoreCase = true) &&
-                        (item.type in setOf(TvType.Movie, TvType.AnimeMovie)) == movie
-                }
-                val candidate = matching.singleOrNull()
-                Log.d("ElevateActorTrace", "CREDIT_SEARCH_RESULT id=${credit.id} results=${results.size} exact=${matching.size} route=${if (candidate == null) "search" else "detail"}")
-                if (!fragment.isAdded || closed || dialog?.isShowing != true) return@launch
+            Log.d("ElevateActorTrace", "CREDIT_OPEN id=${credit.id} media=${credit.media} title=${credit.title} provider=${provider?.javaClass?.simpleName} origin=$providerUrl")
+            try {
                 scroll?.let { save() }
-                if (candidate == null) {
-                    val activity = fragment.activity ?: return@launch
-                    val searchId = activity.resources.getIdentifier("navigation_search", "id",
-                        activity.packageName)
-                    if (searchId == 0) return@launch
-                    Log.d("ElevateActorTrace", "CREDIT_NAV_SEARCH id=${credit.id} destination=$searchId")
-                    preserve = true
-                    dialog?.dismiss()
-                    val enter = activity.resources.getIdentifier("enter_anim", "anim",
-                        activity.packageName)
-                    val exit = activity.resources.getIdentifier("exit_anim", "anim",
-                        activity.packageName)
-                    activity.navigate(searchId, Bundle().apply {
-                        putString("search_query", credit.title)
-                        putBoolean("global_detail_search", true)
-                    }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
-                        .setPopEnterAnim(enter).setPopExitAnim(exit).build())
-                } else {
+                // Reuse metadata addon's TMDB ID route without importing StremioC classes.
+                if (provider?.javaClass?.simpleName == "StremioC" && provider.mainUrl.isNotBlank()) {
+                    val payload = JSONObject()
+                        .put("id", "tmdb:${credit.id}")
+                        .put("type", if (movie) "movie" else "series")
+                        .put("addonUrl", provider.mainUrl)
+                    val result = provider.newMovieSearchResponse(
+                        credit.title, payload.toString(),
+                        if (movie) TvType.Movie else TvType.TvSeries, fix = false
+                    ) {
+                        posterUrl = credit.poster?.takeIf { it.startsWith("/") }
+                            ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
+                    }
                     val covered = detailHandoff?.begin() == true
-                    Log.d("ElevateActorTrace", "CREDIT_NAV_DETAIL id=${credit.id} covered=$covered api=${candidate.apiName}")
+                    Log.d("ElevateActorTrace", "CREDIT_NAV_TMDB id=${credit.id} addon=${provider.mainUrl} covered=$covered")
                     SearchHelper.handleSearchClickCallback(
-                        SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, candidate))
+                        SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, result))
                     if (!covered) {
                         preserve = true
                         dialog?.dismiss()
                     }
+                    return
                 }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    if (error is VirtualMachineError || error is ThreadDeath) throw error
-                    detailHandoff?.close()
-                    Log.e("ElevateActorTrace", "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
+                // MainAPI.search(query) is optional, and may throw NotImplementedError.
+                val activity = fragment.activity ?: return
+                val searchId = activity.resources.getIdentifier(
+                    "navigation_search", "id", activity.packageName)
+                if (searchId == 0) {
+                    Log.e("ElevateActorTrace", "CREDIT_NAV_UNAVAILABLE id=${credit.id} missing=searchDestination")
+                    return
                 }
+                val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
+                val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
+                val covered = detailHandoff?.begin() == true
+                Log.d("ElevateActorTrace", "CREDIT_NAV_SEARCH id=${credit.id} destination=$searchId covered=$covered")
+                activity.navigate(searchId, Bundle().apply {
+                    putString("search_query", credit.title)
+                    putBoolean("global_detail_search", true)
+                }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                    .setPopEnterAnim(enter).setPopExitAnim(exit).build())
+                if (!covered) {
+                    preserve = true
+                    dialog?.dismiss()
+                }
+            } catch (error: Throwable) {
+                if (error is VirtualMachineError || error is ThreadDeath) throw error
+                detailHandoff?.close()
+                Log.e("ElevateActorTrace", "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
             }
         }
 

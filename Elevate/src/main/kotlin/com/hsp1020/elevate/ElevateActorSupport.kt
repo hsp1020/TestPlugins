@@ -394,7 +394,8 @@ internal class ElevateActorHandoff(
             if (fragment.javaClass.name !in setOf(
                     "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
                     "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
-                    "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer"
+                    "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
+                    "com.lagradost.cloudstream3.ui.search.SearchFragment"
                 )) return
             revealDetailWhenReady(view)
         }

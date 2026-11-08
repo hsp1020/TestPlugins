@@ -5275,7 +5275,6 @@ open class StremioC(
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
-                    this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = recommendationsForPage
                     this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
@@ -5345,7 +5344,6 @@ open class StremioC(
                         this.seasonNames = listOf(SeasonData(specialsSeason, seasonLabel))
                     }
                     this.plot = finalDescription
-                    this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = recommendationsForPage
                     this.contentRating = tmdbData?.fetchedAgeRating

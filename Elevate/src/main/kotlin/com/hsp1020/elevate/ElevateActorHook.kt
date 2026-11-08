@@ -37,6 +37,7 @@ import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
+import com.lagradost.cloudstream3.ui.settings.getCurrentLocale
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import kotlinx.coroutines.CancellationException
@@ -124,7 +125,8 @@ internal class ElevateActorHook(private val appContext: Application) :
         val apiKey = ElevateIdResolver.tmdbApiKey()
         trace("TMDB_PRECHECK", "raw=$raw id=$id movie=$movie apiKeyPresent=${!apiKey.isNullOrBlank()}")
         if (id == null || apiKey == null) return null
-        val key = "${if (movie) "movie" else "tv"}:$id:${apiKey.hashCode()}"
+        val language = getCurrentLocale(appContext)
+        val key = "${if (movie) "movie" else "tv"}:$id:$language:${apiKey.hashCode()}"
         val now = System.currentTimeMillis()
         val task = synchronized(tmdbCache) {
             tmdbCache[key]?.takeIf { now - it.at in 0 until 43_200_000L }
@@ -135,7 +137,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                     withTimeoutOrNull(15_000L) {
                         val kind = if (movie) "movie" else "tv"
                         val res = app.get("https://api.themoviedb.org/3/$kind/$id/credits",
-                            params = mapOf("api_key" to apiKey), timeout = 12L)
+                            params = mapOf("api_key" to apiKey, "language" to language), timeout = 12L)
                         trace("TMDB_HTTP", "id=$id status=${res.code} bytes=${res.text.length}")
                         val json = JSONObject(res.text)
                         val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
@@ -342,6 +344,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             }
         }
         private var active = false
+        private var restoringCast = false
         private var pageUrl: String? = null
         private var pageIdentity: String? = null
         private var people: List<ElevateActorPersonRef>? = null
@@ -401,6 +404,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             pageUrl = page.url
             trace("PAGE_CHANGED", "old=${previousIdentity?.take(100)} new=${identity.take(180)}")
             loadJob?.cancel()
+            restoringCast = false
             people = null
             lastActors = null
             cards.clear()
@@ -459,6 +463,24 @@ internal class ElevateActorHook(private val appContext: Application) :
                 adapter.registerAdapterDataObserver(dataObserver)
                 observedAdapter = adapter
                 trace("ADAPTER_OBSERVER", "attached=${adapter.javaClass.simpleName}")
+            }
+            // Native back navigation can resubmit the original actors without changing the page ID.
+            if (!actors.isNullOrEmpty() && castEnabled() &&
+                (adapter.itemCount != actors.size || actors.indices.any {
+                    adapter.getItemOrNull(it) !== actors[it]
+                })) {
+                if (!restoringCast) {
+                    restoringCast = true
+                    trace("CAST_RESTORE", "current=${adapter.itemCount} expected=${actors.size}")
+                    adapter.submitList(actors, Runnable {
+                        restoringCast = false
+                        if (active && list.adapter === adapter) {
+                            adapter.notifyDataSetChanged()
+                            list.post { attachClicks() }
+                        }
+                    })
+                }
+                return
             }
             val signature = "${adapter.itemCount}:${list.childCount}:${refs?.size}:${actors?.size}:${pageIdentity?.hashCode()}"
             if (signature != lastBindTrace) { trace("CLICK_BIND_SCAN", "signature=$signature"); lastBindTrace = signature }
@@ -543,6 +565,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         }
         fun stop() {
             active = false
+            restoringCast = false
             trace("BIND_STOP", "fragment=${fragment.javaClass.name} page=${pageUrl?.take(100)}")
             pendingAnimation?.setAnimationListener(null)
             pendingAnimation = null
