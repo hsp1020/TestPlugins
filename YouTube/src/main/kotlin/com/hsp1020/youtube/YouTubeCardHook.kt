@@ -1550,7 +1550,51 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             return null
         }
 
-        private fun deliverChannelEpisodes(
+        /**
+         * Rebuild only the native episode/range state, without calling load().
+         * load() emits page/episode Loading twice and visibly blanks the old list.
+         * postEpisodes(updateFillers=false) completes synchronously on the main
+         * thread and its LiveData postValue(Loading/Success) coalesces to Success.
+         */
+        private suspend fun rebuildChannelEpisodes(
+            model: ResultViewModel2,
+            response: TvSeriesLoadResponse
+        ): Boolean {
+            return try {
+                val field = model.javaClass.getDeclaredField("currentId").apply {
+                    isAccessible = true
+                }
+                val id = field.get(model) as? Int ?: error("No native channel ID")
+                val method = model.javaClass.declaredMethods.firstOrNull {
+                    it.name == "postEpisodes" && it.parameterTypes.size == 4
+                } ?: error("Native postEpisodes method unavailable")
+                method.isAccessible = true
+                kotlin.coroutines.suspendCoroutine { completion ->
+                    val callback = object : kotlin.coroutines.Continuation<Any?> {
+                        override val context = completion.context
+                        override fun resumeWith(result: Result<Any?>) {
+                            completion.resumeWith(result.map { true })
+                        }
+                    }
+                    try {
+                        val result = method.invoke(model, response, id, false, callback)
+                        if (result !== kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) {
+                            completion.resumeWith(Result.success(true))
+                        }
+                    } catch (error: java.lang.reflect.InvocationTargetException) {
+                        completion.resumeWith(Result.failure(error.targetException ?: error))
+                    } catch (error: Throwable) {
+                        completion.resumeWith(Result.failure(error))
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.w("YouTubeChannel", "event=CHANNEL_UI_REBUILD_FAILED " +
+                    "reason=${error.javaClass.simpleName}", error)
+                false
+            }
+        }
+
+        private suspend fun deliverChannelEpisodes(
             model: ResultViewModel2,
             provider: YoutubeProvider,
             response: TvSeriesLoadResponse,
@@ -1565,14 +1609,16 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             val previous = cached.episodes.size
             cached.episodes = response.episodes
-            // APIRepository retains a separate 10-minute cache keyed by request URL.
-            // Use a unique loader key without changing the canonical response ID.
+            if (rebuildChannelEpisodes(model, cached)) {
+                Log.i("YouTubeChannel", "event=CHANNEL_UI_CACHE_UPDATED reason=$reason " +
+                    "before=$previous after=${cached.episodes.size} nativeEpisodesRebuilt=true")
+                return true
+            }
+            // Host version fallback: preserve functionality if its private API changes.
             val separator = if (pageUrl.contains("?")) "&" else "?"
             val refreshUrl = "$pageUrl${separator}cs_youtube_refresh=${System.nanoTime()}"
             provider.cacheChannelResponse(refreshUrl, response)
-            Log.i("YouTubeChannel", "event=CHANNEL_UI_CACHE_UPDATED reason=$reason " +
-                "before=$previous after=${cached.episodes.size} " +
-                "newLoaderKey=true canonicalUrl=${response.url == pageUrl}")
+            Log.w("YouTubeChannel", "event=CHANNEL_UI_REBUILD_FALLBACK reason=$reason")
             model.load(owner.activity, refreshUrl, "YouTube", false,
                 DubStatus.None, null, loadTrailers = false)
             return true

@@ -3380,8 +3380,12 @@ class YoutubeProvider(
         directPageCache[url] = page
     }
 
-    // Order is the YouTube UI order: latest, popular, oldest.
-    private fun nativeSortChips(data: Map<String, Any>?): List<Map<*, *>>? {
+    private data class NativeChannelSort(val label: String, val token: String)
+
+    // Normal channels expose three sort chips. Membership channels place the
+    // same three sort actions inside the first chip's sheet; the other top-level
+    // chips are membership/public filters, NOT sort choices.
+    private fun nativeChannelSort(data: Map<String, Any>?): List<NativeChannelSort>? {
         val tabs = (safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs")
             ?: safeGet(data, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
             ?: return null
@@ -3389,14 +3393,40 @@ class YoutubeProvider(
             ?: return null
         val chips = safeGet(tab, "tabRenderer", "content", "richGridRenderer",
             "header", "chipBarViewModel", "chips") as? List<*> ?: return null
-        return chips.mapNotNull { safeGet(it, "chipViewModel") as? Map<*, *> }
-            .takeIf { it.size >= 3 }?.take(3)
+
+        val sheetItems = safeGet(chips.firstOrNull(), "chipViewModel", "tapCommand",
+            "innertubeCommand", "showSheetCommand", "panelLoadingStrategy",
+            "inlineContent", "sheetViewModel", "content", "listViewModel",
+            "listItems") as? List<*>
+        if (sheetItems != null) {
+            val sort = sheetItems.mapNotNull { item ->
+                val entry = safeGet(item, "listItemViewModel") as? Map<*, *>
+                    ?: return@mapNotNull null
+                val label = getText(entry["title"])
+                val commands = safeGet(entry, "rendererContext", "commandContext",
+                    "onTap", "innertubeCommand", "commandExecutorCommand", "commands") as? List<*>
+                val token = commands?.firstNotNullOfOrNull {
+                    safeGet(it, "continuationCommand", "token") as? String
+                }
+                if (label.isBlank() || token.isNullOrBlank()) null
+                else NativeChannelSort(label, token)
+            }
+            return sort.takeIf { it.size >= 3 }?.take(3)
+        }
+
+        return chips.mapNotNull { chip ->
+            val view = safeGet(chip, "chipViewModel") as? Map<*, *>
+                ?: return@mapNotNull null
+            val label = getText(view["text"]).ifBlank { getText(view["accessibilityLabel"]) }
+            val token = safeGet(view, "tapCommand", "innertubeCommand",
+                "continuationCommand", "token") as? String
+            if (label.isBlank() || token.isNullOrBlank()) null
+            else NativeChannelSort(label, token)
+        }.takeIf { it.size >= 3 }?.take(3)
     }
 
     private fun rememberChannelSortLabels(channel: String, data: Map<String, Any>?) {
-        val chips = nativeSortChips(data) ?: return
-        val labels = chips.map { getText(it["text"]).ifBlank { getText(it["accessibilityLabel"]) } }
-        if (labels.any { it.isBlank() }) return
+        val labels = nativeChannelSort(data)?.map { it.label } ?: return
         val key = "${normalizedChannelUrl(channel)}|$lang"
         channelSortLabels[key] = labels
     }
@@ -3915,13 +3945,11 @@ class YoutubeProvider(
                         val mode = channelSortMode(cleanUrl)
                         var sortedNextToken: String? = null
                         if (mode != ChannelSortMode.LATEST) {
-                            val chips = nativeSortChips(tabData)
+                            val options = nativeChannelSort(tabData)
                             val index = if (mode == ChannelSortMode.POPULAR) 1 else 2
-                            val token = chips?.getOrNull(index)?.let {
-                                safeGet(it, "tapCommand", "innertubeCommand", "continuationCommand", "token") as? String
-                            }
+                            val token = options?.getOrNull(index)?.token
                             Log.i("YouTubeChannel", "event=CHANNEL_SORT_TOKEN tab=$tabName mode=$mode " +
-                                "chips=${chips?.size ?: 0} token=${!token.isNullOrBlank()}")
+                                "options=${options?.size ?: 0} token=${!token.isNullOrBlank()}")
                             if (!token.isNullOrBlank() && !apiKey.isNullOrBlank()) {
                                 val sorted = app.post(
                                     "$mainUrl/youtubei/v1/browse?key=$apiKey",
