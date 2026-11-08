@@ -415,6 +415,10 @@ internal class LibraryPosterHook(private val appContext: Application) :
         pending[image] = scope.launch {
             try {
                 val movie = item.type == TvType.Movie || item.type == TvType.AnimeMovie
+                if (setting.service == PosterService.XRDB)
+                    ElevatePosterTrace.log("library", "SOURCE", item.name,
+                        "provider=${item.apiName} type=${item.type} syncId=${item.syncId}" +
+                        " sourceUrl=${ElevatePosterTrace.url(item.url)}")
                 val sourceAnimeId = if (setting.service == PosterService.XRDB)
                     xrdbOriginalAnimeId(item.url, item.syncId) else null
                 val version = if (setting.service == PosterService.XRDB) xrdbVersion else null
@@ -422,16 +426,29 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 val ids = if (sourceAnimeId == null) withContext(Dispatchers.IO) {
                     resolve(item, setting.service == PosterService.XRDB)?.preferImdb(movie)
                 } else null
+                if (setting.service == PosterService.XRDB)
+                    ElevatePosterTrace.log("library", "MAPPING", item.name,
+                        "sourceAnime=$sourceAnimeId ids=${ElevatePosterTrace.ids(ids)}" +
+                        " movie=$movie version=$version")
                 if (revision != token || bound[image] !== marker ||
                     !image.isAttachedToWindow) return@launch
 
                 suspend fun attempt(poster: String): Boolean? {
+                    if (setting.service == PosterService.XRDB)
+                        ElevatePosterTrace.log("library", "REQUEST", item.name,
+                            "artwork=${ElevatePosterTrace.artwork(poster)}" +
+                            " url=${ElevatePosterTrace.url(poster)} unavailable=${poster in unavailable}")
                     if (poster in unavailable) return false
                     val entry = marker.copy(url = poster)
                     bound[image] = entry
                     val result = PosterWipe.load(image, poster) {
                         revision == token && bound[image] === entry
                     }
+                    if (setting.service == PosterService.XRDB)
+                        ElevatePosterTrace.log("library", "RESULT", item.name,
+                            "artwork=${ElevatePosterTrace.artwork(poster)}" +
+                            " success=${result.success} error=${result.error}" +
+                            " selected=${bound[image] === entry}")
                     if (bound[image] !== entry || result.error == "stale") return null
                     if (result.success) return true
                     unavailable.add(poster)
@@ -453,6 +470,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 val fallbackIds = if (sourceAnimeId != null) withContext(Dispatchers.IO) {
                     resolve(item, true)?.preferImdb(movie)
                 } else ids
+                if (setting.service == PosterService.XRDB)
+                    ElevatePosterTrace.log("library", "FALLBACK_IDS", item.name,
+                        "ids=${ElevatePosterTrace.ids(fallbackIds)}")
                 if (revision != token || bound[image]?.identity != id ||
                     !image.isAttachedToWindow) return@launch
                 val alternatives = listOfNotNull(
@@ -471,6 +491,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
                         false -> Unit
                     }
                 }
+                if (setting.service == PosterService.XRDB)
+                    ElevatePosterTrace.log("library", "NATIVE_FALLBACK", item.name,
+                        "allCustomCandidatesFailed=true")
                 showNative(image, id)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -567,7 +590,11 @@ internal class LibraryPosterHook(private val appContext: Application) :
             syncData?.get("imdb"), syncData?.get("tmdb"),
             syncData?.get("mal"), syncData?.get("anilist"), syncData?.get("kitsu")
         )
-        if (usable(saved) && (canonical(saved) || !forXrdb)) return saved
+        if (usable(saved) && (canonical(saved) || !forXrdb)) {
+            if (forXrdb) ElevatePosterTrace.log("library", "IDS_SYNC", item.name,
+                ElevatePosterTrace.ids(saved))
+            return saved
+        }
 
         val source = "${item.url} ${item.syncId}"
         ids(IMDB.find(source)?.value, TMDB.find(source)?.groupValues?.get(1))
@@ -612,11 +639,15 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 }
                 entryIds
             }.getOrNull()
+            if (forXrdb) ElevatePosterTrace.log("library", "IDS_SIMKL_CACHE", item.name,
+                "simkl=$numeric ids=${ElevatePosterTrace.ids(cached)}")
             if (usable(cached) && canonical(cached)) return cached
             if (cached != null) alternate = cached
             val remote = ElevateIdResolver.simkl(numeric,
                 item.type == TvType.Movie || item.type == TvType.AnimeMovie)
             val mapped = remote?.let { ids(it.imdb, it.tmdb, it.mal, it.anilist, it.kitsu) }
+            if (forXrdb) ElevatePosterTrace.log("library", "IDS_SIMKL_API", item.name,
+                "simkl=$numeric ids=${ElevatePosterTrace.ids(mapped)}")
             if (usable(mapped) && canonical(mapped)) return mapped
             if (mapped != null) alternate = mapped
         } else {
@@ -639,6 +670,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
         for ((kind, id) in candidates) {
             val mapping = ElevateAnimeIdResolver.resolve(kind, id) ?: continue
             val result = ids(mapping.imdb, mapping.tmdb)
+            if (forXrdb) ElevatePosterTrace.log("library", "IDS_AIO", item.name,
+                "source=$kind:$id mapped=${ElevatePosterTrace.ids(result)}")
             if (canonical(result)) return result
         }
         return if (forXrdb) alternate ?: saved else null
