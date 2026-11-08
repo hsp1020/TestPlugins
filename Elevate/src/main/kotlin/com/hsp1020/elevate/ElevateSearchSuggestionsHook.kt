@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.os.Build
 import android.icu.util.ULocale
 import android.os.Bundle
 import android.os.Handler
@@ -149,11 +148,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         val language = locale.language
         if (language !in iso639Languages) return null
         val region = locale.country.ifBlank {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
-            } else {
-                "" // Android 21-23: a language-only tag is safer than guessing a region.
-            }
+            ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
         }
         return if (region.length == 2) "${language}-${region}" else language
     }
