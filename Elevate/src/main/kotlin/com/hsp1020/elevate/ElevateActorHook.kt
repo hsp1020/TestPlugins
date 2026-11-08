@@ -38,8 +38,6 @@ import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.ResultData
-import com.lagradost.cloudstream3.ui.result.ResultFragmentPhone
-import com.lagradost.cloudstream3.ui.result.ResultFragmentTv
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -260,10 +258,19 @@ internal class ElevateActorHook(private val appContext: Application) :
         }
     }
 
+    private fun isResultFragment(fragment: Fragment): Boolean {
+        var type: Class<*>? = fragment.javaClass
+        while (type != null) {
+            if (type.name == "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone" ||
+                type.name == "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return true
+            type = type.superclass
+        }
+        return false
+    }
+
     private fun attach(fragment: Fragment, root: View) {
-        // ResultTrailerPlayer inherits ResultFragmentPhone; exact name matching missed it.
-        if (bindings.containsKey(fragment) ||
-            (fragment !is ResultFragmentPhone && fragment !is ResultFragmentTv)) return
+        // ResultTrailerPlayer inherits ResultFragmentPhone.
+        if (bindings.containsKey(fragment) || !isResultFragment(fragment)) return
         val list = root.findViewById<RecyclerView>(R.id.result_cast_items)
         trace("ATTACH_CHECK", "fragment=${fragment.javaClass.name} castList=${list != null} adapter=${list?.adapter?.javaClass?.simpleName}")
         if (list == null) return
