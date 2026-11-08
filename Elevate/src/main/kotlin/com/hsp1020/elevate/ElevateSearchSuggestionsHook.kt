@@ -14,6 +14,7 @@ import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
+import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.app
@@ -56,6 +57,13 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             }
         }.getOrNull()
     }
+    private val suggestionJobField by lazy {
+        runCatching {
+            SearchViewModel::class.java.getDeclaredField("suggestionJob").apply {
+                isAccessible = true
+            }
+        }.getOrNull()
+    }
     private val tmdbApiKey: String? by lazy {
         runCatching {
             SearchViewModel::class.java.classLoader
@@ -82,7 +90,8 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     }
 
     fun start() {
-        if (started || tmdbApiKey == null || queryListenerField == null || suggestionField == null) return
+        if (started || tmdbApiKey == null || queryListenerField == null ||
+            suggestionField == null || suggestionJobField == null) return
         started = true
         application.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? FragmentActivity)?.let(::attachActivity)
@@ -127,6 +136,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         if (!PreferenceManager.getDefaultSharedPreferences(context)
                 .getBoolean("search_suggestions_enabled", true)) return
         val searchView = root.findViewById<SearchView>(R.id.main_search) ?: return
+        val suggestionList = root.findViewById<RecyclerView>(R.id.search_suggestions_recycler) ?: return
         val original = runCatching {
             queryListenerField?.get(searchView) as? SearchView.OnQueryTextListener
         }.getOrNull() ?: return
@@ -137,7 +147,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         val suggestions = runCatching {
             suggestionField?.get(model) as? MutableLiveData<List<String>>
         }.getOrNull() ?: return
-        search = SearchBinding(fragment, root, searchView, original, model, suggestions).also {
+        search = SearchBinding(fragment, root, searchView, suggestionList, original, model, suggestions).also {
             it.open()
         }
     }
@@ -159,6 +169,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         val fragment: Fragment,
         val root: android.view.View,
         private val view: SearchView,
+        private val suggestionList: RecyclerView,
         private val native: SearchView.OnQueryTextListener,
         private val model: SearchViewModel,
         private val suggestions: MutableLiveData<List<String>>
@@ -166,6 +177,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         private var generation = 0
         private var pending: Runnable? = null
         private var request: Job? = null
+        private var originalAnimator: RecyclerView.ItemAnimator? = null
 
         private val replacement = object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
@@ -175,14 +187,20 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
             override fun onQueryTextChange(query: String): Boolean {
                 val handled = native.onQueryTextChange(query)
-                // Cancel the original 300ms English-language request after native UI handling.
-                model.clearSuggestions()
+                // Preserve current suggestions until the localized response is ready.
+                // The native job must be canceled without clearSuggestions(), which posts
+                // an empty list and makes the RecyclerView briefly disappear.
+                if (query.length >= 2 && query.isNotBlank()) {
+                    runCatching { (suggestionJobField?.get(model) as? Job)?.cancel() }
+                }
                 schedule(query)
                 return handled
             }
         }
 
         fun open() {
+            originalAnimator = suggestionList.itemAnimator
+            suggestionList.itemAnimator = null
             view.setOnQueryTextListener(replacement)
         }
 
@@ -220,6 +238,9 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             if (runCatching { queryListenerField?.get(view) }.getOrNull() === replacement) {
                 view.setOnQueryTextListener(native)
                 model.clearSuggestions()
+            }
+            if (suggestionList.itemAnimator == null) {
+                suggestionList.itemAnimator = originalAnimator
             }
         }
     }
