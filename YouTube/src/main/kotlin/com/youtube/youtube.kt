@@ -122,7 +122,55 @@ class YoutubeProvider(
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
+    internal enum class ChannelSortMode {
+        POPULAR, LATEST, DATE
+    }
+
     companion object {
+        private fun normalizedChannelUrl(url: String): String {
+            var normalized = url.substringBefore("?").removeSuffix("/")
+            for (suffix in listOf("/videos", "/shorts", "/streams", "/featured", "/playlists", "/community", "/about")) {
+                if (normalized.endsWith(suffix)) normalized = normalized.removeSuffix(suffix)
+            }
+            return normalized
+        }
+
+        private val channelSortModes = ConcurrentHashMap<String, ChannelSortMode>()
+        private val channelSortLabels = ConcurrentHashMap<String, List<String>>()
+
+        internal fun channelSortLabels(url: String, lang: String): List<String>? =
+            channelSortLabels["${normalizedChannelUrl(url)}|$lang"]
+        internal fun channelSortMode(url: String): ChannelSortMode =
+            channelSortModes[normalizedChannelUrl(url)] ?: ChannelSortMode.LATEST
+
+        internal fun setChannelSortMode(url: String, mode: ChannelSortMode) {
+            channelSortModes[normalizedChannelUrl(url)] = mode
+        }
+
+        private fun channelCacheKey(channel: String, tab: String, lang: String, limit: Int): String =
+            "${normalizedChannelUrl(channel)}/$tab|$lang|$limit|${channelSortMode(channel).name}"
+
+        internal fun channelLoadedPages(url: String, lang: String, limit: Int): Int {
+            val keyParts = listOf("videos", "shorts").map {
+                channelCacheKey(url, it, lang, limit)
+            }
+            return synchronized(channelTabCache) {
+                val tabs = keyParts.mapNotNull { channelTabCache[it] }
+                tabs.filter { it.pagesFetched < limit && !it.nextToken.isNullOrBlank() }
+                    .minOfOrNull { it.pagesFetched }
+                    ?: tabs.maxOfOrNull { it.pagesFetched } ?: 0
+            }
+        }
+
+        internal fun channelHasMorePages(url: String, lang: String, limit: Int): Boolean {
+            return synchronized(channelTabCache) {
+                listOf("videos", "shorts").any {
+                    val cached = channelTabCache[channelCacheKey(url, it, lang, limit)]
+                    cached != null && cached.pagesFetched < limit && !cached.nextToken.isNullOrBlank()
+                }
+            }
+        }
+
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         private const val YOUTUBE_PAYLOAD_CONCURRENCY = 5
@@ -135,7 +183,12 @@ class YoutubeProvider(
 
         // Short-lived channel tab snapshots avoid repeating all continuation requests on re-entry.
         private const val CHANNEL_TAB_REUSE_MS = 2 * 60_000L
-        private data class CachedChannelTab(val episodes: List<Episode>, val savedAtMs: Long)
+        private data class CachedChannelTab(
+            val episodes: List<Episode>,
+            val savedAtMs: Long,
+            val pagesFetched: Int,
+            val nextToken: String?
+        )
         private val channelTabCache = Collections.synchronizedMap(
             object : LinkedHashMap<String, CachedChannelTab>(12, 0.75f, true) {
                 override fun removeEldestEntry(
@@ -3009,6 +3062,11 @@ class YoutubeProvider(
         when (obj) {
             is Map<*, *> -> {
                 if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
+                val reload = obj["reloadContinuationItemsCommand"] as? Map<*, *>
+                if (reload != null) {
+                    (reload["continuationItems"] as? List<*>
+                        ?: reload["contents"] as? List<*>)?.let { return it }
+                }
                 val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
                 val keysToTrySize = keysToTry.size
                 for (i in 0 until keysToTrySize) {
@@ -3317,7 +3375,45 @@ class YoutubeProvider(
 
     private val directPageCache = ConcurrentHashMap<String, TvSeriesLoadResponse>()
 
+    internal fun cacheChannelResponse(url: String, page: TvSeriesLoadResponse) {
+        if (directPageCache.size >= 16) directPageCache.clear()
+        directPageCache[url] = page
+    }
+
+    // Order is the YouTube UI order: latest, popular, oldest.
+    private fun nativeSortChips(data: Map<String, Any>?): List<Map<*, *>>? {
+        val tabs = (safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs")
+            ?: safeGet(data, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
+            ?: return null
+        val tab = tabs.firstOrNull { safeGet(it, "tabRenderer", "selected") == true }
+            ?: return null
+        val chips = safeGet(tab, "tabRenderer", "content", "richGridRenderer",
+            "header", "chipBarViewModel", "chips") as? List<*> ?: return null
+        return chips.mapNotNull { safeGet(it, "chipViewModel") as? Map<*, *> }
+            .takeIf { it.size >= 3 }?.take(3)
+    }
+
+    private fun rememberChannelSortLabels(channel: String, data: Map<String, Any>?) {
+        val chips = nativeSortChips(data) ?: return
+        val labels = chips.map { getText(it["text"]).ifBlank { getText(it["accessibilityLabel"]) } }
+        if (labels.any { it.isBlank() }) return
+        val key = "${normalizedChannelUrl(channel)}|$lang"
+        channelSortLabels[key] = labels
+    }
+
     /** One-shot detail cache, valid for the entire playback regardless of duration. */
+    internal fun channelPageLimit(): Int =
+        appPrefs?.getInt("channel_pages_limit", 36) ?: 36
+
+    internal fun channelLoadedPages(url: String): Int =
+        Companion.channelLoadedPages(url, lang, channelPageLimit())
+
+    internal fun channelHasMorePages(url: String): Boolean =
+        Companion.channelHasMorePages(url, lang, channelPageLimit())
+
+    internal suspend fun loadChannelPages(url: String, targetPages: Int): TvSeriesLoadResponse? =
+        loadPage(url, direct = false, channelTargetPages = targetPages) as? TvSeriesLoadResponse
+
     override suspend fun load(url: String): LoadResponse {
         val response = directPageCache.remove(url) ?: loadPage(url, direct = false)
         if (url.contains("/shorts/") && response is TvSeriesLoadResponse) {
@@ -3378,7 +3474,9 @@ class YoutubeProvider(
     internal suspend fun loadForDirectPlayback(url: String): LoadResponse =
         loadPage(url, direct = true)
 
-    private suspend fun loadPage(url: String, direct: Boolean): LoadResponse {
+    private suspend fun loadPage(
+        url: String, direct: Boolean, channelTargetPages: Int = 2
+    ): LoadResponse {
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -3578,11 +3676,13 @@ class YoutubeProvider(
 
                 val html = response.text
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
+                rememberChannelSortLabels(cleanUrl, data)
 
                 val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
                 val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                 val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
+                val maxPagesLimit = channelPageLimit()
+                val pageTarget = channelTargetPages.coerceIn(1, maxPagesLimit.coerceAtLeast(1))
                 Log.i("YouTubeChannel", "event=CHANNEL_OPEN channel=$cleanUrl limit=$maxPagesLimit metadataHtmlRequests=1")
 
                 var channelDescription = channelDescriptionFromData(data)
@@ -3674,35 +3774,37 @@ class YoutubeProvider(
                 }
 
                 suspend fun fetchTab(tabUrl: String): List<Episode> {
-                    val cacheKey = "$tabUrl|$lang|$maxPagesLimit"
-                    val tabName = if (tabUrl.endsWith("/shorts")) "shorts" else "videos"
+                    val baseTabUrl = tabUrl.substringBefore("?")
+                    val tabName = if (baseTabUrl.endsWith("/shorts")) "shorts" else "videos"
+                    val cacheKey = channelCacheKey(cleanUrl, tabName, lang, maxPagesLimit)
                     val startedMs = System.currentTimeMillis()
                     var cacheStatus = "MISS"
-                    val cachedEpisodes = synchronized(channelTabCache) {
-                        val cached = channelTabCache[cacheKey]
-                        if (cached != null &&
-                            startedMs - cached.savedAtMs in 0L..CHANNEL_TAB_REUSE_MS) {
-                            cacheStatus = "HIT"
-                            cached.episodes.map { it.copy() }
-                        } else {
-                            if (cached != null) {
+                    val snapshot = synchronized(channelTabCache) {
+                        channelTabCache[cacheKey]?.let { item ->
+                            val allowedAge = if (item.nextToken.isNullOrBlank()) CHANNEL_TAB_REUSE_MS else 30 * 60_000L
+                            if (startedMs - item.savedAtMs in 0L..allowedAge) item
+                            else {
                                 cacheStatus = "EXPIRED"
                                 channelTabCache.remove(cacheKey)
+                                null
                             }
-                            null
                         }
                     }
-                    if (cachedEpisodes != null) {
+                    if (snapshot != null && (snapshot.pagesFetched >= pageTarget ||
+                            snapshot.nextToken.isNullOrBlank())) {
                         Log.i("YouTubeChannel",
-                            "event=CHANNEL_CACHE tab=$tabName status=HIT count=${cachedEpisodes.size} ttlMs=$CHANNEL_TAB_REUSE_MS")
-                        return cachedEpisodes
+                            "event=CHANNEL_CACHE tab=$tabName status=HIT count=${snapshot.episodes.size} pages=${snapshot.pagesFetched}")
+                        return snapshot.episodes.map { it.copy() }
                     }
                     Log.i("YouTubeChannel",
-                        "event=CHANNEL_CACHE tab=$tabName status=$cacheStatus limit=$maxPagesLimit")
-                    val tabEpisodes = mutableListOf<Episode>()
+                        "event=CHANNEL_CACHE tab=$tabName status=${if (snapshot != null) "RESUME" else cacheStatus} limit=$pageTarget")
+                    val tabEpisodes = snapshot?.episodes?.map { it.copy() }?.toMutableList()
+                        ?: mutableListOf()
                     var cacheable = true
-                    var pagesFetchedLocal = 1
+                    var pagesFetchedLocal = snapshot?.pagesFetched ?: 1
+                    var currentToken: String? = snapshot?.nextToken
                     try {
+                        if (snapshot == null) {
                         // The channel header already fetched and parsed /videos.
                         var tabData = if (tabUrl == channelUrl) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
@@ -3717,8 +3819,8 @@ class YoutubeProvider(
                             ?: safeGet(tabData, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
                         if (tabs != null) {
                             val targetPath = when {
-                                tabUrl.endsWith("/videos") -> "/videos"
-                                tabUrl.endsWith("/shorts") -> "/shorts"
+                                baseTabUrl.endsWith("/videos") -> "/videos"
+                                baseTabUrl.endsWith("/shorts") -> "/shorts"
                                 else -> ""
                             }
 
@@ -3800,11 +3902,43 @@ class YoutubeProvider(
                             }
                         }
 
+                        // Apply server-provided browse reload token before any pagination.
+                        val mode = channelSortMode(cleanUrl)
+                        if (mode != ChannelSortMode.LATEST) {
+                            val chips = nativeSortChips(tabData)
+                            val index = if (mode == ChannelSortMode.POPULAR) 1 else 2
+                            val token = chips?.getOrNull(index)?.let {
+                                safeGet(it, "tapCommand", "innertubeCommand", "continuationCommand", "token") as? String
+                            }
+                            if (!token.isNullOrBlank() && !apiKey.isNullOrBlank()) {
+                                val sorted = app.post(
+                                    "$mainUrl/youtubei/v1/browse?key=$apiKey",
+                                    json = mapOf("context" to mapOf("client" to mapOf(
+                                        "clientName" to "WEB", "clientVersion" to clientVersion,
+                                        "hl" to lang, "gl" to "US",
+                                        "visitorData" to (visitorData ?: ""), "platform" to "DESKTOP"
+                                    )), "continuation" to token),
+                                    headers = mapOf(
+                                        "X-Youtube-Client-Name" to "WEB",
+                                        "X-Youtube-Client-Version" to clientVersion
+                                    ),
+                                    interceptor = ytInterceptor
+                                ).parsedSafe<Map<String, Any>>()
+                                val sortedItems = findContinuationItemsRecursive(sorted)
+                                if (!sortedItems.isNullOrEmpty()) {
+                                    initialItems = sortedItems
+                                } else {
+                                    throw ErrorLoadingException("YouTube channel sorting failed: $tabName / $mode")
+                                }
+                            } else if (tabName == "videos") {
+                                throw ErrorLoadingException("YouTube channel sort token unavailable: $mode")
+                            }
+                        }
                         if (initialItems != null) {
-                            extractVideosFromItems(initialItems, tabEpisodes, tabUrl.endsWith("/shorts"))
+                            extractVideosFromItems(initialItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
                         }
 
-                        var currentToken: String? = findContinuationFromItems(initialItems)
+                        currentToken = findContinuationFromItems(initialItems)
                         if (currentToken.isNullOrBlank()) {
                             val conts = findContinuationItemsRecursive(tabData)
                             currentToken = findContinuationFromItems(conts)
@@ -3812,7 +3946,8 @@ class YoutubeProvider(
 
                         Log.i("YouTubeChannel",
                             "event=CHANNEL_INITIAL tab=$tabName page=1 count=${tabEpisodes.size} htmlReused=${tabUrl == channelUrl} next=${!currentToken.isNullOrBlank()}")
-                        while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
+                        }
+                        while (!currentToken.isNullOrBlank() && pagesFetchedLocal < pageTarget && !apiKey.isNullOrBlank()) {
                             try {
                                 pagesFetchedLocal += 1
                                 val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
@@ -3845,7 +3980,7 @@ class YoutubeProvider(
                                     break
                                 }
                                 val beforeCount = tabEpisodes.size
-                                extractVideosFromItems(javaContinuationItems, tabEpisodes, tabUrl.endsWith("/shorts"))
+                                extractVideosFromItems(javaContinuationItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                                 Log.i("YouTubeChannel",
                                     "event=CHANNEL_PAGE tab=$tabName page=$pagesFetchedLocal added=${tabEpisodes.size - beforeCount} total=${tabEpisodes.size} next=${!currentToken.isNullOrBlank()}")
@@ -3866,7 +4001,7 @@ class YoutubeProvider(
                             cacheable = false
                             Log.w("YouTubeChannel",
                                 "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=api_key_missing")
-                        } else if (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit) {
+                        } else if (!currentToken.isNullOrBlank() && pagesFetchedLocal < pageTarget) {
                             cacheable = false
                         }
                     } catch (e: Exception) {
@@ -3881,12 +4016,14 @@ class YoutubeProvider(
                     val stopReason = when {
                         !cacheable -> "error"
                         pagesFetchedLocal >= maxPagesLimit -> "limit"
+                        !currentToken.isNullOrBlank() -> "partial"
                         else -> "end_of_feed"
                     }
                     if (cacheable && tabEpisodes.isNotEmpty()) {
                         synchronized(channelTabCache) {
                             channelTabCache[cacheKey] = CachedChannelTab(
-                                tabEpisodes.map { it.copy() }, System.currentTimeMillis()
+                                tabEpisodes.map { it.copy() }, System.currentTimeMillis(),
+                                pagesFetchedLocal, currentToken
                             )
                         }
                     }

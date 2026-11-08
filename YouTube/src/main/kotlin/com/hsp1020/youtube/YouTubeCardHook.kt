@@ -32,6 +32,8 @@ import androidx.navigation.NavOptions
 import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
 import android.widget.Toast
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.lagradost.cloudstream3.DubStatus
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -1197,6 +1199,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
 
         private var requestedSeason: Int? = null
+        private val channelPage = fragment?.arguments?.getString("apiName") == "YouTube" &&
+            (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
+                pageUrl.contains("/c/") || pageUrl.contains("/user/"))
+        private var channelLoading = false
 
         private val tagGroup = if (fragment?.arguments?.getString("apiName") == "YouTube")
             root.findViewById<ChipGroup>(R.id.result_tag) else null
@@ -1387,6 +1393,93 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
 
+        /** YouTube-only channel ordering uses YouTube's full tab order, not the selected 20-item range. */
+        private fun observeChannelEpisodes() {
+            if (!channelPage) return
+            val owner = fragment ?: return
+            val model = ViewModelProvider(owner)[ResultViewModel2::class.java]
+            model.sortSelections.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
+            model.selectedSorting.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
+            model.selectedRangeIndex.observe(owner.viewLifecycleOwner) {
+                root.post { loadMoreChannelIfNeeded(model) }
+            }
+            model.rangeSelections.observe(owner.viewLifecycleOwner) {
+                root.post { loadMoreChannelIfNeeded(model) }
+            }
+        }
+
+        private fun bindChannelSort(model: ResultViewModel2) {
+            val owner = fragment ?: return
+            if (screens[owner] !== this || !root.isAttachedToWindow) return
+            val provider = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+            val labels = YoutubeProvider.channelSortLabels(pageUrl, provider.lang) ?: return
+            if (labels.size != 3) return
+            fun label(mode: YoutubeProvider.ChannelSortMode): String = when (mode) {
+                YoutubeProvider.ChannelSortMode.LATEST -> labels[0]
+                YoutubeProvider.ChannelSortMode.POPULAR -> labels[1]
+                YoutubeProvider.ChannelSortMode.DATE -> labels[2]
+            }
+            val button = root.findViewById<TextView>(R.id.result_sort_button) ?: return
+            val modes = listOf(
+                YoutubeProvider.ChannelSortMode.POPULAR,
+                YoutubeProvider.ChannelSortMode.LATEST,
+                YoutubeProvider.ChannelSortMode.DATE
+            )
+            button.text = label(YoutubeProvider.channelSortMode(pageUrl))
+            button.setOnClickListener {
+                MaterialAlertDialogBuilder(button.context)
+                    .setTitle(R.string.sort_by)
+                    .setSingleChoiceItems(
+                        modes.map(::label).toTypedArray(),
+                        modes.indexOf(YoutubeProvider.channelSortMode(pageUrl))
+                    ) { dialog, which ->
+                        dialog.dismiss()
+                        val next = modes[which]
+                        if (next == YoutubeProvider.channelSortMode(pageUrl)) return@setSingleChoiceItems
+                        YoutubeProvider.setChannelSortMode(pageUrl, next)
+                        val current = (model.episodes.value as? Resource.Success)
+                            ?.value?.firstOrNull()
+                        current?.parentId?.let { setResultEpisode(it, 1) }
+                        if (owner.isAdded && owner.view === root) {
+                            model.load(owner.activity, pageUrl, "YouTube", false,
+                                DubStatus.None, null, loadTrailers = false)
+                        }
+                    }.show()
+            }
+        }
+
+        private fun loadMoreChannelIfNeeded(model: ResultViewModel2) {
+            val owner = fragment ?: return
+            if (!channelPage || channelLoading || !owner.isAdded ||
+                owner.view !== root || screens[owner] !== this ||
+                !root.isAttachedToWindow) return
+            val ranges = model.rangeSelections.value.orEmpty()
+            if (ranges.isEmpty() || model.selectedRangeIndex.value != ranges.lastIndex) return
+            val provider = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+            if (!provider.channelHasMorePages(pageUrl)) return
+            val nextPages = (provider.channelLoadedPages(pageUrl) + 5)
+                .coerceAtMost(provider.channelPageLimit())
+            if (nextPages <= provider.channelLoadedPages(pageUrl)) return
+            val requestedMode = YoutubeProvider.channelSortMode(pageUrl)
+            channelLoading = true
+            owner.viewLifecycleOwner.lifecycleScope.launch {
+                try {
+                    val response = withContext(Dispatchers.IO) {
+                        provider.loadChannelPages(pageUrl, nextPages)
+                    } ?: return@launch
+                    if (screens[owner] !== this@Screen || !owner.isAdded ||
+                        owner.view !== root ||
+                        requestedMode != YoutubeProvider.channelSortMode(pageUrl)) return@launch
+                    provider.cacheChannelResponse(pageUrl, response)
+                    // Rebuild the native range and playback generator through its public loader.
+                    model.load(owner.activity, pageUrl, "YouTube", false,
+                        DubStatus.None, null, loadTrailers = false)
+                } finally {
+                    channelLoading = false
+                }
+            }
+        }
+
         /**
          * In CloudStream's postEpisodeRange(), selectedRangeIndex is posted
          * after seasonSelections, rangeSelections and selectedSeasonIndex.
@@ -1443,6 +1536,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             } else {
                 observeNativeRanges()
                 observeDescriptionAndTags()
+                observeChannelEpisodes()
             }
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }

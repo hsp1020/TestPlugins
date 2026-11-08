@@ -250,20 +250,13 @@ class Kotbc : MainAPI() {
                     if (title.isEmpty() || slug.isEmpty()) continue
 
                     val url = "$mainUrl/${encodePathSegment(slug)}"
-                    val poster = resolveStorageThumbnail(
-                        item.optString("thumbnail").trim()
-                    )
                     val type = typeMap[slug] ?: TvType.TvSeries
 
                     add(
                         if (type == TvType.Movie) {
-                            newMovieSearchResponse(title, url, TvType.Movie) {
-                                posterUrl = poster
-                            }
+                            newMovieSearchResponse(title, url, TvType.Movie)
                         } else {
-                            newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                                posterUrl = poster
-                            }
+                            newTvSeriesSearchResponse(title, url, TvType.TvSeries)
                         }
                     )
                 }
@@ -339,22 +332,12 @@ class Kotbc : MainAPI() {
                 ?.takeIf { it.isNotEmpty() }
             ?: return null
 
-        val poster = selectFirst("img[alt]")
-            ?.attr("src")
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { resolveUrl(it) }
-
         val url = resolveUrl(href)
 
         return if (type == TvType.Movie) {
-            newMovieSearchResponse(title, url, TvType.Movie) {
-                posterUrl = poster
-            }
+            newMovieSearchResponse(title, url, TvType.Movie)
         } else {
-            newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                posterUrl = poster
-            }
+            newTvSeriesSearchResponse(title, url, TvType.TvSeries)
         }
     }
 
@@ -504,27 +487,6 @@ class Kotbc : MainAPI() {
             .replace("%2F", "/")
     }
 
-    private fun resolveStorageThumbnail(value: String?): String? {
-        val raw = value?.trim().orEmpty()
-        if (raw.isEmpty()) return null
-
-        if (
-            raw.startsWith("http://") ||
-            raw.startsWith("https://") ||
-            raw.startsWith("/")
-        ) {
-            return resolveUrl(raw)
-        }
-
-        val path = if (raw.startsWith("storage/")) {
-            "/$raw"
-        } else {
-            "/storage/$raw"
-        }
-
-        return resolveUrl(path)
-    }
-
     private fun parseInfoTags(doc: Document): List<String> {
         val infoSection = doc.select("section")
             .firstOrNull { it.selectFirst("h1") != null }
@@ -583,14 +545,6 @@ class Kotbc : MainAPI() {
                 ?.takeIf { it.isNotEmpty() }
             ?: "Unknown"
 
-        val poster = resolveStorageThumbnail(
-            comic?.optString("thumbnail")
-        ) ?: doc.selectFirst("meta[property=og:image]")
-            ?.attr("content")
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { resolveUrl(it) }
-
         val description = comic
             ?.optString("description")
             ?.trim()
@@ -646,7 +600,6 @@ class Kotbc : MainAPI() {
                 newEpisode(data) {
                     name = parsed.name
                     episode = parsed.number
-                    posterUrl = poster
                 }
             }
             .distinctBy { it.data }
@@ -660,7 +613,6 @@ class Kotbc : MainAPI() {
                 TvType.Movie,
                 playData
             ) {
-                posterUrl = poster
                 plot = description
                 this.tags = tags
                 this.year = year
@@ -678,7 +630,6 @@ class Kotbc : MainAPI() {
                 TvType.TvSeries,
                 sorted
             ) {
-                posterUrl = poster
                 plot = description
                 this.tags = tags
                 this.year = year
