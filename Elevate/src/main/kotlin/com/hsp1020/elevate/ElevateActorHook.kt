@@ -38,6 +38,8 @@ import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.ResultData
+import com.lagradost.cloudstream3.ui.result.ResultFragmentPhone
+import com.lagradost.cloudstream3.ui.result.ResultFragmentTv
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -204,7 +206,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             JSONObject(response?.url ?: page.url).optString("type").lowercase()
         }.getOrNull()
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
-            (type == TvType.Others && kind == "movie")
+            (type == null || type == TvType.Others) && kind == "movie"
         trace("RESOLVE_START", "url=${page.url.take(140)} type=$type kind=$kind ids=$ids native=${page.actors?.size ?: 0}")
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
             (type in setOf(TvType.Others, TvType.Cartoon) &&
@@ -259,10 +261,9 @@ internal class ElevateActorHook(private val appContext: Application) :
     }
 
     private fun attach(fragment: Fragment, root: View) {
+        // ResultTrailerPlayer inherits ResultFragmentPhone; exact name matching missed it.
         if (bindings.containsKey(fragment) ||
-            fragment.javaClass.name !in setOf(
-                "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
-                "com.lagradost.cloudstream3.ui.result.ResultFragmentTv")) return
+            (fragment !is ResultFragmentPhone && fragment !is ResultFragmentTv)) return
         val list = root.findViewById<RecyclerView>(R.id.result_cast_items)
         trace("ATTACH_CHECK", "fragment=${fragment.javaClass.name} castList=${list != null} adapter=${list?.adapter?.javaClass?.simpleName}")
         if (list == null) return
@@ -333,6 +334,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 true
             }
         }
+        private var active = false
         private var pageUrl: String? = null
         private var pageIdentity: String? = null
         private var people: List<ElevateActorPersonRef>? = null
@@ -341,6 +343,23 @@ internal class ElevateActorHook(private val appContext: Application) :
         private var pendingAnimation: android.view.animation.Animation? = null
         private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { attachClicks() }
         private var tree: ViewTreeObserver? = null
+        private var observedAdapter: RecyclerView.Adapter<*>? = null
+        private val dataObserver = object : RecyclerView.AdapterDataObserver() {
+            private fun rebound() {
+                list.post {
+                    if (active && fragment.isAdded) {
+                        trace("ADAPTER_CHANGED", "count=${list.adapter?.itemCount} children=${list.childCount}")
+                        attachClicks()
+                    }
+                }
+            }
+            override fun onChanged() = rebound()
+            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = rebound()
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = rebound()
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) = rebound()
+            override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) = rebound()
+            override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = rebound()
+        }
         private val observer = Observer<Resource<ResultData>?> { state ->
             val page = (state as? Resource.Success<ResultData>)?.value
             trace("PAGE_OBSERVER", "state=${state?.javaClass?.simpleName} url=${page?.url?.take(100)} actors=${page?.actors?.size ?: 0}")
@@ -352,6 +371,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 appContext.getString(R.string.show_cast_in_details_key), true)
 
         fun start() {
+            active = true
             trace("BIND_START", "fragment=${fragment.javaClass.name} adapter=${list.adapter?.javaClass?.simpleName}")
             controller.start()
             model.page.observe(fragment.viewLifecycleOwner, observer)
@@ -419,6 +439,7 @@ internal class ElevateActorHook(private val appContext: Application) :
 
         private var lastBindTrace: String? = null
         private fun attachClicks() {
+            if (!active || !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) return
             val refs = people
             val actors = lastActors
             if (!actors.isNullOrEmpty() && castEnabled()) {
@@ -426,6 +447,12 @@ internal class ElevateActorHook(private val appContext: Application) :
                 castText?.visibility = View.GONE
             }
             val adapter = list.adapter as? ActorAdaptor ?: run { trace("CLICK_NO_ADAPTER", "adapter=${list.adapter?.javaClass?.name}"); return }
+            if (observedAdapter !== adapter) {
+                observedAdapter?.unregisterAdapterDataObserver(dataObserver)
+                adapter.registerAdapterDataObserver(dataObserver)
+                observedAdapter = adapter
+                trace("ADAPTER_OBSERVER", "attached=${adapter.javaClass.simpleName}")
+            }
             val signature = "${adapter.itemCount}:${list.childCount}:${refs?.size}:${actors?.size}:${pageIdentity?.hashCode()}"
             if (signature != lastBindTrace) { trace("CLICK_BIND_SCAN", "signature=$signature"); lastBindTrace = signature }
             for (index in 0 until list.childCount) {
@@ -445,6 +472,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val click = object : View.OnClickListener {
                     override fun onClick(view: View) {
                         trace("CARD_CLICK", "pos=$pos person=${person.id} pending=${pendingAnimation != null} pageUrl=$pageUrl")
+                        if (!active || !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) return
                         if (pendingAnimation != null || pageUrl !=
                             (model.page.value as? Resource.Success<ResultData>)?.value?.url)
                             return
@@ -470,7 +498,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                         val running = view.findViewById<View>(
                             R.id.voice_actor_image_holder2)?.animation
                         trace("CARD_CLICK_DISPATCH", "pos=$pos running=${running != null}")
-                        if (running == null) controller.click(person, view)
+                        if (running == null || running.hasEnded()) controller.click(person, view)
                         else {
                             pendingAnimation = running
                             running.setAnimationListener(object :
@@ -507,6 +535,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             }
         }
         fun stop() {
+            active = false
             trace("BIND_STOP", "fragment=${fragment.javaClass.name} page=${pageUrl?.take(100)}")
             pendingAnimation?.setAnimationListener(null)
             pendingAnimation = null
@@ -515,6 +544,8 @@ internal class ElevateActorHook(private val appContext: Application) :
             model.page.removeObserver(observer)
             tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
             tree = null
+            observedAdapter?.unregisterAdapterDataObserver(dataObserver)
+            observedAdapter = null
             cards.clear()
             controller.stop()
             (list.adapter as? ActorAdaptor)?.let { adapter ->

@@ -38,11 +38,21 @@ internal object ElevateIdResolver {
     private val imdbCache = LinkedHashMap<String, Cached<String?>>()
     private val imdbFlights = mutableMapOf<String, Deferred<String?>>()
 
-    internal fun tmdbApiKey(): String? = runCatching {
-        Class.forName("com.lagradost.cloudstream3.ui.search.SearchSuggestionApi")
-            .getDeclaredField("TMDB_API_KEY").apply { isAccessible = true }
-            .get(null) as? String
-    }.getOrNull()?.takeIf(String::isNotBlank)
+    internal fun tmdbApiKey(): String? {
+        val key = runCatching {
+            Class.forName("com.lagradost.cloudstream3.ui.search.SearchSuggestionApi")
+                .getDeclaredField("TMDB_API_KEY").apply { isAccessible = true }
+                .get(null) as? String
+        }.getOrNull()?.takeIf(String::isNotBlank)
+        if (key != null) return key
+        // Kotlin private constants can be inlined; use the core metadata provider's
+        // actual instance field as a fallback, without embedding an API key.
+        return runCatching {
+            val type = Class.forName("com.lagradost.cloudstream3.metaproviders.TmdbProvider")
+            val field = type.getDeclaredField("tmdbApiKey").apply { isAccessible = true }
+            field.get(type.getDeclaredConstructor().newInstance()) as? String
+        }.getOrNull()?.takeIf(String::isNotBlank)
+    }
 
     private fun simklClientId(): String? = runCatching {
         SimklApi::class.java.getDeclaredField("CLIENT_ID")
@@ -215,9 +225,12 @@ internal object ElevateIdResolver {
     suspend fun tmdbForImdb(rawImdb: String, movie: Boolean): String? {
         trace("IMDB_INPUT", "raw=$rawImdb movie=$movie")
         val imdb = rawImdb.takeIf(imdbPattern::matches) ?: return null
-        val clientId = simklClientId()
-        trace("IMDB_CLIENT", "imdb=$imdb clientIdPresent=${clientId != null}")
-        if (clientId == null) return null
+        val clientId = simklClientId() ?: AccountManager.syncApis
+            .firstOrNull { it.idPrefix == "simkl" }?.authData()
+            ?.let { SimklApi.getHeaders(it.token)["simkl-api-key"] }
+        val apiKey = tmdbApiKey()
+        trace("IMDB_CLIENT", "imdb=$imdb tmdbKeyPresent=${apiKey != null} simklClientPresent=${clientId != null}")
+        if (clientId == null && apiKey == null) return null
         val key = "${if (movie) "movie" else "tv"}:$imdb"
         val now = System.currentTimeMillis()
         val task = synchronized(imdbCache) {
@@ -226,8 +239,30 @@ internal object ElevateIdResolver {
             }?.let { trace("IMDB_CACHE", "key=$key value=${it.value}"); return it.value }
             imdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 trace("IMDB_REQUEST", "imdb=$imdb movie=$movie")
-                val result = try {
-                    simklLimiter.withPermit {
+                // Prefer the direct TMDB find endpoint, then retain Simkl as fallback.
+                val direct = try {
+                    if (apiKey == null) null else tmdbLimiter.withPermit {
+                        withTimeoutOrNull(9_000L) {
+                            trace("IMDB_TMDB_REQUEST", "imdb=$imdb movie=$movie")
+                            val res = app.get("https://api.themoviedb.org/3/find/$imdb",
+                                params = mapOf("api_key" to apiKey,
+                                    "external_source" to "imdb_id"), timeout = 8L)
+                            trace("IMDB_TMDB_HTTP", "imdb=$imdb code=${res.code} bytes=${res.text.length}")
+                            val rows = JSONObject(res.text).optJSONArray(
+                                if (movie) "movie_results" else "tv_results")
+                            (0 until (rows?.length() ?: 0)).mapNotNull {
+                                rows?.optJSONObject(it)?.optInt("id")?.takeIf { id -> id > 0 }
+                            }.distinct().singleOrNull()?.toString()
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (e: Exception) {
+                    trace("IMDB_TMDB_ERROR", "imdb=$imdb error=${e.javaClass.simpleName}:${e.message}")
+                    null
+                }
+                trace("IMDB_TMDB_RESULT", "imdb=$imdb tmdb=$direct")
+                val result = direct ?: try {
+                    if (clientId == null) null else simklLimiter.withPermit {
                         withTimeoutOrNull(10_000L) {
                             val response = app.get("https://api.simkl.com/search/id",
                                 params = mapOf("client_id" to clientId, "imdb" to imdb),
