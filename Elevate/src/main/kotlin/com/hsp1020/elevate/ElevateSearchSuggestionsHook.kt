@@ -3,6 +3,8 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.os.Build
+import android.icu.util.ULocale
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -35,6 +37,7 @@ import java.util.Locale
 internal class ElevateSearchSuggestionsHook(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
+    private val iso639Languages = Locale.getISOLanguages().toSet()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var started = false
     private var host: FragmentActivity? = null
@@ -140,6 +143,21 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
     }
 
+    /** Derive a TMDB language-region tag from Android's CLDR locale data, without a language map. */
+    private fun tmdbLanguage(context: Context): String? {
+        val locale = Locale.forLanguageTag(getCurrentLocale(context).replace('_', '-'))
+        val language = locale.language
+        if (language !in iso639Languages) return null
+        val region = locale.country.ifBlank {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                ULocale.addLikelySubtags(ULocale.forLocale(locale)).country
+            } else {
+                "" // Android 21-23: a language-only tag is safer than guessing a region.
+            }
+        }
+        return if (region.length == 2) "${language}-${region}" else language
+    }
+
     private inner class SearchBinding(
         val fragment: Fragment,
         val root: android.view.View,
@@ -183,13 +201,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             cancelPending()
             if (query.isBlank() || query.length < 2) return
             val serial = generation
-            val locale = Locale.forLanguageTag(getCurrentLocale(view.context).replace('_', '-'))
-            val language = when {
-                locale.language == "ko" && locale.country.isEmpty() -> "ko-KR"
-                locale.language == "en" && locale.country.isEmpty() -> "en-US"
-                locale.language.isNotBlank() && locale.language != "und" -> locale.toLanguageTag()
-                else -> "en-US"
-            }
+            val language = tmdbLanguage(view.context)
             val task = Runnable {
                 pending = null
                 request = scope.launch {
@@ -215,12 +227,14 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
     }
 
-    private suspend fun fetchSuggestions(query: String, language: String): List<String> {
+    private suspend fun fetchSuggestions(query: String, language: String?): List<String> {
         val key = tmdbApiKey ?: return emptyList()
         return try {
             val response = app.get(
                 "https://api.themoviedb.org/3/search/multi",
-                params = mapOf("api_key" to key, "query" to query, "language" to language),
+                params = mutableMapOf("api_key" to key, "query" to query).apply {
+                    language?.let { put("language", it) }
+                },
                 cacheTime = 60 * 24,
                 timeout = 10L
             )
