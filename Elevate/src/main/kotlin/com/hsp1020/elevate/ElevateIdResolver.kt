@@ -199,7 +199,9 @@ internal object ElevateXrdbVersion {
     private val validVersion = Regex("[a-fA-F0-9]{8}")
 
     suspend fun resolve(config: PosterConfig): String? {
-        if (config.service != PosterService.XRDB || config.xrdbProfile.isBlank()) return null
+        if (config.service != PosterService.XRDB) return null
+        config.xrdbVersionOverride.takeIf { it.isNotBlank() }?.let { return it }
+        if (config.xrdbProfile.isBlank()) return null
         val now = System.currentTimeMillis()
         val flight = synchronized(cache) {
             cache[config]?.takeIf { now - it.at in 0 until 30_000L }?.let {

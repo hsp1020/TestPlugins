@@ -409,7 +409,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
         // Keep PageAdapter's native Coil request alive until custom artwork is decoded.
         // Do not start an unversioned XRDB image before the initial profile lookup.
-        if (setting.service == PosterService.XRDB && setting.xrdbProfile.isNotBlank() &&
+        if (setting.service == PosterService.XRDB &&
+            (setting.xrdbProfile.isNotBlank() || setting.xrdbVersionOverride.isNotBlank()) &&
             !xrdbVersionChecked) return
         pending[image] = scope.launch {
             try {
@@ -488,7 +489,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
     private fun checkXrdbVersion() {
         val snapshot = config
-        if (snapshot.service != PosterService.XRDB || snapshot.xrdbProfile.isBlank() ||
+        if (snapshot.service != PosterService.XRDB ||
+            (snapshot.xrdbProfile.isBlank() && snapshot.xrdbVersionOverride.isBlank()) ||
             library?.view == null) return
         if (xrdbCheck?.isActive == true) return
         val now = SystemClock.elapsedRealtime()
@@ -709,7 +711,8 @@ internal data class PosterConfig(
     val key: String,
     val xrdbProfile: String,
     val xrdbBase: String,
-    val xrdbRenderKey: String
+    val xrdbRenderKey: String,
+    val xrdbVersionOverride: String
 ) {
     val ready get() = if (service == PosterService.XRDB) xrdbBase.isNotBlank() else key.isNotBlank()
 
@@ -765,7 +768,8 @@ internal object LibraryPosterPrefs {
             prefs.getString("key", "").orEmpty().trim(),
             prefs.getString("xrdb_profile", "").orEmpty(),
             prefs.getString("xrdb_base", DEFAULT_XRDB_BASE) ?: DEFAULT_XRDB_BASE,
-            prefs.getString("xrdb_render_key", "").orEmpty()
+            prefs.getString("xrdb_render_key", "").orEmpty(),
+            prefs.getString("xrdb_version", "").orEmpty().trim()
         )
     }
 
@@ -854,6 +858,9 @@ internal object LibraryPosterPrefs {
         title(xrdbGroup, "XRDB Server URL")
         val base = field(saved.xrdbBase, DEFAULT_XRDB_BASE)
         addField(xrdbGroup, base)
+        title(xrdbGroup, "Version (optional)")
+        val version = field(saved.xrdbVersionOverride, "Auto-detect when empty")
+        addField(xrdbGroup, version)
         title(xrdbGroup, "Profile is optional for the server's default appearance. " +
             "The public XRDB instance does not need an API key.", true)
         val privateKeyGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -891,6 +898,7 @@ internal object LibraryPosterPrefs {
                 .putString("key", key.text.toString().trim())
                 .putString("xrdb_profile", profile.text.toString().trim())
                 .putString("xrdb_base", base.text.toString().trim())
+                .putString("xrdb_version", version.text.toString().trim())
                 .putString("xrdb_render_key", if (isPublic) "" else renderKey.text.toString().trim())
                 .remove("template")
                 .apply()
