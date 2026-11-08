@@ -563,7 +563,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val watchUrl = "https://www.youtube.com/watch?v=$videoId"
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("YouTube", android.content.Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("youtube_language", "en") ?: "en"
+            val langCode = Loc.currentLanguage()
             val countryCode = java.util.Locale.getDefault().country.ifEmpty { "US" }
             val visitorData = prefs?.getString("yt_visitor_data", null) ?: "_Mk3UVhY40g"
 
@@ -984,7 +984,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val context = CloudStreamApp.context
         val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
 
-        val langCode = prefs?.getString("youtube_language", "en") ?: "en"
+        val langCode = Loc.currentLanguage()
         val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
         val customPkg = prefs?.getString("downloader_custom_package", "") ?: ""
 

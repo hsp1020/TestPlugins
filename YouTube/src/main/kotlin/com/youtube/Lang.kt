@@ -1,6 +1,20 @@
 import android.content.SharedPreferences
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.settings.getCurrentLocale
+import java.util.Locale
 
 object Loc {
+    fun currentLanguage(): String {
+        val context = CloudStreamApp.context ?: return Locale.getDefault().language.ifBlank { "en" }
+        val saved = PreferenceManager.getDefaultSharedPreferences(context)
+            .getString(context.getString(R.string.locale_key), null)
+        val languageTag = (saved?.takeIf { it.isNotBlank() } ?: getCurrentLocale(context))
+            .replace('_', '-')
+        return Locale.forLanguageTag(languageTag).language.ifBlank { "en" }
+    }
+
     val availableLanguages = listOf(
 
         Triple("ar", "Arabic", "العربية"),
@@ -1419,8 +1433,7 @@ object Loc {
 
     )
 
-    fun getString(sharedPref: SharedPreferences, key: String): String {
-        val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
-        return translations[langCode]?.get(key) ?: translations["en"]?.get(key) ?: key
+    fun getString(@Suppress("UNUSED_PARAMETER") sharedPref: SharedPreferences, key: String): String {
+        return translations[currentLanguage()]?.get(key) ?: translations["en"]?.get(key) ?: key
     }
 }

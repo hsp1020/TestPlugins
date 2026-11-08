@@ -44,6 +44,69 @@ data class CustomSection(
     @JsonProperty("isEnabled") var isEnabled: Boolean = true
 )
 
+internal object YoutubeSectionStore {
+    private val mapper = jacksonObjectMapper()
+    fun chipsKey(language: String) = "yt_cached_chips_$language"
+    fun layoutKey(language: String) = "yt_chip_layout_$language"
+    private fun isChip(url: String) = url.startsWith("chip_name_")
+
+    private fun readSections(json: String?): List<CustomSection> =
+        runCatching { mapper.readValue<List<CustomSection>>(json ?: "[]") }
+            .getOrDefault(emptyList())
+
+    fun load(prefs: SharedPreferences?, language: String): List<CustomSection> {
+        if (prefs == null) return listOf(CustomSection("Home", "Home", true))
+        // Older chip entries in the common key are deliberately ignored, never migrated.
+        val common = readSections(prefs.getString("custom_homepages_v3", "[]"))
+            .filterNot { isChip(it.url) }.toMutableList()
+        if (common.none { it.url == "Home" }) {
+            common.add(0, CustomSection("Home", "Home", true))
+            prefs.edit().putString("custom_homepages_v3", mapper.writeValueAsString(common)).apply()
+        }
+
+        val chips = runCatching {
+            mapper.readValue<List<YoutubeProvider.CachedChip>>(
+                prefs.getString(chipsKey(language), "[]") ?: "[]")
+        }.getOrDefault(emptyList())
+        val savedLayout = readSections(prefs.getString(layoutKey(language), "[]"))
+        val savedChips = savedLayout.filter { isChip(it.url) }.associateBy { it.url }
+        val availableChips = LinkedHashMap<String, CustomSection>()
+        for (chip in chips) {
+            val url = "chip_name_${chip.name}"
+            availableChips[url] = CustomSection(
+                chip.name, url, savedChips[url]?.isEnabled ?: false)
+        }
+
+        // Per-language layout owns positions; common entries always use the shared
+        // enabled/name data, so changing a custom channel is reflected in every language.
+        val commonUrls = common.map { it.url }.toHashSet()
+        val remainingCommon = common.toMutableList()
+        val ordered = mutableListOf<CustomSection>()
+        val seen = HashSet<String>()
+        val filledCommonSlots = HashSet<String>()
+        for (entry in savedLayout) {
+            val actual = if (isChip(entry.url)) {
+                availableChips[entry.url]
+            } else if (entry.url in commonUrls && filledCommonSlots.add(entry.url)) {
+                // Shared ordering of Home/custom channels wins over old layout anchors.
+                remainingCommon.firstOrNull()?.also { remainingCommon.removeAt(0) }
+            } else null
+            if (actual != null && seen.add(actual.url)) ordered.add(actual)
+        }
+        for (entry in remainingCommon) if (seen.add(entry.url)) ordered.add(entry)
+        for (entry in availableChips.values) if (seen.add(entry.url)) ordered.add(entry)
+        return ordered
+    }
+
+    fun save(prefs: SharedPreferences, language: String, sections: List<CustomSection>) {
+        val common = sections.filterNot { isChip(it.url) }
+        prefs.edit()
+            .putString("custom_homepages_v3", mapper.writeValueAsString(common))
+            .putString(layoutKey(language), mapper.writeValueAsString(sections))
+            .apply()
+    }
+}
+
 class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : BottomSheetDialogFragment() {
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
@@ -83,12 +146,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private val KEY_VISITOR = "VISITOR_INFO1_LIVE"
         private val KEY_PAGES = "channel_pages_limit"
         private val KEY_PLAYLIST_TAG = "playlist_search_tag"
-        private val KEY_LANGUAGE = "youtube_language"
         
         private val KEY_DOWNLOADER_TYPE = "downloader_app_type"
         private val KEY_CUSTOM_PKG = "downloader_custom_package"
 
-        private lateinit var languagePref: ListPreference
         private lateinit var authCategory: PreferenceCategory
         private lateinit var customCategory: PreferenceCategory
         private lateinit var capturePref: Preference
@@ -126,52 +187,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
             homeCategory.addPreference(manageChannelsPref)
 
-            languagePref = ListPreference(ctx).apply {
-                key = KEY_LANGUAGE
-                entryValues = Loc.availableLanguages.map { it.first }.toTypedArray()
-                entries = Loc.availableLanguages.map { "${it.third} (${it.second})" }.toTypedArray()
-                
-                val currentLang = if (sharedPref.contains(KEY_LANGUAGE)) {
-                    sharedPref.getString(KEY_LANGUAGE, null as String?)
-                } else {
-                    defaultPrefs.getString(KEY_LANGUAGE, null as String?)
-                }
-                setValue(currentLang ?: "en")
-                
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, newValue ->
-                    val langVal = newValue as String
-                    
-                    if (sharedPref.getString(KEY_LANGUAGE, "en") == langVal) {
-                        return@setOnPreferenceChangeListener true
-                    }
-                    
-                    sharedPref.edit().putString(KEY_LANGUAGE, langVal).apply()
-                    defaultPrefs.edit().putString(KEY_LANGUAGE, langVal).apply()
-
-                    sharedPref.edit().remove("yt_cached_chips").apply()
-                    defaultPrefs.edit().remove("yt_cached_chips").apply()
-
-                    val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
-                    try {
-                        val mapper = jacksonObjectMapper()
-                        val currentList = mapper.readValue<List<CustomSection>>(json)
-                        
-                        val filteredList = currentList.filterNot { 
-                            it.url == "Home" || it.url.startsWith("chip_name_") 
-                        }
-                        val serialized = mapper.writeValueAsString(filteredList)
-                        sharedPref.edit().putString("custom_homepages_v3", serialized).apply()
-                        defaultPrefs.edit().putString("custom_homepages_v3", serialized).apply()
-                    } catch (_: Exception) {
-                        // Preserve existing settings when their JSON cannot be parsed.
-                    }
-
-                    view?.post { updateTexts() }
-                    true
-                }
-            }
-            preferenceScreen.addPreference(languagePref)
 
             authCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(authCategory)
@@ -217,16 +232,22 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
                         .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
                             val keysToRemove = listOf(
-                                KEY_VISITOR, "VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", 
-                                "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID", "yt_cached_chips"
+                                KEY_VISITOR, "VISITOR_INFO1_LIVE", "SID", "HSID", "SSID",
+                                "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID"
                             )
-                            
+
                             val spEditor = sharedPref.edit()
                             val defEditor = defaultPrefs.edit()
                             keysToRemove.forEach { k ->
                                 spEditor.remove(k)
                                 defEditor.remove(k)
                             }
+                            // Logout invalidates YouTube continuation tokens for every language;
+                            // keep each language's enabled chips and layout preferences.
+                            sharedPref.all.keys.filter { it.startsWith("yt_cached_chips_") }
+                                .forEach(spEditor::remove)
+                            defaultPrefs.all.keys.filter { it.startsWith("yt_cached_chips_") }
+                                .forEach(defEditor::remove)
                             spEditor.apply()
                             defEditor.apply()
 
@@ -354,7 +375,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     defaultPrefs.edit().putString(KEY_CUSTOM_PKG, pkg).apply()
                     
                     if (pkg.isNotEmpty() && !isAppInstalled(ctx, pkg)) {
-                        val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
+                        val langCode = Loc.currentLanguage()
                         val title = if (langCode == "ko") "패키지 미설치" else "Package Not Installed"
                         val msg = if (langCode == "ko") {
                             "입력하신 패키지명($pkg)에 해당하는 앱이 기기에 설치되어 있지 않습니다. 패키지명을 다시 확인해 주세요."
@@ -393,7 +414,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             githubUrl: String,
             downloaderPref: ListPreference
         ) {
-            val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
+            val langCode = Loc.currentLanguage()
             val title = if (langCode == "ko") "다운로더 미설치" else "Downloader Not Installed"
             val message = if (langCode == "ko") {
                 "$appName 앱이 기기에 설치되어 있지 않습니다.\nGitHub에서 다운로드하시겠습니까?"
@@ -439,7 +460,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             manageChannelsPref.title = Loc.getString(sharedPref, "manage_channels")
             manageChannelsPref.summary = Loc.getString(sharedPref, "manage_channels_sum")
 
-            languagePref.title = Loc.getString(sharedPref, "lang_title")
             authCategory.title = Loc.getString(sharedPref, "account_section")
             customCategory.title = Loc.getString(sharedPref, "browsing_section")
 
@@ -588,25 +608,15 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
 
         private fun loadSections() {
-            val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-            val json = if (sharedPref.contains("custom_homepages_v3")) {
-                sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
-            } else {
-                defaultPrefs.getString("custom_homepages_v3", "[]") ?: "[]"
-            }
-            sectionsList = try {
-                mapper.readValue(json)
-            } catch (e: Exception) {
-                mutableListOf()
-            }
+            sectionsList = YoutubeSectionStore.load(sharedPref, Loc.currentLanguage()).toMutableList()
         }
 
         private fun saveSections() {
             val ctx = context ?: return
+            val language = Loc.currentLanguage()
+            YoutubeSectionStore.save(sharedPref, language, sectionsList)
             val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(ctx)
-            val json = mapper.writeValueAsString(sectionsList)
-            sharedPref.edit().putString("custom_homepages_v3", json).apply()
-            defaultPrefs.edit().putString("custom_homepages_v3", json).apply()
+            YoutubeSectionStore.save(defaultPrefs, language, sectionsList)
         }
 
         private fun createSvgIcon(pathData: String, colorHex: String): android.graphics.drawable.Drawable {

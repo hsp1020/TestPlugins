@@ -117,7 +117,7 @@ class YoutubeProvider(
     override val hasMainPage = true
     
     override var lang: String
-        get() = appPrefs?.getString("youtube_language", "en") ?: "en"
+        get() = Loc.currentLanguage()
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
@@ -510,7 +510,7 @@ class YoutubeProvider(
     }
 
     private fun readPersistedChips(): List<CachedChip> {
-        val cachedJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+        val cachedJson = appPrefs?.getString(YoutubeSectionStore.chipsKey(lang), "[]") ?: "[]"
         return try {
             mapper.readValue<List<CachedChip>>(cachedJson)
         } catch (_: Exception) {
@@ -587,7 +587,7 @@ class YoutubeProvider(
                 ?.putString("yt_client_version", payload.clientVersion)
                 ?.apply()
 
-            mergeAndSaveChips(payload.chips.map { CachedChip(it.key, it.value) })
+            mergeAndSaveChips(payload.chips.map { CachedChip(it.key, it.value) }, requestLang)
 
             val mergedFreshChips = LinkedHashMap<String, String>()
             val previous = sharedChipBootstrapSnapshot
@@ -1382,57 +1382,20 @@ class YoutubeProvider(
         }
     }
 
-    private fun mergeAndSaveChips(newChips: List<CachedChip>) {
+    private fun mergeAndSaveChips(newChips: List<CachedChip>, language: String) {
         val prefs = appPrefs ?: return
-        val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
-        
-        val existingChips = try {
+        val key = YoutubeSectionStore.chipsKey(language)
+        val existingJson = prefs.getString(key, "[]") ?: "[]"
+        val existingChips = runCatching {
             mapper.readValue<List<CachedChip>>(existingJson)
-        } catch (e: Exception) {
-            emptyList()
-        }
+        }.getOrDefault(emptyList())
 
-        val mergedMap = LinkedHashMap<String, CachedChip>()
-        existingChips.forEach { chip ->
-            mergedMap[chip.name] = chip
-        }
-        newChips.forEach { chip ->
-            mergedMap[chip.name] = chip
-        }
-
-        val mergedList = mergedMap.values.toList()
-        
-        try {
-            val outJson = mapper.writeValueAsString(mergedList)
-            prefs.edit().putString("yt_cached_chips", outJson).apply()
-        } catch (e: Exception) {
-            logError(e)
-        }
-
-        try {
-            val customJson = prefs.getString("custom_homepages_v3", "[]") ?: "[]"
-            val currentList = try {
-                mapper.readValue<List<CustomSection>>(customJson).toMutableList()
-            } catch (e: Exception) {
-                mutableListOf()
-            }
-
-            var modified = false
-            newChips.forEach { chip ->
-                val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { section -> section.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
-                    modified = true
-                }
-            }
-
-            if (modified) {
-                val updatedCustomJson = mapper.writeValueAsString(currentList)
-                prefs.edit().putString("custom_homepages_v3", updatedCustomJson).apply()
-            }
-        } catch (e: Exception) {
-            logError(e)
-        }
+        val merged = LinkedHashMap<String, CachedChip>()
+        existingChips.forEach { merged[it.name] = it }
+        newChips.forEach { merged[it.name] = it }
+        runCatching {
+            prefs.edit().putString(key, mapper.writeValueAsString(merged.values.toList())).apply()
+        }.onFailure { logError(it) }
     }
 
     private fun extractDurationFromOverlays(obj: Any?): String {
@@ -2419,7 +2382,11 @@ class YoutubeProvider(
     override val mainPage: List<MainPageData>
         get() {
             val currentLang = lang
-            val currentCustomSectionsJson = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+            val currentCustomSectionsJson = listOf(
+                appPrefs?.getString("custom_homepages_v3", "[]"),
+                appPrefs?.getString(YoutubeSectionStore.chipsKey(currentLang), "[]"),
+                appPrefs?.getString(YoutubeSectionStore.layoutKey(currentLang), "[]")
+            ).joinToString("\u001F") { it ?: "[]" }
 
             val fastCached = sharedCachedMainPageList
             if (fastCached != null &&
@@ -2441,7 +2408,7 @@ class YoutubeProvider(
                 val customSections = getCustomHomepages()
                 val list = mutableListOf<MainPageData>()
 
-                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                val cachedChipsJson = appPrefs?.getString(YoutubeSectionStore.chipsKey(currentLang), "[]") ?: "[]"
                 val cachedChipsMap = try {
                     mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
                 } catch (e: Exception) {
@@ -2493,48 +2460,8 @@ class YoutubeProvider(
             }
         }
 
-    private fun getCustomHomepages(): List<CustomSection> {
-        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-        
-        val currentList = try {
-            mapper.readValue<List<CustomSection>>(json).toMutableList()
-        } catch (e: Exception) {
-            mutableListOf()
-        }
-
-        var modified = false
-
-        if (currentList.none { section -> section.url == "Home" }) {
-            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
-            modified = true
-        }
-
-        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-        try {
-            val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-            
-            cachedChips.forEach { chip ->
-                val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { section -> section.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
-                    modified = true
-                }
-            }
-        } catch (e: Exception) {
-            logError(e)
-        }
-
-        if (modified) {
-            try {
-                val updatedJson = mapper.writeValueAsString(currentList)
-                appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
-            } catch (e: Exception) {
-                logError(e)
-            }
-        }
-        
-        return currentList
-    }
+    private fun getCustomHomepages(): List<CustomSection> =
+        YoutubeSectionStore.load(appPrefs, lang)
 
     private fun extractNameFromUrl(url: String): String {
         return when {
@@ -2625,7 +2552,7 @@ class YoutubeProvider(
             if (requestData == "Home") {
                 val chips = extractChipTokens(initialData)
                 if (chips.isNotEmpty()) {
-                    mergeAndSaveChips(chips.map { CachedChip(it.key, it.value) })
+                    mergeAndSaveChips(chips.map { CachedChip(it.key, it.value) }, lang)
                     publishChipBootstrapFromHome(
                         savedApiKey,
                         savedClientVersion,
@@ -2686,12 +2613,12 @@ class YoutubeProvider(
                         results.addAll(cached.items)
                         nextContinuation = cached.nextToken
                         if (!cached.nextToken.isNullOrBlank()) {
-                            val session = chipCatalogSessions[requestData]
+                            val session = chipCatalogSessions["$lang|$requestData"]
                             if (session == null || session.bootstrap.language != lang) {
                                 ensureChipBootstrap()?.let { bootstrap ->
                                     val restored = ChipCatalogSession(bootstrap)
                                     restored.pageTokens[2] = cached.nextToken
-                                    chipCatalogSessions[requestData] = restored
+                                    chipCatalogSessions["$lang|$requestData"] = restored
                                 }
                             }
                         }
@@ -2727,7 +2654,7 @@ class YoutubeProvider(
                                         if (!nextToken.isNullOrBlank()) {
                                             newSession.pageTokens[2] = nextToken
                                         }
-                                        chipCatalogSessions[requestData] = newSession
+                                        chipCatalogSessions["$lang|$requestData"] = newSession
                                         storeCachedHomePage(
                                             homeCacheKey(requestData),
                                             DirectPageResult(results.toList(), nextToken)
@@ -2739,7 +2666,7 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    val session = chipCatalogSessions[requestData]
+                    val session = chipCatalogSessions["$lang|$requestData"]
                     val tokenToUse = session?.pageTokens?.get(page)
                     if (session != null && !tokenToUse.isNullOrBlank()) {
                         val browse = executeChipBrowseAndProcess(session.bootstrap, tokenToUse, requestData, page)
