@@ -422,14 +422,23 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 val sourceAnimeId = if (setting.service == PosterService.XRDB)
                     xrdbOriginalAnimeId(item.url, item.syncId) else null
                 val version = if (setting.service == PosterService.XRDB) xrdbVersion else null
-                // Explicit XRDB anime IDs load first, without waiting for a mapping.
-                val ids = if (sourceAnimeId == null) withContext(Dispatchers.IO) {
+                val simklAnime = if (setting.service == PosterService.XRDB &&
+                    sourceAnimeId == null) withContext(Dispatchers.IO) {
+                    simklAnimeIds(item)
+                } else null
+                val animeSources = listOfNotNull(
+                    sourceAnimeId,
+                    simklAnime?.mal?.let { "mal:$it" },
+                    simklAnime?.anilist?.let { "anilist:$it" },
+                    simklAnime?.kitsu?.let { "kitsu:$it" }
+                ).distinct()
+                val ids = if (animeSources.isEmpty()) withContext(Dispatchers.IO) {
                     resolve(item, setting.service == PosterService.XRDB)?.preferImdb(movie)
                 } else null
                 if (setting.service == PosterService.XRDB)
                     ElevatePosterTrace.log("library", "MAPPING", item.name,
-                        "sourceAnime=$sourceAnimeId ids=${ElevatePosterTrace.ids(ids)}" +
-                        " movie=$movie version=$version")
+                        "sourceAnime=$sourceAnimeId simklAnime=${ElevatePosterTrace.ids(simklAnime)}" +
+                        " ids=${ElevatePosterTrace.ids(ids)} movie=$movie version=$version")
                 if (revision != token || bound[image] !== marker ||
                     !image.isAttachedToWindow) return@launch
 
@@ -456,7 +465,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 }
 
                 val tried = HashSet<String>()
-                val primary = setting.image(ids ?: PosterIds(), movie, version, sourceAnimeId)
+                val primary = setting.image(ids ?: PosterIds(), movie, version,
+                    animeSources.firstOrNull())
                 if (primary != null) {
                     tried.add(primary)
                     when (attempt(primary)) {
@@ -467,21 +477,40 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 }
                 if (revision != token || bound[image]?.identity != id ||
                     !image.isAttachedToWindow) return@launch
-                val fallbackIds = if (sourceAnimeId != null) withContext(Dispatchers.IO) {
-                    resolve(item, true)?.preferImdb(movie)
+                // Fetch remaining Simkl anime IDs only after the first cached artwork fails.
+                val expandedAnime = if (simklAnime != null &&
+                    (simklAnime.anilist == null || simklAnime.kitsu == null))
+                    withContext(Dispatchers.IO) { simklAnimeIds(item, fillMissing = true) }
+                else simklAnime
+                val moreAnimeSources = if (simklAnime != null) listOfNotNull(
+                    expandedAnime?.mal?.let { "mal:$it" },
+                    expandedAnime?.anilist?.let { "anilist:$it" },
+                    expandedAnime?.kitsu?.let { "kitsu:$it" }
+                ).distinct() else animeSources
+                val resolved = if (animeSources.isNotEmpty()) withContext(Dispatchers.IO) {
+                    resolve(item, true)
                 } else ids
+                val combined = if (expandedAnime != null) PosterIds(
+                    resolved?.imdb ?: expandedAnime.imdb,
+                    resolved?.tmdb ?: expandedAnime.tmdb
+                ) else resolved
+                val fallbackIds = combined?.preferImdb(movie)
                 if (setting.service == PosterService.XRDB)
                     ElevatePosterTrace.log("library", "FALLBACK_IDS", item.name,
                         "ids=${ElevatePosterTrace.ids(fallbackIds)}")
                 if (revision != token || bound[image]?.identity != id ||
                     !image.isAttachedToWindow) return@launch
-                val alternatives = listOfNotNull(
-                    if (sourceAnimeId != null) fallbackIds?.let {
-                        setting.image(it, movie, version)
-                    } else null,
-                    fallbackIds?.takeIf { it.imdb != null && it.tmdb != null }?.let {
-                        setting.image(it.copy(imdb = null), movie, version)
-                    }
+                val alternatives = (
+                    moreAnimeSources.mapNotNull {
+                        setting.image(PosterIds(), movie, version, it)
+                    } + listOfNotNull(
+                        if (animeSources.isNotEmpty()) fallbackIds?.let {
+                            setting.image(it, movie, version)
+                        } else null,
+                        fallbackIds?.takeIf { it.imdb != null && it.tmdb != null }?.let {
+                            setting.image(it.copy(imdb = null), movie, version)
+                        }
+                    )
                 ).distinct()
                 for (poster in alternatives) {
                     if (!tried.add(poster)) continue
@@ -677,6 +706,58 @@ internal class LibraryPosterHook(private val appContext: Application) :
         return if (forXrdb) alternate ?: saved else null
     }
 
+    /** Trust Simkl's anime section, not incidental anime IDs on movie/TV entries. */
+    private suspend fun simklAnimeIds(
+        item: SyncAPI.LibraryItem, fillMissing: Boolean = false
+    ): PosterIds? {
+        val host = runCatching { URI(item.url).host?.lowercase()?.removePrefix("www.") }
+            .getOrNull()
+        if (host != "simkl.com") return null
+        val id = item.syncId?.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
+        fun positive(raw: String?): String? =
+            raw?.toLongOrNull()?.takeIf { it > 0L }?.toString()
+        val (cacheType, cached) = runCatching {
+            val account = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+            val userId = account?.authData()?.user?.id?.toString()
+            val list = userId?.let {
+                getKey<com.fasterxml.jackson.databind.JsonNode>(SimklApi.SIMKL_CACHED_LIST, it)
+            }
+            var type: String? = null
+            var ids: PosterIds? = null
+            for (section in listOf("anime", "movies", "shows")) {
+                val entries = list?.get(section) ?: continue
+                for (entry in entries) {
+                    val found = entry.get(if (section == "movies") "movie" else "show")
+                        ?.get("ids") ?: continue
+                    if (found.get("simkl")?.asText() != id) continue
+                    type = section
+                    if (section == "anime") ids = PosterIds(
+                        found.get("imdb")?.asText()?.takeIf(IMDB::matches),
+                        positive(found.get("tmdb")?.asText()),
+                        positive(found.get("mal")?.asText()),
+                        positive(found.get("anilist")?.asText()),
+                        positive(found.get("kitsu")?.asText())
+                    )
+                    break
+                }
+                if (type != null) break
+            }
+            type to ids
+        }.getOrDefault(null to null)
+        if (cacheType != null && cacheType != "anime") return null
+        if (!fillMissing && cached?.mal != null) return cached
+
+        val movie = item.type == TvType.Movie || item.type == TvType.AnimeMovie
+        val remote = ElevateIdResolver.simkl(id, movie,
+            if (cacheType == "anime") "anime" else null)
+            ?.takeIf { it.segment == "anime" } ?: return cached
+        return PosterIds(
+            cached?.imdb ?: remote.imdb, cached?.tmdb ?: remote.tmdb,
+            cached?.mal ?: remote.mal, cached?.anilist ?: remote.anilist,
+            cached?.kitsu ?: remote.kitsu
+        )
+    }
+
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) {
             use(activity)
@@ -776,10 +857,20 @@ internal fun xrdbOriginalAnimeId(url: String, syncId: String? = null): String? {
         ?.let { "${it.groupValues[1].lowercase()}:${it.groupValues[2]}" }
 
     explicit(url)?.let { return it }
+    fun pathId(value: String?): String? {
+        if (value.isNullOrBlank()) return null
+        return runCatching { Uri.parse(value).pathSegments }.getOrNull()
+            ?.asReversed()?.firstNotNullOfOrNull { segment ->
+                explicit(Uri.decode(segment).removeSuffix(".json"))
+            }
+    }
     val json = runCatching { org.json.JSONObject(url) }.getOrNull()
     for (field in listOf("id", "url", "syncId")) {
-        explicit(json?.optString(field))?.let { return it }
+        val value = json?.optString(field)
+        explicit(value)?.let { return it }
+        pathId(value)?.let { return it }
     }
+    pathId(url)?.let { return it }
     val uri = runCatching { Uri.parse(url) }.getOrNull()
     val kind = when (uri?.host?.lowercase()?.removePrefix("www.")) {
         "myanimelist.net" -> "mal"
