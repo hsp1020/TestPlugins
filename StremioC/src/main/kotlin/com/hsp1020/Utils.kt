@@ -76,6 +76,7 @@ import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.AppCompatSpinner
 import androidx.recyclerview.widget.RecyclerView
 import androidx.navigation.NavOptions
+import androidx.navigation.fragment.findNavController
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -1213,59 +1214,6 @@ internal class RatingPlotImageHook(
             return false
         }
 
-        private val castItems by lazy { root.findViewById<RecyclerView>(R.id.result_cast_items) }
-        private var seasonCast: List<ActorData>? = null
-        private var showingAniListCast = false
-        private var coreAniListLoading = false
-
-        private fun showAniListCast(actors: List<ActorData>?) {
-            if (actors.isNullOrEmpty()) return
-            showingAniListCast = true
-            seasonCast = actors
-            showSeasonCast(actors)
-        }
-
-        private fun showTmdbFallback() {
-            // Do not render fallback before the native selected season is known.
-            // It can otherwise win the first frame of an episodic anime even
-            // though its AniList season mapping has not started yet.
-            val url = pageUrl ?: return
-            if (StremioC.episodeBasedByUrl[url] == true &&
-                (seasonNumbers.isEmpty() || selectionIndex?.let {
-                    seasonNumbers.getOrNull(it) != null
-                } != true)) return
-            // A terminal fallback never displaces a successful AniList cast.
-            if (showingAniListCast) return
-            val actors = StremioC.animeFallbackActorsByUrl[url]
-                ?.takeIf { it.isNotEmpty() } ?: return
-            seasonCast = actors
-            showSeasonCast(actors)
-        }
-
-        private var originalCastAnimator: RecyclerView.ItemAnimator? = null
-        private var castAnimationsDisabled = false
-
-        private fun castEnabled() = castItems != null &&
-            androidx.preference.PreferenceManager.getDefaultSharedPreferences(root.context)
-                .getBoolean(root.context.getString(R.string.show_cast_in_details_key), true)
-
-        private fun showSeasonCast(actors: List<ActorData>) {
-            if (!active || !castEnabled()) return
-            val list = castItems ?: return
-            val adapter = list.adapter as? ActorAdaptor ?: return
-            // Avoid RecyclerView remove/change fade during native season swaps.
-            if (!castAnimationsDisabled) {
-                originalCastAnimator = list.itemAnimator
-                list.itemAnimator = null
-                castAnimationsDisabled = true
-            }
-            // The core may return a different ActorData instance with identical content.
-            // Submitting it again reloads the same images and produces a visible flash.
-            if (adapter.immutableCurrentList != actors) adapter.submitList(actors)
-            val targetVisibility = if (actors.isEmpty()) View.GONE else View.VISIBLE
-            if (list.visibility != targetVisibility) list.visibility = targetVisibility
-        }
-
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
         private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -1342,9 +1290,6 @@ internal class RatingPlotImageHook(
                             generation++
                             pageUrl = data.url
                             rawSyncs = data.syncData.toMap()
-                            seasonCast = null
-                            showingAniListCast = false
-                            coreAniListLoading = false
                             seasonNumbers = emptyList()
                             selectionIndex = null
                             season = null
@@ -1352,21 +1297,8 @@ internal class RatingPlotImageHook(
                             reset()
                         } else {
                             rawSyncs = data.syncData.toMap()
-                            // Native page rendering can re-submit its original cast.
-                            // Re-apply the selected season synchronously before the next draw.
-                            seasonCast?.let { actors -> showSeasonCast(actors) }
                         }
                         resolve()
-                        // Apply the cached cast after season selection, so
-                        // resolve() cannot immediately clear the reused list.
-                        if (seasonCast == null &&
-                            (StremioC.episodeBasedByUrl[data.url] == false ||
-                                (seasonNumbers.size == 1 && selectionIndex?.let { it >= 0 } == true)) &&
-                            StremioC.animeAudioByUrl[data.url] == true) {
-                            rawSyncs["anilist"]?.toIntOrNull()
-                                ?.let { StremioC.cachedAnimeCast(it) }
-                                ?.let(::showAniListCast)
-                        }
                     }
                     is Resource.Failure -> {}
                     else -> {}
@@ -1387,7 +1319,6 @@ internal class RatingPlotImageHook(
                     }
                 }
                 observe(model.metadata, owner) { result ->
-                    applyCoreCastMetadata(result)
                     if (combo != null) {
                         root.post { if (active) render() }
                     }
@@ -1395,51 +1326,6 @@ internal class RatingPlotImageHook(
                 observe(model.synced, owner) {
                     if (combo != null) root.post { if (active) render() }
                 }
-            }
-        }
-
-        private fun applyCoreCastMetadata(result: Resource<SyncAPI.SyncResult>?) {
-            val url = pageUrl ?: return
-            val model = syncModel ?: return
-            val expectedId = rawSyncs["anilist"]?.toIntOrNull()?.takeIf { it > 0 }
-                ?: return
-            if (StremioC.animeAudioByUrl[url] != true ||
-                model.getSyncs()["anilist"]?.toIntOrNull() != expectedId) return
-            if (result is Resource.Loading) {
-                coreAniListLoading = true
-                return
-            }
-            // Core metadata is shared by all trackers. A terminal result is
-            // cast-relevant only after the native one-season selection arrives.
-            // Replay its latest value on that transition without another API call.
-            val singleReady = StremioC.episodeBasedByUrl[url] == false ||
-                (seasonNumbers.size == 1 && selectionIndex?.let {
-                    seasonNumbers.getOrNull(it) != null
-                } == true)
-            if (!singleReady) return
-            when (result) {
-                is Resource.Success -> {
-                    val meta = result.value
-                    if (meta.id == expectedId.toString()) {
-                        if (!meta.actors.isNullOrEmpty()) {
-                            StremioC.rememberAnimeCast(expectedId, meta.actors)
-                            showAniListCast(meta.actors)
-                        } else if (meta.actors != null || coreAniListLoading) {
-                            showTmdbFallback()
-                        }
-                    } else if (coreAniListLoading &&
-                        model.getSyncs().any { (provider, id) ->
-                            provider != "anilist" && id == meta.id
-                        }) {
-                        showTmdbFallback()
-                    }
-                    coreAniListLoading = false
-                }
-                is Resource.Failure -> {
-                    if (coreAniListLoading) showTmdbFallback()
-                    coreAniListLoading = false
-                }
-                else -> Unit
             }
         }
 
@@ -1460,21 +1346,9 @@ internal class RatingPlotImageHook(
             val inputs = Triple(chosen, seasonNumbers.toList(), rawSyncs.toMap())
             if (inputs == resolvedSeasonInputs) return
             resolvedSeasonInputs = inputs
-            if (seasonCast != null) {
-                seasonCast = null
-                showingAniListCast = false
-                showSeasonCast(emptyList())
-            }
-            // The first season selection may occur after the core emitted
-            // Loading. Do not discard that request's terminal-result guard.
-            if (season != null) coreAniListLoading = false
             season = chosen
             generation++
             begin()
-            // The native metadata result may have arrived before its season
-            // selection. Reuse LiveData's current value, not a new network call.
-            if (seasonNumbers.size <= 1)
-                applyCoreCastMetadata(syncModel?.metadata?.value)
         }
 
         private fun reset() {
@@ -1538,50 +1412,24 @@ internal class RatingPlotImageHook(
                     }
                 }
                 if (!valid(gen, sn)) return@launch
+                if (isAnime == true) {
+                    // StremioC owns season mapping; Elevate only reads the resolved IDs.
+                    val actorIds = if (ids.isEmpty() && sn == sourceSeason?.second)
+                        rawSyncs else ids
+                    val state = JSONObject().put("url", url).put("season", sn)
+                    for (key in listOf("anilist", "mal", "kitsu")) {
+                        actorIds[key]?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+                            ?.let { state.put(key, it) }
+                    }
+                    runCatching {
+                        fragment.findNavController().currentBackStackEntry?.savedStateHandle
+                            ?.set("elevate_actor_season_ids", state.toString())
+                    }
+                }
                 val matched = if (syncModel != null && seasonNumbers.isNotEmpty())
                     AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
                         .filter { it.authUser() != null }
                 else emptyList()
-                val animeId = if (isAnime == true && castEnabled()) {
-                    ids["anilist"]?.toIntOrNull()?.takeIf { it > 0 } ?: run {
-                        if (seasonAwareAnime) null else {
-                            val source = listOf("mal", "kitsu").firstNotNullOfOrNull { kind ->
-                                ids[kind]?.toIntOrNull()?.takeIf { it > 0 }?.let { "${kind}:${it}" }
-                            }
-                            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
-                                .firstOrNull { it.name == fragment.arguments?.getString("apiName") }
-                                ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
-                            if (source == null || provider == null) null
-                            else withContext(Dispatchers.IO) {
-                                provider.playbackTrackerIds(
-                                    StremioC.LoadData(id = source, isAnime = true)
-                                )?.aniList
-                            }
-                        }
-                    }
-                } else null
-                val castNeeded = isAnime == true &&
-                    (seasonAwareAnime || syncModel == null || ids["anilist"] == null)
-                if (castNeeded) {
-                    if (animeId == null) {
-                        // Mapping has completed without an AniList ID.
-                        showTmdbFallback()
-                    } else {
-                        val cached = StremioC.cachedAnimeCast(animeId)
-                        if (cached != null) {
-                            showAniListCast(cached)
-                        } else if (matched.none { it.idPrefix == "anilist" &&
-                                ids["anilist"] == animeId.toString() }) {
-                            launch {
-                                val actors = StremioC.loadAnimeCast(animeId)
-                                if (valid(gen, sn) && pageUrl == url) {
-                                    if (actors.isNullOrEmpty()) showTmdbFallback()
-                                    else showAniListCast(actors)
-                                }
-                            }
-                        }
-                    }
-                }
                 if (syncModel == null || seasonNumbers.isEmpty()) {
                     teardownUi()
                     return@launch
@@ -1610,18 +1458,6 @@ internal class RatingPlotImageHook(
 
                         val meta = if (repo.idPrefix == "mal" || repo.idPrefix == "kitsu")
                             null else repo.load(id)
-                        if (castNeeded && animeId != null && repo.idPrefix == "anilist" &&
-                            id == animeId.toString()) {
-                            val actors = meta?.getOrNull()?.actors
-                            withContext(Dispatchers.Main) {
-                                if (valid(gen, sn)) {
-                                    if (!actors.isNullOrEmpty()) {
-                                        StremioC.rememberAnimeCast(animeId, actors)
-                                        showAniListCast(actors)
-                                    } else showTmdbFallback()
-                                }
-                            }
-                        }
                         val remote = state.getOrNull()
                         val simklExact = if (generalSimkl && repo.idPrefix == "simkl")
                             simklSeasonRead(repo, id, sn) else null
@@ -2301,11 +2137,6 @@ internal class RatingPlotImageHook(
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
-            if (castAnimationsDisabled) {
-                castItems?.itemAnimator = originalCastAnimator
-                castAnimationsDisabled = false
-                originalCastAnimator = null
-            }
             teardownUi()
             syncModel = null
         }

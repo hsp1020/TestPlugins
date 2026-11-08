@@ -17,6 +17,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -199,8 +200,8 @@ internal class ElevateActorHook(private val appContext: Application) :
         return task.await()
     }
 
-    private suspend fun resolve(page: ResultData, response: LoadResponse?): CastResult? {
-        val ids = ids(page, response)
+    private suspend fun resolve(page: ResultData, response: LoadResponse?, ids: Ids,
+        selectedSeason: Boolean): CastResult? {
         val type = response?.type
         val kind = runCatching {
             JSONObject(response?.url ?: page.url).optString("type").lowercase()
@@ -212,7 +213,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
         // Reuse already loaded native character/voice-actor data without an extra query.
-        if (anime && (ids.anilist != null || ids.mal != null) &&
+        if (!selectedSeason && anime && (ids.anilist != null || ids.mal != null) &&
             page.actors?.any { it.voiceActor != null } == true)
             return CastResult(page.actors!!, null)
         // Kitsu is not a fallback: exclude it entirely when any other valid ID exists.
@@ -347,6 +348,37 @@ internal class ElevateActorHook(private val appContext: Application) :
         private var restoringCast = false
         private var pageUrl: String? = null
         private var pageIdentity: String? = null
+        private var mappedSeason: JSONObject? = null
+        private var currentSeasonNumber: Int? = null
+        private val seasonIdsObserver = Observer<String> { raw ->
+            val state = runCatching { JSONObject(raw) }.getOrNull() ?: return@Observer
+            val page = (model.page.value as? Resource.Success<ResultData>)?.value
+                ?: return@Observer
+            if (state.optString("url") != page.url) return@Observer
+            val chosen = currentSeasonNumber
+            if (chosen != null && state.optInt("season") != chosen) return@Observer
+            if (mappedSeason?.toString() == state.toString()) return@Observer
+            mappedSeason = state
+            trace("SEASON_IDS", "season=${state.optInt("season")} url=${page.url.take(100)}")
+            update(page)
+        }
+        private fun seasonChanged() {
+            val index = model.selectedSeasonIndex.value ?: return
+            val selected = model.seasonSelections.value?.getOrNull(index)?.second ?: return
+            val previous = currentSeasonNumber
+            currentSeasonNumber = selected
+            if (previous == null || previous == selected ||
+                model.currentRepo?.api?.javaClass?.name != "com.hsp1020.StremioC") return
+            mappedSeason = null
+            loadJob?.cancel()
+            people = null
+            lastActors = null
+            pageIdentity = null
+            (list.adapter as? ActorAdaptor)?.submitList(emptyList())
+            list.visibility = View.GONE
+        }
+        private val seasonIndexObserver = Observer<Int> { seasonChanged() }
+        private val seasonChoicesObserver = Observer<List<*>> { seasonChanged() }
         private var people: List<ElevateActorPersonRef>? = null
         private var lastActors: List<ActorData>? = null
         private var loadJob: Job? = null
@@ -385,15 +417,37 @@ internal class ElevateActorHook(private val appContext: Application) :
             trace("BIND_START", "fragment=${fragment.javaClass.name} adapter=${list.adapter?.javaClass?.simpleName}")
             controller.start()
             model.page.observe(fragment.viewLifecycleOwner, observer)
+            model.selectedSeasonIndex.observe(fragment.viewLifecycleOwner, seasonIndexObserver)
+            model.seasonSelections.observe(fragment.viewLifecycleOwner, seasonChoicesObserver)
+            runCatching {
+                fragment.findNavController().currentBackStackEntry?.savedStateHandle
+                    ?.getLiveData<String>("elevate_actor_season_ids")
+                    ?.observe(fragment.viewLifecycleOwner, seasonIdsObserver)
+            }.onFailure { trace("SEASON_OBSERVER_ERROR", it.toString()) }
             tree = list.viewTreeObserver.also { it.addOnGlobalLayoutListener(layoutListener) }
             (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
         }
         private fun update(page: ResultData) {
             val response = runCatching { responseField?.get(model) as? LoadResponse }
                 .getOrNull()?.takeIf { it.url == page.url }
-            val ids = ids(page, response)
+            if (pageUrl != null && pageUrl != page.url) {
+                mappedSeason = null
+                currentSeasonNumber = null
+            }
+            val season = mappedSeason?.takeIf {
+                it.optString("url") == page.url &&
+                    (currentSeasonNumber == null ||
+                        it.optInt("season") == currentSeasonNumber)
+            }
+            val base = ids(page, response)
+            val ids = if (season == null) base else base.copy(
+                anilist = positive(season.optString("anilist")),
+                mal = positive(season.optString("mal")),
+                kitsu = positive(season.optString("kitsu"))
+            )
             trace("PAGE_UPDATE", "url=${page.url.take(140)} response=${response != null} responseType=${response?.type} ids=$ids nativeActors=${page.actors?.size ?: 0} enabled=${castEnabled()}")
-            val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown")
+            val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown") +
+                "|" + (season?.optInt("season") ?: "default")
             if (identity == pageIdentity) {
                 trace("PAGE_SAME", "identity=${identity.take(180)} adapterCount=${list.adapter?.itemCount}")
                 attachClicks()
@@ -419,7 +473,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             if (!castEnabled()) { trace("RESOLVE_SKIPPED", "castDisabled"); return }
             loadJob = main.launch {
                 trace("LOAD_JOB_START", "identity=${identity.take(180)}")
-                val loaded = resolve(page, response)
+                val loaded = resolve(page, response, ids, season != null)
                 trace("LOAD_JOB_RESULT", "actors=${loaded?.actors?.size ?: 0} people=${loaded?.people?.size ?: 0}")
                 if (loaded == null) return@launch
                 if (!fragment.isAdded || pageIdentity != identity ||
@@ -572,6 +626,13 @@ internal class ElevateActorHook(private val appContext: Application) :
             list.childrenToReset()
             loadJob?.cancel()
             model.page.removeObserver(observer)
+            model.selectedSeasonIndex.removeObserver(seasonIndexObserver)
+            model.seasonSelections.removeObserver(seasonChoicesObserver)
+            runCatching {
+                fragment.findNavController().currentBackStackEntry?.savedStateHandle
+                    ?.getLiveData<String>("elevate_actor_season_ids")
+                    ?.removeObserver(seasonIdsObserver)
+            }
             tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
             tree = null
             observedAdapter?.unregisterAdapterDataObserver(dataObserver)

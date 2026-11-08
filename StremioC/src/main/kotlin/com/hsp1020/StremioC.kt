@@ -9,14 +9,11 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
-import com.lagradost.cloudstream3.Actor
-import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.TrailerData
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
@@ -1245,55 +1242,9 @@ open class StremioC(
         internal val episodeBasedByUrl = lruCacheMap<String, Boolean>(200)
         // IMDb mapping identity and the last native season used for season-zero specials.
         internal val seasonalAnimeByUrl = lruCacheMap<String, Pair<String?, Int?>>(200)
-        internal val animeFallbackActorsByUrl = lruCacheMap<String, List<ActorData>>(100)
 
-        // Successful AniList cast survives result-view recreation. No negative
-        // entries: an unavailable AniList response must remain retryable.
-        private val animeCastCache = lruCacheMap<Int, Pair<List<ActorData>, Long>>(24)
-        private val animeCastFlights = mutableMapOf<Int, Deferred<List<ActorData>?>>()
-        private val animeCastScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val subtitleAnimeManifestCache = lruCacheMap<String, Pair<String?, Long>>(80)
         private val subtitleAnimeManifestLocks = ConcurrentHashMap<String, Mutex>()
-
-        internal fun cachedAnimeCast(id: Int): List<ActorData>? {
-            if (id <= 0) return null
-            synchronized(animeCastCache) {
-                val cached = animeCastCache[id] ?: return null
-                val age = System.currentTimeMillis() - cached.second
-                if (age < 0 || age >= 24L * 60 * 60 * 1000) {
-                    animeCastCache.remove(id)
-                    return null
-                }
-                return cached.first
-            }
-        }
-
-        internal fun rememberAnimeCast(id: Int, actors: List<ActorData>?) {
-            if (id <= 0 || actors.isNullOrEmpty()) return
-            synchronized(animeCastCache) {
-                animeCastCache[id] = actors.toList() to System.currentTimeMillis()
-            }
-        }
-
-        // Only direct StremioC cast lookups use this flight. The normal
-        // SyncViewModel metadata lookup is never duplicated by this method.
-        internal suspend fun loadAnimeCast(id: Int): List<ActorData>? {
-            cachedAnimeCast(id)?.let { return it }
-            val flight = synchronized(animeCastFlights) {
-                animeCastFlights[id] ?: animeCastScope.async(start = CoroutineStart.LAZY) {
-                    try {
-                        val actors = com.lagradost.cloudstream3.syncproviders.SyncRepo(
-                            AccountManager.aniListApi
-                        ).load(id.toString()).getOrNull()?.actors
-                        rememberAnimeCast(id, actors)
-                        actors
-                    } finally {
-                        synchronized(animeCastFlights) { animeCastFlights.remove(id) }
-                    }
-                }.also { animeCastFlights[id] = it; it.start() }
-            }
-            return flight.await()
-        }
 
         internal val seasonEpisodeCountsByUrl = lruCacheMap<String, Map<Int, Int>>(200)
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
@@ -1947,9 +1898,9 @@ open class StremioC(
         mediaType: String
     ): TmdbDetailResponse? {
         val detailAppend = if (mediaType == "movie") {
-            "release_dates,credits,images,videos,external_ids,recommendations,translations"
+            "release_dates,images,videos,external_ids,recommendations,translations"
         } else {
-            "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+            "content_ratings,images,videos,external_ids,recommendations,translations"
         }
         val videoLanguages = if (mediaType == "tv") arrayOf(
             "include_video_language" to tmdbTrailerLanguages().joinToString(",")
@@ -4341,7 +4292,7 @@ open class StremioC(
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
         val fetchedTrailers: List<TrailerChoice>, val fetchedRecommendations: List<RecommendationCandidate>?,
-        val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
+        val fetchedRuntime: Int?, val fetchedAgeRating: String?,
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
         val fetchedOriginalTitle: String?,
@@ -4545,7 +4496,7 @@ open class StremioC(
             
             var fetchedRecommendations: List<RecommendationCandidate>? = null
 
-            val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+            val detailAppend = if (isMovie) "release_dates,images,videos,external_ids,recommendations,translations" else "content_ratings,images,videos,external_ids,recommendations,translations"
             val videoLanguages = if (tmdbMediaType == "tv") arrayOf(
                 "include_video_language" to tmdbTrailerLanguages().joinToString(",")
             ) else emptyArray()
@@ -4578,7 +4529,7 @@ open class StremioC(
 
             if (detailRes == null) {
                 
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
             }
 
             val simklJob = earlySimklJob ?: StremioC.requestSimklSuggestions(
@@ -4720,28 +4671,6 @@ open class StremioC(
                     ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
             }
 
-            val crewPairs = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }
-                ?.groupBy { it.id?.takeIf { id -> id > 0 }?.let { id -> "id:$id" }
-                    ?: "name:" + (it.name ?: it.originalName).orEmpty() }
-                ?.values?.mapNotNull { roles ->
-                    val head = roles.first()
-                    val name = head.name ?: head.originalName ?: return@mapNotNull null
-                    val jobs = roles.mapNotNull { it.job }.distinct()
-                        .sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
-                    val img = roles.firstNotNullOfOrNull { it.profilePath }
-                        ?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                    ActorData(Actor(name, img), roleString = jobs)
-                }?.sortedBy { item ->
-                    if (item.roleString?.contains("Director, Writer") == true) 1
-                    else if (item.roleString?.contains("Director") == true) 2 else 3
-                } ?: emptyList()
-            val castPairs = detailRes.credits?.cast?.mapNotNull { cast ->
-                val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(actorName, img), roleString = cast.character)
-            } ?: emptyList()
-            val actorPairs = crewPairs + castPairs
-
             val fetchedTrailers = collectStremioTrailers(
                 detailRes.videos?.results.orEmpty()
                     .filter { it.site.equals("YouTube", true) }
@@ -4777,7 +4706,7 @@ open class StremioC(
                         path.dropLast(4) + ".png" else path
                     "https://image.tmdb.org/t/p/w500$rasterPath"
                 },
-                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, actorPairs,
+                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
@@ -5235,9 +5164,6 @@ open class StremioC(
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = false
                 StremioC.seasonalAnimeByUrl.remove(metaUrl)
-                if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
-                    StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
-                } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
                 StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
@@ -5324,9 +5250,6 @@ open class StremioC(
                     StremioC.seasonalAnimeByUrl[metaUrl] =
                         cleanImdbId?.takeIf { IMDB_ID_REGEX.matches(it) } to specialsSeason
                 } else StremioC.seasonalAnimeByUrl.remove(metaUrl)
-                if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
-                    StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
-                } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
                 StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
@@ -5818,7 +5741,6 @@ private data class TmdbDetailResponse(
     @JsonProperty("runtime") val runtime: Int? = null, 
     @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
     @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
-    @JsonProperty("credits") val credits: TmdbCredits? = null, 
     @JsonProperty("images") val images: TmdbImages? = null, 
     @JsonProperty("videos") val videos: ResultsTrailer? = null, 
     @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
@@ -5852,9 +5774,6 @@ private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_316
 private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
 private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
 private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
-private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
-private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?, @JsonProperty("id") val id: Int? = null)
-private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?, @JsonProperty("id") val id: Int? = null)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
 private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 

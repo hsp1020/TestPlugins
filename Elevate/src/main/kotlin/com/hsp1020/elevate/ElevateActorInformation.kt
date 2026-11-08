@@ -229,6 +229,7 @@ internal object ElevateActorInformation {
         private var originActorFocus: View? = null
         private var focusedCreditKey: String? = null
         private var detailHandoff: ElevateActorHandoff? = null
+        private var creditClickInFlight = false
         private var originState: androidx.lifecycle.SavedStateHandle? = null
         private var requestJob: kotlinx.coroutines.Job? = null
         private var preserve = false
@@ -949,60 +950,88 @@ internal object ElevateActorInformation {
         }
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
-            if (detailHandoff?.isActive == true || closed) return
+            if (detailHandoff?.isActive == true || creditClickInFlight || closed) return
             val provider = model.currentRepo?.api
             val movie = credit.media == "movie"
-            Log.d("ElevateActorTrace", "CREDIT_OPEN id=${credit.id} media=${credit.media} title=${credit.title} provider=${provider?.javaClass?.simpleName} origin=$providerUrl")
-            try {
-                scroll?.let { save() }
-                // Reuse metadata addon's TMDB ID route without importing StremioC classes.
-                if (provider?.javaClass?.simpleName == "StremioC" && provider.mainUrl.isNotBlank()) {
-                    val payload = JSONObject()
-                        .put("id", "tmdb:${credit.id}")
-                        .put("type", if (movie) "movie" else "series")
-                        .put("addonUrl", provider.mainUrl)
-                    val result = provider.newMovieSearchResponse(
-                        credit.title, payload.toString(),
-                        if (movie) TvType.Movie else TvType.TvSeries, fix = false
-                    ) {
-                        posterUrl = credit.poster?.takeIf { it.startsWith("/") }
-                            ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
+            creditClickInFlight = true
+            scroll?.let { save() }
+            scope.launch {
+                try {
+                    // Only these verified providers accept a TMDB ID in their load URL.
+                    val providerClass = provider?.javaClass?.name
+                    val route = when (providerClass) {
+                        "com.hsp1020.StremioC" -> provider?.mainUrl?.takeIf { it.isNotBlank() }
+                            ?.let { addon ->
+                                JSONObject().put("id", "tmdb:${credit.id}")
+                                    .put("type", if (movie) "movie" else "series")
+                                    .put("addonUrl", addon).toString()
+                            }
+                        "com.megix.CineTmdbProvider",
+                        "com.Phisher98.StreamPlay",
+                        "com.phisher98.SuperStream",
+                        "com.phisher98.TorraStream",
+                        "com.phisher98.StremioAddon",
+                        "com.phisher98.StremioX" -> JSONObject()
+                            .put("id", credit.id)
+                            .put("type", if (movie) "movie" else "tv")
+                            .toString()
+                        "com.megix.CineSimklProvider" -> withContext(Dispatchers.IO) {
+                            ElevateIdResolver.simklForTmdb(credit.id, movie)
+                        }?.let { (id, type) -> "https://simkl.com/$type/$id" }
+                        else -> null
                     }
+                    if (closed || !fragment.isAdded || dialog?.isShowing != true) return@launch
+                    if (provider != null && route != null) {
+                        val result = provider.newMovieSearchResponse(
+                            credit.title, route,
+                            if (movie) TvType.Movie else TvType.TvSeries, fix = false
+                        ) {
+                            posterUrl = credit.poster?.takeIf { it.startsWith("/") }
+                                ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
+                        }
+                        val covered = detailHandoff?.begin() == true
+                        Log.d("ElevateActorTrace", "CREDIT_NAV_DIRECT id=${credit.id} class=$providerClass covered=$covered")
+                        SearchHelper.handleSearchClickCallback(
+                            SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, result))
+                        if (!covered) {
+                            preserve = true
+                            dialog?.dismiss()
+                        }
+                        return@launch
+                    }
+
+                    // Site-URL and AniList-backed providers cannot safely load by TMDB ID.
+                    // Use CloudStream's normal global search instead of MainAPI.search().
+                    val activity = fragment.activity ?: return@launch
+                    val searchId = activity.resources.getIdentifier(
+                        "navigation_search", "id", activity.packageName)
+                    if (searchId == 0) {
+                        Log.e("ElevateActorTrace", "CREDIT_NAV_UNAVAILABLE id=${credit.id} missing=searchDestination")
+                        return@launch
+                    }
+                    val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
+                    val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
                     val covered = detailHandoff?.begin() == true
-                    Log.d("ElevateActorTrace", "CREDIT_NAV_TMDB id=${credit.id} addon=${provider.mainUrl} covered=$covered")
-                    SearchHelper.handleSearchClickCallback(
-                        SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, result))
+                    Log.d("ElevateActorTrace", "CREDIT_NAV_SEARCH id=${credit.id} class=$providerClass covered=$covered")
+                    activity.navigate(searchId, Bundle().apply {
+                        putString("search_query", credit.title)
+                        putBoolean("global_detail_search", true)
+                    }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                        .setPopEnterAnim(enter).setPopExitAnim(exit).build())
                     if (!covered) {
                         preserve = true
                         dialog?.dismiss()
                     }
-                    return
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    if (error is VirtualMachineError || error is ThreadDeath) throw error
+                    detailHandoff?.close()
+                    Log.e("ElevateActorTrace",
+                        "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
+                } finally {
+                    creditClickInFlight = false
                 }
-                // MainAPI.search(query) is optional, and may throw NotImplementedError.
-                val activity = fragment.activity ?: return
-                val searchId = activity.resources.getIdentifier(
-                    "navigation_search", "id", activity.packageName)
-                if (searchId == 0) {
-                    Log.e("ElevateActorTrace", "CREDIT_NAV_UNAVAILABLE id=${credit.id} missing=searchDestination")
-                    return
-                }
-                val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
-                val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
-                val covered = detailHandoff?.begin() == true
-                Log.d("ElevateActorTrace", "CREDIT_NAV_SEARCH id=${credit.id} destination=$searchId covered=$covered")
-                activity.navigate(searchId, Bundle().apply {
-                    putString("search_query", credit.title)
-                    putBoolean("global_detail_search", true)
-                }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
-                    .setPopEnterAnim(enter).setPopExitAnim(exit).build())
-                if (!covered) {
-                    preserve = true
-                    dialog?.dismiss()
-                }
-            } catch (error: Throwable) {
-                if (error is VirtualMachineError || error is ThreadDeath) throw error
-                detailHandoff?.close()
-                Log.e("ElevateActorTrace", "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
             }
         }
 

@@ -60,6 +60,41 @@ internal object ElevateIdResolver {
     }.getOrNull()?.takeIf(String::isNotBlank)
 
 
+    /** Resolve an exact TMDB credit ID to a CineSimkl URL identity, not a title match. */
+    suspend fun simklForTmdb(tmdbId: Int, movie: Boolean): Pair<String, String>? {
+        if (tmdbId <= 0) return null
+        val clientId = simklClientId() ?: return null
+        return try {
+            withTimeoutOrNull(9_000L) {
+                val response = app.get("https://api.simkl.com/search/id",
+                    params = mapOf("tmdb" to tmdbId.toString(), "client_id" to clientId),
+                    timeout = 8L)
+                if (response.code !in 200..299) return@withTimeoutOrNull null
+                val results = JSONArray(response.text)
+                for (index in 0 until results.length()) {
+                    val row = results.optJSONObject(index) ?: continue
+                    val ids = row.optJSONObject("ids") ?: continue
+                    if (ids.optString("tmdb").toIntOrNull() != tmdbId) continue
+                    val segment = when (row.optString("type")) {
+                        "movie" -> if (movie) "movies" else null
+                        "tv" -> if (!movie) "tv" else null
+                        "anime" -> if (!movie) "anime" else null
+                        else -> null
+                    } ?: continue
+                    val simkl = ids.optString("simkl").toLongOrNull()
+                        ?.takeIf { it > 0L }?.toString() ?: continue
+                    return@withTimeoutOrNull simkl to segment
+                }
+                null
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            trace("SIMKL_REVERSE_ERROR", "tmdb=$tmdbId error=${error.javaClass.simpleName}")
+            null
+        }
+    }
+
     suspend fun simkl(rawId: String, movie: Boolean, route: String? = null): Mapping? {
         trace("SIMKL_INPUT", "raw=$rawId movie=$movie route=$route")
         val id = rawId.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
