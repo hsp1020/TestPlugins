@@ -3995,7 +3995,7 @@ class YoutubeProvider(
                             cacheable = false
                             Log.w("YouTubeChannel",
                                 "event=CHANNEL_ERROR tab=$tabName page=1 reason=empty_initial_no_token " +
-                                    "tabCount=${tabs?.size ?: 0} contents=${(tabData["contents"] as? Map<*, *>)?.keys}")
+                                    "cached=${snapshot != null} fetchedPages=$pagesFetchedLocal")
                         }
                         if (!currentToken.isNullOrBlank() && apiKey.isNullOrBlank()) {
                             cacheable = false
