@@ -21,8 +21,11 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE
+import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE_BACKUP
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE_BACKUP
 import com.lagradost.cloudstream3.utils.DataStore.getFolderName
+import com.lagradost.cloudstream3.utils.DataStore.getKeys
 import com.lagradost.cloudstream3.utils.DataStore.getKey
 import com.lagradost.cloudstream3.utils.DataStore.setKey
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -50,9 +53,10 @@ internal object ExternalDownloads {
     private const val PREFS = "ElevateExternalDownloads"
     private const val TARGET = "selected_app"
     private const val PENDING = "pending"
+    private const val RECORDS = "known_downloads"
     private val checking = AtomicBoolean(false)
     private val scanSequence = AtomicInteger()
-    private val csFileMarker = Regex("""\[CS-(\d+)""")
+    private val csFileMarker = Regex("""\[CS-(-?\d+)\]""")
     private fun trace(event: String, message: String) {
         android.util.Log.i("ElevateExternal", "$event $message")
     }
@@ -61,6 +65,7 @@ internal object ExternalDownloads {
     private val main = Handler(Looper.getMainLooper())
     private val scanner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pendingCache: LinkedHashMap<Int, Pending>? = null
+    private var recordsCache: LinkedHashMap<Int, Pending>? = null
     private var scheduled: Runnable? = null
     private var watchPath: String? = null
     private var fileObserver: FileObserver? = null
@@ -152,30 +157,67 @@ internal object ExternalDownloads {
     @Synchronized private fun pending(c: Context): List<Pending> =
         pendingMap(c).values.toList()
 
-    @Synchronized private fun savePending(c: Context) {
-        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(PENDING, JSONArray(pendingMap(c).values.map { it.json() }).toString()).apply()
-        trace("PENDING_SAVED", "count=${pendingMap(c).size}")
+    /** Preserve download identity after a Pending entry is cleared or CloudStream prunes caches. */
+    @Synchronized private fun records(c: Context): LinkedHashMap<Int, Pending> {
+        recordsCache?.let { return it }
+        val map = LinkedHashMap<Int, Pending>()
+        runCatching {
+            val saved = JSONArray(c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(RECORDS, "[]"))
+            val now = System.currentTimeMillis()
+            for (i in 0 until saved.length()) {
+                val item = runCatching { Pending.parse(saved.getJSONObject(i)) }.getOrNull() ?: continue
+                if (item.created in (now - 90L * 24 * 60 * 60 * 1000)..now) map[item.id] = item
+            }
+        }.onFailure { android.util.Log.w("ElevateExternal", "RECORDS_LOAD_FAILED", it) }
+        for (item in pendingMap(c).values) map[item.id] = item
+        recordsCache = map
+        trace("RECORDS_LOADED", "count=${map.size}")
+        return map
+    }
+
+    /** Commit both collections before launching an app that can background CloudStream. */
+    @Synchronized private fun savePending(c: Context): Boolean {
+        val persisted = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(PENDING, JSONArray(pendingMap(c).values.map { it.json() }).toString())
+            .putString(RECORDS, JSONArray(records(c).values.map { it.json() }).toString())
+            .commit()
+        trace("PENDING_SAVED", "success=$persisted pending=${pendingMap(c).size} records=${records(c).size}")
+        return persisted
     }
 
     @Synchronized private fun addPendingBatch(c: Context, items: List<Pending>) {
+        if (items.isEmpty()) return
         val map = pendingMap(c)
+        val known = records(c)
+        val oldPending = LinkedHashMap(map)
+        val oldRecords = LinkedHashMap(known)
         trace("PENDING_BATCH", "added=${items.size} before=${map.size}")
         for (item in items) {
             val replaced = map.put(item.id, item)
+            known[item.id] = item
             trace("PENDING_ADD", "id=${item.id} parent=${item.parentId} season=${item.season} episode=${item.episode} expected=${item.expectedFile} replaced=${replaced != null} created=${item.created}")
         }
+        while (known.size > 512) known.remove(known.keys.first())
+        if (!savePending(c)) {
+            map.clear(); map.putAll(oldPending)
+            known.clear(); known.putAll(oldRecords)
+            throw IllegalStateException("Unable to persist external download metadata")
+        }
         unstableRetries = 0
-        savePending(c)
         watch(c)
         scheduleCheck(c, 2400L)
     }
 
     @Synchronized private fun removePending(c: Context, id: Int) {
-        val removed = pendingMap(c).remove(id)
-        trace("PENDING_REMOVE", "id=$id existed=${removed != null} remaining=${pendingMap(c).size}")
+        val map = pendingMap(c)
+        val removed = map.remove(id)
+        trace("PENDING_REMOVE", "id=$id existed=${removed != null} remaining=${map.size}")
         if (removed == null) return
-        savePending(c)
+        if (!savePending(c)) {
+            map[id] = removed
+            throw IllegalStateException("Unable to persist external download registration")
+        }
         watch(c)
     }
 
@@ -481,21 +523,36 @@ internal object ExternalDownloads {
                     headers["cookie"]?.let { putExtra("extra_cookies", it) }
                 }
             }
+            val videos = group.mapNotNull { transfer ->
+                transfer.queued?.let {
+                    fromQueue(context, it,
+                        if (pkg == "com.dv.adm") admSavedName(transfer.filename)
+                        else transfer.filename)
+                }
+            }
+            val previous = pending(context).associateBy { it.id }
+            var saved = false
             try {
+                // Never start an external Activity before identity + expected filename are durable.
+                if (videos.isNotEmpty()) {
+                    addPendingBatch(context.applicationContext, videos)
+                    saved = true
+                }
+                trace("HANDOFF_PENDINGS", "count=${videos.size} saved=$saved ids=${videos.map { it.id }}")
                 if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
                 launched = true
                 trace("HANDOFF_LAUNCHED", "pkg=$pkg count=${group.size} context=${context.javaClass.simpleName}")
-                val videos = group.mapNotNull { transfer ->
-                    transfer.queued?.let {
-                        fromQueue(context, it,
-                            if (pkg == "com.dv.adm") admSavedName(transfer.filename)
-                            else transfer.filename)
-                    }
-                }
-                trace("HANDOFF_PENDINGS", "count=${videos.size} ids=${videos.map { it.id }}")
-                if (videos.isNotEmpty()) addPendingBatch(context.applicationContext, videos)
             } catch (e: Exception) {
+                if (saved) {
+                    runCatching {
+                        for (video in videos) {
+                            val old = previous[video.id]
+                            if (old != null) addPendingBatch(context.applicationContext, listOf(old))
+                            else removePending(context.applicationContext, video.id)
+                        }
+                    }.onFailure { android.util.Log.w("ElevateExternal", "HANDOFF_ROLLBACK_FAILED", it) }
+                }
                 android.util.Log.w("ElevateExternal", "HANDOFF_FAILED app=${app.label}", e)
                 toast(context, "Cannot open " + app.label + ": " + e.message)
             }
@@ -533,51 +590,161 @@ internal object ExternalDownloads {
     fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) =
         handoffBatch(activity, listOf(queued to link))
 
-    @Synchronized private fun register(c: Context, p: Pending, name: String, size: Long, base: String?): Boolean {
-        trace("REGISTER_BEGIN", "id=${p.id} parent=${p.parentId} name=$name bytes=$size base=${pathForLog(base)}")
-        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) {
-            trace("REGISTER_SKIPPED", "id=${p.id} reason=featureOff")
+    @Synchronized private fun register(
+        c: Context, p: Pending, name: String, size: Long, base: String?, relativePath: String
+    ): Boolean {
+        trace("REGISTER_BEGIN", "id=${p.id} parent=${p.parentId} name=$name bytes=$size base=${pathForLog(base)} relative=$relativePath")
+        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return false
+        val epKey = getFolderName(DOWNLOAD_EPISODE_CACHE, p.parentId.toString())
+        val existingEpisode = c.getKey<DownloadObjects.DownloadEpisodeCached>(epKey, p.id.toString())
+        val existingHeader = c.getKey<DownloadObjects.DownloadHeaderCached>(
+            DOWNLOAD_HEADER_CACHE, p.parentId.toString())
+        val existingFile = c.getKey<DownloadObjects.DownloadedFileInfo>(
+            VideoDownloadManager.KEY_DOWNLOAD_INFO, p.id.toString())
+        val fileInfo = VideoDownloadManager.getDownloadFileInfo(c, p.id)
+        if (fileInfo != null && existingFile != null &&
+            (existingFile.displayName != name || existingFile.relativePath != relativePath)) {
+            trace("REGISTER_CONFLICT", "id=${p.id} existing=${existingFile.displayName} existingRelative=${existingFile.relativePath}")
             return false
         }
-        if (VideoDownloadManager.getDownloadFileInfo(c, p.id) != null) {
-            trace("REGISTER_SKIPPED", "id=${p.id} reason=alreadyRegistered")
-            removePending(c, p.id)
+        if (existingEpisode != null && (existingEpisode.id != p.id || existingEpisode.parentId != p.parentId) ||
+            existingHeader != null && existingHeader.id != p.parentId) {
+            trace("REGISTER_CONFLICT", "id=${p.id} reason=metadataIdMismatch")
             return false
         }
-        // The same metadata keys and filesystem resolution used by native downloads.
-        trace("REGISTER_WRITE_FILE", "id=${p.id} key=${VideoDownloadManager.KEY_DOWNLOAD_INFO} size=$size")
-        c.setKey(
-            VideoDownloadManager.KEY_DOWNLOAD_INFO, p.id.toString(),
-            DownloadObjects.DownloadedFileInfo(size, "", name, basePath = base)
-        )
-        if (VideoDownloadManager.getDownloadFileInfo(c, p.id) == null) {
-            trace("REGISTER_VERIFY_FAIL", "id=${p.id} key=downloadInfo")
-            return false
-        }
-        trace("REGISTER_VERIFY_OK", "id=${p.id} key=downloadInfo")
-        trace("REGISTER_WRITE_EPISODE", "id=${p.id} parent=${p.parentId} episode=${p.episode} season=${p.season}")
-        c.setKey(
-            getFolderName(DOWNLOAD_EPISODE_CACHE, p.parentId.toString()), p.id.toString(),
-            DownloadObjects.DownloadEpisodeCached(
-                p.episodeName, p.childPoster, p.episode, p.season, p.parentId,
-                description = p.description, cacheTime = System.currentTimeMillis(), id = p.id
+        // Header and episode metadata must be durable before the file becomes visible in Library.
+        if (existingEpisode == null) {
+            c.setKey(
+                epKey, p.id.toString(),
+                DownloadObjects.DownloadEpisodeCached(
+                    p.episodeName, p.childPoster, p.episode, p.season, p.parentId,
+                    description = p.description, cacheTime = System.currentTimeMillis(), id = p.id
+                )
             )
-        )
-        trace("REGISTER_WRITE_HEADER", "id=${p.id} parent=${p.parentId} api=${p.api} type=${p.type}")
-        c.setKey(
-            DOWNLOAD_HEADER_CACHE, p.parentId.toString(),
-            DownloadObjects.DownloadHeaderCached(
-                p.api, p.resultUrl, TvType.valueOf(p.type), p.title, p.poster,
-                System.currentTimeMillis(), p.parentId
+        }
+        if (existingHeader == null) {
+            val type = runCatching { TvType.valueOf(p.type) }.getOrNull()
+            if (type == null || p.title.isBlank() || p.api.isBlank()) {
+                trace("REGISTER_METADATA_MISSING", "id=${p.id} type=${p.type} hasTitle=${p.title.isNotBlank()} hasApi=${p.api.isNotBlank()}")
+                return false
+            }
+            c.setKey(
+                DOWNLOAD_HEADER_CACHE, p.parentId.toString(),
+                DownloadObjects.DownloadHeaderCached(
+                    p.api, p.resultUrl, type, p.title, p.poster,
+                    System.currentTimeMillis(), p.parentId
+                )
             )
-        )
+        }
+        val verifyEpisode = c.getKey<DownloadObjects.DownloadEpisodeCached>(epKey, p.id.toString())
+        val verifyHeader = c.getKey<DownloadObjects.DownloadHeaderCached>(
+            DOWNLOAD_HEADER_CACHE, p.parentId.toString())
+        if (verifyEpisode?.id != p.id || verifyEpisode?.parentId != p.parentId ||
+            verifyHeader?.id != p.parentId) {
+            trace("REGISTER_VERIFY_FAIL", "id=${p.id} reason=episodeOrHeader missingEpisode=${verifyEpisode == null} missingHeader=${verifyHeader == null}")
+            return false
+        }
+        if (fileInfo == null) {
+            c.setKey(
+                VideoDownloadManager.KEY_DOWNLOAD_INFO, p.id.toString(),
+                DownloadObjects.DownloadedFileInfo(size, relativePath, name, basePath = base)
+            )
+        }
+        val verified = VideoDownloadManager.getDownloadFileInfo(c, p.id)
+        if (verified == null || verified.fileLength <= 1024L) {
+            trace("REGISTER_VERIFY_FAIL", "id=${p.id} reason=downloadInfo fileLength=${verified?.fileLength}")
+            return false
+        }
+        trace("REGISTER_VERIFY_OK", "id=${p.id} fileLength=${verified.fileLength} parent=${p.parentId} relative=$relativePath")
         removePending(c, p.id)
         trace("REGISTER_SUCCESS", "id=${p.id} parent=${p.parentId} name=$name")
-        return true
+        return fileInfo == null || existingEpisode == null || existingHeader == null
     }
 
     private fun isVideo(name: String) =
         name.substringAfterLast('.', "").lowercase() in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v")
+
+    private data class LocatedFile(val file: SafeFile, val name: String, val relativePath: String)
+    private data class Candidate(val pending: Pending, val found: LocatedFile, val size: Long)
+
+    /** Stay inside the selected download tree: no global media search or unbounded recursion. */
+    private fun scanFiles(dir: SafeFile, scan: Int): List<LocatedFile> {
+        val found = ArrayList<LocatedFile>()
+        val queue = java.util.ArrayDeque<Triple<SafeFile, String, Int>>()
+        queue.add(Triple(dir, "", 0))
+        var inspected = 0
+        while (queue.isNotEmpty() && inspected < 1500) {
+            val (folder, relative, depth) = queue.removeFirst()
+            val children = runCatching { folder.listFiles() }
+                .onFailure { android.util.Log.w("ElevateExternal", "SCAN_LIST_FAILED scan=$scan relative=$relative", it) }
+                .getOrNull()
+            trace("SCAN_FOLDER", "scan=$scan relative=$relative depth=$depth count=${children?.size ?: -1}")
+            for (child in children.orEmpty()) {
+                if (++inspected > 1500) break
+                val name = child.name() ?: continue
+                val isDirectory = runCatching { child.isDirectory() == true }.getOrDefault(false)
+                if (isDirectory) {
+                    trace("SCAN_SUBFOLDER", "scan=$scan relative=$relative name=$name depth=$depth")
+                    if (depth < 3 && !name.startsWith(".")) {
+                        queue.add(Triple(child, if (relative.isEmpty()) name else "$relative/$name", depth + 1))
+                    }
+                } else {
+                    found.add(LocatedFile(child, name, relative))
+                }
+            }
+        }
+        if (inspected >= 1500) trace("SCAN_LIMIT", "scan=$scan maxEntries=1500")
+        trace("SCAN_LIST", "scan=$scan inspected=$inspected files=${found.size}")
+        return found
+    }
+
+    /** Recover metadata only from CloudStream's own cached downloads or its resume data. */
+    private fun nativeRecords(c: Context): Map<Int, DownloadObjects.DownloadEpisodeCached> {
+        val records = LinkedHashMap<Int, DownloadObjects.DownloadEpisodeCached>()
+        for (folder in listOf(DOWNLOAD_EPISODE_CACHE_BACKUP, DOWNLOAD_EPISODE_CACHE)) {
+            for (key in c.getKeys(folder)) {
+                val ep = c.getKey<DownloadObjects.DownloadEpisodeCached>(key) ?: continue
+                records[ep.id] = ep
+            }
+        }
+        trace("RECOVERY_NATIVE_CACHE", "episodes=${records.size}")
+        return records
+    }
+
+    private fun recoverNative(
+        c: Context, id: Int, filename: String, modified: Long?,
+        episodes: Map<Int, DownloadObjects.DownloadEpisodeCached>
+    ): Pending? {
+        val episode = episodes[id]
+        val resumed = VideoDownloadManager.getDownloadResumePackage(c, id)?.item?.ep
+        val parent = episode?.parentId ?: resumed?.parentId
+        if (parent == null) {
+            trace("RECOVERY_NO_METADATA", "id=$id reason=missingEpisodeAndResume")
+            return null
+        }
+        val header = c.getKey<DownloadObjects.DownloadHeaderCached>(
+            DOWNLOAD_HEADER_CACHE, parent.toString())
+            ?: c.getKey<DownloadObjects.DownloadHeaderCached>(
+                DOWNLOAD_HEADER_CACHE_BACKUP, parent.toString())
+        if (header == null || header.id != parent || header.name.isBlank() || header.apiName.isBlank()) {
+            trace("RECOVERY_NO_METADATA", "id=$id parent=$parent reason=missingOrIncompleteHeader")
+            return null
+        }
+        if (episode != null && resumed != null && episode.parentId != resumed.parentId) {
+            trace("RECOVERY_CONFLICT", "id=$id reason=parentMismatch")
+            return null
+        }
+        val record = Pending(
+            id, parent, header.name, episode?.name ?: resumed?.name,
+            episode?.episode ?: resumed?.episode ?: 0,
+            episode?.season ?: resumed?.season,
+            header.apiName, header.url, header.type.name,
+            header.poster, episode?.poster ?: resumed?.poster, episode?.description,
+            filename, (modified ?: System.currentTimeMillis()).coerceAtMost(System.currentTimeMillis())
+        )
+        trace("RECOVERY_NATIVE_READY", "id=$id parent=$parent title=${header.name} episode=${record.episode}")
+        return record
+    }
 
     /** One observer per pending directory; no periodic polling and no extra worker thread. */
     @Synchronized private fun watch(c: Context) {
@@ -665,23 +832,21 @@ internal object ExternalDownloads {
         main.postDelayed(task, delayMs)
     }
 
-    /** A user-triggered scan uses the same matching and registration as automatic recognition. */
+    /** A user-triggered scan also discovers orphan videos that have a valid CS episode ID. */
     fun syncNow(c: Context) {
         trace("SYNC_BUTTON", "clicked=true pending=${pending(c).size} folder=${pathForLog(basePath(c))}")
         checkFolder(c, manual = true)
     }
 
-    /** Event-driven scan with a single non-blocking stability delay per batch. */
+    /** Reuse the native registration path for direct, nested and safely recovered files. */
     fun checkFolder(c: Context, manual: Boolean = false) {
         val scan = scanSequence.incrementAndGet()
         trace("SCAN_REQUEST", "scan=$scan manual=$manual checking=${checking.get()} feature=${ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)}")
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) {
-            trace("SCAN_REJECT", "scan=$scan reason=featureOff")
             if (manual) toast(c, "Enable External Downloads first.")
             return
         }
         if (!checking.compareAndSet(false, true)) {
-            trace("SCAN_REJECT", "scan=$scan reason=alreadyRunning")
             if (manual) toast(c, "Download scan is already running.")
             return
         }
@@ -691,138 +856,143 @@ internal object ExternalDownloads {
             var registered = 0
             var scanError: String? = null
             var exactMatches = 0
-            var nearby = 0
+            var renamed = 0
+            var missingMetadata = 0
+            var ambiguous = 0
             try {
                 val requests = pending(c)
-                trace("SCAN_BEGIN", "scan=$scan manual=$manual pending=${requests.size} retry=${unstableRetries} thread=${Thread.currentThread().name}")
-                if (requests.isEmpty()) {
-                    trace("SCAN_EMPTY", "scan=$scan reason=noPending")
-                    if (manual) scanError = "No pending external downloads."
-                    return@launch
-                }
+                trace("SCAN_BEGIN", "scan=$scan manual=$manual pending=${requests.size} retry=$unstableRetries thread=${Thread.currentThread().name}")
                 val base = basePath(c)
                 val dir = directory(c, base)
                 trace("SCAN_DIRECTORY", "scan=$scan configured=${pathForLog(base)} kind=${if (base.isNullOrBlank()) "default" else if (base.startsWith("content://")) "SAF" else "filesystem"} opened=${dir != null}")
                 if (dir == null) {
-                    trace("SCAN_ABORT", "scan=$scan reason=directoryNull")
                     if (manual) scanError = "CloudStream download folder unavailable."
                     return@launch
                 }
-                // Keep all current matching rules; log every exclusion and near-match.
-                val byName = HashMap<String, Pending>(requests.size)
-                val byId = HashMap<Int, Pending>(requests.size)
+                val files = scanFiles(dir, scan)
+                val byName = HashMap<String, Pending>()
+                val byId = LinkedHashMap<Int, Pending>()
+                // Archived records preserve identity when Pending is cleared or app restarts.
+                for (p in records(c).values) byId[p.id] = p
                 for (p in requests) {
                     byId[p.id] = p
-                    trace("SCAN_PENDING", "scan=$scan id=${p.id} parent=${p.parentId} season=${p.season} episode=${p.episode} expected=${p.expectedFile} ageMs=${System.currentTimeMillis() - p.created}")
-                    if (p.expectedFile.isBlank()) {
-                        trace("SCAN_PENDING_SKIPPED", "scan=$scan id=${p.id} reason=blankExpectedFilename")
-                        continue
-                    }
-                    val previous = byName.put(p.expectedFile.lowercase(java.util.Locale.ROOT), p)
-                    if (previous != null) trace("SCAN_PENDING_COLLISION", "scan=$scan filename=${p.expectedFile} previousId=${previous.id} newId=${p.id}")
+                    trace("SCAN_PENDING", "scan=$scan id=${p.id} parent=${p.parentId} expected=${p.expectedFile} ageMs=${System.currentTimeMillis() - p.created}")
+                    if (p.expectedFile.isNotBlank()) byName[p.expectedFile.lowercase(java.util.Locale.ROOT)] = p
                 }
-                val candidates = ArrayList<Triple<Pending, SafeFile, Long>>(requests.size)
+                val markerGroups = files.filter { isVideo(it.name) }
+                    .mapNotNull { found ->
+                        csFileMarker.find(found.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                            ?.let { it to found }
+                    }.groupBy({ it.first }, { it.second })
+                // Reading CloudStream's backup caches is only necessary for missing identities.
+                val needNative = markerGroups.keys.any { it !in byId }
+                val native = if (needNative) nativeRecords(c) else emptyMap()
+                val candidates = ArrayList<Candidate>()
                 val now = System.currentTimeMillis()
-                val listing = dir.listFiles()
-                trace("SCAN_LIST", "scan=$scan listNull=${listing == null} files=${listing?.size ?: 0}")
-                val files = listing.orEmpty()
-                for ((index, file) in files.withIndex()) {
-                    val name = file.name()
-                    if (name == null) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index reason=nullName")
-                        continue
+                for ((index, found) in files.withIndex()) {
+                    val name = found.name
+                    val markerId = csFileMarker.find(name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val exact = byName[name.lowercase(java.util.Locale.ROOT)]
+                    val pending = when {
+                        exact != null && (markerId == null || markerId == exact.id) -> {
+                            exactMatches++
+                            exact
+                        }
+                        !isVideo(name) -> {
+                            trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index relative=${found.relativePath} name=$name reason=notVideo")
+                            continue
+                        }
+                        markerId == null -> {
+                            trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index relative=${found.relativePath} name=$name reason=noCsId")
+                            continue
+                        }
+                        markerGroups[markerId]?.size != 1 -> {
+                            ambiguous++
+                            trace("SCAN_RECOVERY_SKIP", "scan=$scan id=$markerId name=$name reason=multipleVideosSameId count=${markerGroups[markerId]?.size}")
+                            continue
+                        }
+                        else -> {
+                            val prior = byId[markerId]
+                            val recovered = prior ?: recoverNative(c, markerId, name, found.file.lastModified(), native)
+                            if (recovered == null) {
+                                missingMetadata++
+                                trace("SCAN_RECOVERY_SKIP", "scan=$scan id=$markerId name=$name reason=noVerifiedMetadata")
+                                continue
+                            }
+                            renamed++
+                            val copy = recovered.copy(
+                                expectedFile = name,
+                                created = minOf(recovered.created, found.file.lastModified()?.takeIf { it > 0L } ?: now)
+                            )
+                            trace("SCAN_RECOVERY_READY", "scan=$scan id=$markerId parent=${copy.parentId} name=$name previous=${prior?.expectedFile} source=${if (prior == null) "native" else "known"}")
+                            // Keep a retryable record if validation or Library registration later fails.
+                            if (requests.none { it.id == copy.id }) {
+                                addPendingBatch(c, listOf(copy))
+                            }
+                            copy
+                        }
                     }
-                    val pending = byName[name.lowercase(java.util.Locale.ROOT)]
-                    if (pending == null) {
-                        val markerId = csFileMarker.find(name)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        val similar = markerId?.let(byId::get)
-                        if (similar != null) {
-                            nearby++
-                            trace("SCAN_NEAR_MATCH", "scan=$scan index=$index id=${similar.id} actual=$name expected=${similar.expectedFile} reason=filenameDifference size=${if (manual) file.length() else null} modified=${if (manual) file.lastModified() else null}")
-                        } else trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index name=$name isVideo=${isVideo(name)} size=${if (manual) file.length() else null} modified=${if (manual) file.lastModified() else null}")
-                        continue
-                    }
-                    exactMatches++
-                    trace("SCAN_FILE_MATCH", "scan=$scan index=$index id=${pending.id} name=$name")
                     if (!isVideo(name)) {
                         trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=unsupportedExtension")
                         continue
                     }
-                    val size = file.length()
-                    if (size == null) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=sizeNull")
-                        continue
-                    }
-                    if (size <= 1024L) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=tooSmall size=$size")
+                    val size = found.file.length()
+                    if (size == null || size <= 1024L) {
+                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=invalidSize size=$size")
                         unstableFile = true
                         continue
                     }
-                    val modified = file.lastModified()
-                    trace("SCAN_FILE_STAT", "scan=$scan index=$index id=${pending.id} size=$size modified=$modified created=${pending.created} now=$now ageFromModifiedMs=${modified?.let { now - it }}")
-                    if (modified != null && (modified < pending.created - 2000L ||
-                                modified > now - 1500L)) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=${if (modified < pending.created - 2000L) "olderThanPending" else "recentWrite"}")
+                    val modified = found.file.lastModified()
+                    trace("SCAN_FILE_STAT", "scan=$scan id=${pending.id} relative=${found.relativePath} size=$size modified=$modified created=${pending.created}")
+                    if (modified != null && (modified < pending.created - 2000L || modified > now - 1500L)) {
+                        trace("SCAN_FILE_SKIP", "scan=$scan id=${pending.id} reason=${if (modified < pending.created - 2000L) "olderThanPending" else "recentWrite"}")
                         if (modified >= pending.created - 2000L) unstableFile = true
                         continue
                     }
-                    trace("SCAN_CANDIDATE", "scan=$scan id=${pending.id} name=$name size=$size")
-                    candidates.add(Triple(pending, file, size))
+                    trace("SCAN_CANDIDATE", "scan=$scan id=${pending.id} name=$name relative=${found.relativePath} size=$size")
+                    candidates.add(Candidate(pending, found, size))
                 }
-                trace("SCAN_MATCH_SUMMARY", "scan=$scan pending=${requests.size} files=${files.size} exact=$exactMatches near=$nearby candidates=${candidates.size}")
-                if (candidates.isEmpty()) {
-                    trace("SCAN_NO_CANDIDATES", "scan=$scan reason=noEligibleFiles")
-                    return@launch
-                }
-                trace("SCAN_STABILITY_WAIT", "scan=$scan millis=750 candidates=${candidates.size}")
+                trace("SCAN_MATCH_SUMMARY", "scan=$scan pending=${requests.size} files=${files.size} exact=$exactMatches recovered=$renamed missingMetadata=$missingMetadata ambiguous=$ambiguous candidates=${candidates.size}")
+                if (candidates.isEmpty()) return@launch
                 delay(750L)
                 val stableAt = System.currentTimeMillis()
-                for ((pending, file, size) in candidates) {
-                    val currentSize = file.length()
-                    trace("SCAN_STABILITY_SIZE", "scan=$scan id=${pending.id} before=$size after=$currentSize")
-                    if (currentSize != size || size <= 1024L) {
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${pending.id} reason=sizeChanged")
+                for ((p, found, size) in candidates) {
+                    val currentSize = found.file.length()
+                    val modified = found.file.lastModified()
+                    trace("SCAN_STABILITY", "scan=$scan id=${p.id} initial=$size current=$currentSize modified=$modified elapsedMs=${stableAt - now}")
+                    if (currentSize != size || size <= 1024L ||
+                        modified != null && modified > stableAt - 1500L) {
                         unstableFile = true
+                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${p.id} reason=sizeOrTimeChanged")
                         continue
                     }
-                    val modified = file.lastModified()
-                    trace("SCAN_STABILITY_TIME", "scan=$scan id=${pending.id} modified=$modified stableAt=$stableAt threshold=${stableAt - 1500L}")
-                    if (modified != null && modified > stableAt - 1500L) {
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${pending.id} reason=recentWrite")
-                        unstableFile = true
+                    if (found.file.name() != found.name) {
+                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${p.id} reason=filenameChanged")
                         continue
                     }
-                    val name = file.name()
-                    if (name == null) {
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${pending.id} reason=nullName")
-                        continue
-                    }
-                    if (!name.equals(pending.expectedFile, ignoreCase = true)) {
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${pending.id} reason=filenameChanged actual=$name expected=${pending.expectedFile}")
-                        continue
-                    }
-                    val registeredNow = runCatching { register(c, pending, name, size, base) }
-                        .onFailure { android.util.Log.w("ElevateExternal", "SCAN_REGISTER_EXCEPTION scan=$scan id=${pending.id}", it) }
-                        .getOrDefault(false)
-                    trace("SCAN_REGISTER_RESULT", "scan=$scan id=${pending.id} result=$registeredNow")
-                    if (registeredNow) registered++
+                    val result = runCatching {
+                        register(c, p, found.name, size, base, found.relativePath)
+                    }.onFailure {
+                        android.util.Log.w("ElevateExternal", "SCAN_REGISTER_EXCEPTION scan=$scan id=${p.id}", it)
+                    }.getOrDefault(false)
+                    trace("SCAN_REGISTER_RESULT", "scan=$scan id=${p.id} result=$result")
+                    if (result) registered++
                 }
             } catch (e: Exception) {
-                android.util.Log.w("ElevateExternal", "SCAN_EXCEPTION scan=$scan cannotInspectFolder", e)
+                android.util.Log.w("ElevateExternal", "SCAN_EXCEPTION scan=$scan", e)
                 if (manual) scanError = "Cannot scan CloudStream download folder."
             } finally {
                 checking.set(false)
-                trace("SCAN_END", "scan=$scan manual=$manual exact=$exactMatches near=$nearby registered=$registered unstable=$unstableFile retryBefore=${unstableRetries} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started} error=$scanError")
+                trace("SCAN_END", "scan=$scan manual=$manual exact=$exactMatches recovered=$renamed noMetadata=$missingMetadata ambiguous=$ambiguous registered=$registered unstable=$unstableFile durationMs=${android.os.SystemClock.elapsedRealtime() - started}")
                 if (unstableFile && unstableRetries < 2) {
                     unstableRetries++
-                    trace("SCAN_RETRY", "scan=$scan retry=${unstableRetries} delayMs=6000")
+                    trace("SCAN_RETRY", "scan=$scan retry=$unstableRetries delayMs=6000")
                     scheduleCheck(c, 6_000L)
                 } else if (!unstableFile) unstableRetries = 0
-                if (manual) toast(c, scanError ?: if (registered > 0) {
-                    "Synced $registered download(s) to Library."
-                } else {
-                    "No matching completed files (${pending(c).size} pending)."
-                })
+                if (manual) {
+                    val result = scanError ?: "Synced $registered; ${pending(c).size} pending; $missingMetadata no metadata; $ambiguous ambiguous; $renamed recovered."
+                    toast(c, result)
+                }
             }
         }
     }
@@ -841,6 +1011,7 @@ internal object ExternalDownloads {
         scheduled?.let(main::removeCallbacks)
         scheduled = null
         pendingCache = null
+        recordsCache = null
     }
 }
 
