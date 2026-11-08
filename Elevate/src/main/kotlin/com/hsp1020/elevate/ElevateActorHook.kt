@@ -53,6 +53,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.WeakHashMap
 
@@ -200,6 +201,23 @@ internal class ElevateActorHook(private val appContext: Application) :
         return task.await()
     }
 
+    /** Optional TMDB person identities carried by CloudStream's standard syncData. */
+    private fun nativeTmdbPeople(page: ResultData, response: LoadResponse?): CastResult? {
+        val actors = page.actors?.takeIf { it.isNotEmpty() }
+            ?: response?.actors?.takeIf { it.isNotEmpty() } ?: return null
+        val raw = response?.syncData?.get("tmdb_people")
+            ?: page.syncData["tmdb_people"] ?: return null
+        val identities = runCatching { JSONArray(raw) }.getOrNull() ?: return null
+        if (identities.length() != actors.size) return null
+        val refs = actors.mapIndexed { index, actor ->
+            val info = identities.optJSONObject(index) ?: return null
+            if (info.optString("name") != actor.actor.name) return null
+            ElevateActorPersonRef(info.optInt("id").takeIf { it > 0 },
+                actor.actor.name, actor.actor.image, info.optBoolean("crew"))
+        }
+        return CastResult(actors, refs)
+    }
+
     private suspend fun resolve(page: ResultData, response: LoadResponse?, ids: Ids,
         selectedSeason: Boolean): CastResult? {
         val type = response?.type
@@ -209,6 +227,11 @@ internal class ElevateActorHook(private val appContext: Application) :
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (type == null || type == TvType.Others) && kind == "movie"
         trace("RESOLVE_START", "url=${page.url.take(140)} type=$type kind=$kind ids=$ids native=${page.actors?.size ?: 0}")
+        val native = nativeTmdbPeople(page, response)
+        if (!selectedSeason && native != null) {
+            trace("NATIVE_TMDB_CAST", "actors=${native.actors.size} ids=${native.people?.count { it.id != null }}")
+            return native
+        }
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
@@ -226,7 +249,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             val result = when (candidate) {
                 "anilist" -> ids.anilist?.let { anilist(it) }
                 "mal" -> ids.mal?.let { animeMapped("mal", it) }
-                "tmdb" -> ids.tmdb?.let { tmdb(it, movie) }
+                "tmdb" -> native?.takeIf { selectedSeason } ?: ids.tmdb?.let { tmdb(it, movie) }
                 "imdb" -> ids.imdb?.let { imdb ->
                     ElevateIdResolver.tmdbForImdb(imdb, movie)?.let { tmdb(it, movie) }
                 }

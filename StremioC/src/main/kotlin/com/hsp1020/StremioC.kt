@@ -13,6 +13,8 @@ import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.Actor
+import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.TrailerData
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
@@ -4306,6 +4308,21 @@ open class StremioC(
         @JsonProperty("logo") val logo: String? = null
     )
 
+    private data class AioPerson(
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("character") val character: String? = null,
+        @JsonProperty("photo") val photo: String? = null,
+        @JsonProperty("tmdbId") val tmdbId: Int? = null
+    )
+
+    private data class AioCredits(
+        @JsonProperty("cast") val cast: List<AioPerson>? = null,
+        @JsonProperty("directors") val directors: List<AioPerson>? = null,
+        @JsonProperty("writers") val writers: List<AioPerson>? = null
+    )
+
+    private data class AioActorRow(val data: ActorData, val id: Int?, val crew: Boolean)
+
     private data class CatalogEntry(
         @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String? = null, 
@@ -4326,10 +4343,50 @@ open class StremioC(
         @JsonProperty("genre") val genre: List<String>? = null, 
         @JsonProperty("genres") val genres: List<String>? = null,
         @JsonProperty("cast") val cast: List<String>? = null, 
+        @JsonProperty("app_extras") val appExtras: AioCredits? = null,
         @JsonProperty("trailers") val trailersSources: List<Trailer>? = null,
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream>? = null, 
         @JsonProperty("links") val links: List<Link>? = null
     ) {
+
+        private fun aioActorRows(credits: AioCredits?): List<AioActorRow> {
+            if (credits == null) return emptyList()
+            val crew = linkedMapOf<String, MutableList<Pair<String, AioPerson>>>()
+            fun collect(job: String, people: List<AioPerson>?) {
+                people.orEmpty().forEach { person ->
+                    val name = person.name?.takeIf { it.isNotBlank() } ?: return@forEach
+                    val key = person.tmdbId?.takeIf { it > 0 }?.let { "id:$it" }
+                        ?: "name:${name.trim().lowercase()}"
+                    crew.getOrPut(key) { mutableListOf() }.add(job to person)
+                }
+            }
+            collect("Director", credits.directors)
+            collect("Writer", credits.writers)
+            val crewRows = crew.values.mapNotNull { jobs ->
+                val person = jobs.first().second
+                val name = person.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val roles = jobs.map { it.first }.distinct()
+                    .sortedBy { if (it == "Director") 0 else 1 }.joinToString(", ")
+                val photo = jobs.firstNotNullOfOrNull { it.second.photo?.takeIf(String::isNotBlank) }
+                    ?: TRANSPARENT_PIXEL
+                AioActorRow(ActorData(Actor(name, photo), roleString = roles),
+                    person.tmdbId?.takeIf { it > 0 }, true)
+            }.sortedBy { row ->
+                when (row.data.roleString) {
+                    "Director, Writer" -> 1
+                    "Director" -> 2
+                    else -> 3
+                }
+            }
+            val castRows = credits.cast.orEmpty().mapNotNull { person ->
+                val name = person.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                AioActorRow(ActorData(Actor(name,
+                    person.photo?.takeIf(String::isNotBlank) ?: TRANSPARENT_PIXEL),
+                    roleString = person.character),
+                    person.tmdbId?.takeIf { it > 0 }, false)
+            }
+            return crewRows + castRows
+        }
 
         fun toSearchResponse(
             provider: StremioC,
@@ -4940,6 +4997,8 @@ open class StremioC(
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
+            val nativeActors = aioActorRows(detailedEntry.appExtras)
+                .ifEmpty { aioActorRows(this@CatalogEntry.appExtras) }
 
             val videoSeasons = finalVideos.orEmpty().mapNotNull {
                 it.seasonNumber?.takeIf { number -> number > 0 }
@@ -5152,6 +5211,17 @@ open class StremioC(
                     finalKitsuId?.let { syncData["kitsu"] = it.toString() }
                 }
                 apiName = provider.getTargetApiName()
+                if (nativeActors.isNotEmpty()) {
+                    actors = nativeActors.map { it.data }
+                    syncData["tmdb_people"] = org.json.JSONArray().apply {
+                        nativeActors.forEach { row ->
+                            put(org.json.JSONObject()
+                                .put("name", row.data.actor.name)
+                                .put("id", row.id ?: org.json.JSONObject.NULL)
+                                .put("crew", row.crew))
+                        }
+                    }.toString()
+                }
 
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)
                 syncData["logo_expected"] = (!finalLogo.isNullOrBlank()).toString()
