@@ -374,17 +374,14 @@ class ElevateSettingsFragment : DialogFragment() {
                         }, LinearLayout.LayoutParams(
                             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                         ))
-                        selectorRow.addView(android.widget.Button(ctx).apply {
-                            text = "Sync Now"
+                        selectorRow.addView(androidx.appcompat.widget.AppCompatButton(
+                            ctx, null, androidx.appcompat.R.attr.buttonBarPositiveButtonStyle
+                        ).apply {
+                            text = "Sync Download Files"
                             isAllCaps = false
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                            applyElevateNativeFont()
-                            minimumWidth = 0
-                            minimumHeight = 0
-                            setPadding(dp(12), 0, dp(12), 0)
                             setOnClickListener { ExternalDownloads.syncNow(ctx.applicationContext) }
                         }, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply { marginStart = dp(10) })
                         addView(selectorRow)
                     }
