@@ -32,7 +32,7 @@ import androidx.navigation.NavOptions
 import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
 import android.widget.Toast
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.DubStatus
 import android.view.View
 import android.view.ViewGroup
@@ -1203,6 +1203,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
                 pageUrl.contains("/c/") || pageUrl.contains("/user/"))
         private var channelLoading = false
+        private var channelSortButton: TextView? = null
+        private var channelSortWatcher: TextWatcher? = null
 
         private val tagGroup = if (fragment?.arguments?.getString("apiName") == "YouTube")
             root.findViewById<ChipGroup>(R.id.result_tag) else null
@@ -1400,10 +1402,28 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val model = ViewModelProvider(owner)[ResultViewModel2::class.java]
             model.sortSelections.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
             model.selectedSorting.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
-            model.selectedRangeIndex.observe(owner.viewLifecycleOwner) {
+            model.page.observe(owner.viewLifecycleOwner) { state ->
+                if (state is Resource.Success) {
+                    Log.i("YouTubeChannel", "event=CHANNEL_UI_PAGE_SUCCESS " +
+                        "ranges=${model.rangeSelections.value.orEmpty().size} " +
+                        "selected=${model.selectedRangeIndex.value}")
+                }
+            }
+            model.episodesCountText.observe(owner.viewLifecycleOwner) { count ->
+                if (count != null) {
+                    Log.i("YouTubeChannel", "event=CHANNEL_UI_COUNT " +
+                        "text=${count.asStringNull(root.context)}")
+                }
+            }
+            model.selectedRangeIndex.observe(owner.viewLifecycleOwner) { selected ->
+                Log.i("YouTubeChannel", "event=CHANNEL_UI_SELECTED " +
+                    "index=$selected ranges=${model.rangeSelections.value.orEmpty().size}")
                 root.post { loadMoreChannelIfNeeded(model) }
             }
-            model.rangeSelections.observe(owner.viewLifecycleOwner) {
+            model.rangeSelections.observe(owner.viewLifecycleOwner) { ranges ->
+                Log.i("YouTubeChannel", "event=CHANNEL_UI_RANGES " +
+                    "count=${ranges.size} lastEnd=${ranges.lastOrNull()?.second?.endEpisode ?: 0} " +
+                    "selected=${model.selectedRangeIndex.value}")
                 root.post { loadMoreChannelIfNeeded(model) }
             }
         }
@@ -1425,17 +1445,36 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 YoutubeProvider.ChannelSortMode.LATEST,
                 YoutubeProvider.ChannelSortMode.DATE
             )
-            button.text = label(YoutubeProvider.channelSortMode(pageUrl))
+            // CloudStream also writes to this button. Correct it before rendering.
+            if (channelSortButton !== button) {
+                channelSortButton?.let { previous ->
+                    channelSortWatcher?.let(previous::removeTextChangedListener)
+                }
+                channelSortButton = button
+                channelSortWatcher = object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        val expected = label(YoutubeProvider.channelSortMode(pageUrl))
+                        if (s?.toString() != expected) button.text = expected
+                    }
+                }.also(button::addTextChangedListener)
+            }
+            button.gravity = android.view.Gravity.CENTER
+            button.textAlignment = View.TEXT_ALIGNMENT_CENTER
+            val selected = label(YoutubeProvider.channelSortMode(pageUrl))
+            if (button.text.toString() != selected) button.text = selected
             button.setOnClickListener {
-                MaterialAlertDialogBuilder(button.context)
-                    .setTitle(R.string.sort_by)
-                    .setSingleChoiceItems(
-                        modes.map(::label).toTypedArray(),
-                        modes.indexOf(YoutubeProvider.channelSortMode(pageUrl))
-                    ) { dialog, which ->
-                        dialog.dismiss()
-                        val next = modes[which]
-                        if (next == YoutubeProvider.channelSortMode(pageUrl)) return@setSingleChoiceItems
+                // Same picker, theme and selection check as the native Season dialog.
+                owner.activity.showDialog(
+                    modes.map(::label),
+                    modes.indexOf(YoutubeProvider.channelSortMode(pageUrl)),
+                    button.context.getString(R.string.sort_by),
+                    false,
+                    {}
+                ) { which ->
+                    val next = modes[which]
+                    if (next != YoutubeProvider.channelSortMode(pageUrl)) {
                         YoutubeProvider.setChannelSortMode(pageUrl, next)
                         val current = (model.episodes.value as? Resource.Success)
                             ?.value?.firstOrNull()
@@ -1444,7 +1483,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             model.load(owner.activity, pageUrl, "YouTube", false,
                                 DubStatus.None, null, loadTrailers = false)
                         }
-                    }.show()
+                    }
+                }
             }
         }
 
@@ -1461,17 +1501,33 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 .coerceAtMost(provider.channelPageLimit())
             if (nextPages <= provider.channelLoadedPages(pageUrl)) return
             val requestedMode = YoutubeProvider.channelSortMode(pageUrl)
+            Log.i("YouTubeChannel", "event=CHANNEL_UI_EXPAND_REQUEST " +
+                "pages=${provider.channelLoadedPages(pageUrl)} target=$nextPages " +
+                "ranges=${ranges.size} selected=${model.selectedRangeIndex.value}")
             channelLoading = true
             owner.viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val response = withContext(Dispatchers.IO) {
                         provider.loadChannelPages(pageUrl, nextPages)
-                    } ?: return@launch
+                    }
+                    if (response == null) {
+                        Log.w("YouTubeChannel", "event=CHANNEL_UI_EXPAND_SKIPPED reason=null_response")
+                        return@launch
+                    }
+                    Log.i("YouTubeChannel", "event=CHANNEL_UI_EXPAND_FETCHED " +
+                        "episodes=${response.episodes.size} videos=${response.episodes.count { it.season == 1 }} " +
+                        "shorts=${response.episodes.count { it.season == 2 }}")
                     if (screens[owner] !== this@Screen || !owner.isAdded ||
                         owner.view !== root ||
-                        requestedMode != YoutubeProvider.channelSortMode(pageUrl)) return@launch
+                        requestedMode != YoutubeProvider.channelSortMode(pageUrl)) {
+                        Log.w("YouTubeChannel", "event=CHANNEL_UI_EXPAND_SKIPPED " +
+                            "reason=screen_or_sort_changed active=${screens[owner] === this@Screen} " +
+                            "added=${owner.isAdded} sameView=${owner.view === root}")
+                        return@launch
+                    }
                     provider.cacheChannelResponse(pageUrl, response)
-                    // Rebuild the native range and playback generator through its public loader.
+                    Log.i("YouTubeChannel", "event=CHANNEL_UI_RELOAD_REQUEST " +
+                        "episodes=${response.episodes.size} beforeRanges=${model.rangeSelections.value.orEmpty().size}")
                     model.load(owner.activity, pageUrl, "YouTube", false,
                         DubStatus.None, null, loadTrailers = false)
                 } finally {
@@ -1554,6 +1610,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         fun close() {
+            channelSortWatcher?.let { watcher -> channelSortButton?.removeTextChangedListener(watcher) }
+            channelSortWatcher = null
+            channelSortButton = null
             descriptionWatcher?.let { listener -> description?.removeTextChangedListener(listener) }
             descriptionWatcher = null
             description?.movementMethod = nativeMovement

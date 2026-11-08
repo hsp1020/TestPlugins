@@ -3415,7 +3415,16 @@ class YoutubeProvider(
         loadPage(url, direct = false, channelTargetPages = targetPages) as? TvSeriesLoadResponse
 
     override suspend fun load(url: String): LoadResponse {
-        val response = directPageCache.remove(url) ?: loadPage(url, direct = false)
+        val cached = directPageCache.remove(url)
+        val response = cached ?: loadPage(url, direct = false)
+        if (response is TvSeriesLoadResponse &&
+            (url.contains("/channel/") || url.contains("/@") ||
+                url.contains("/c/") || url.contains("/user/"))) {
+            Log.i("YouTubeChannel", "event=CHANNEL_UI_DELIVERY " +
+                "cache=${cached != null} episodes=${response.episodes.size} " +
+                "videos=${response.episodes.count { it.season == 1 }} " +
+                "shorts=${response.episodes.count { it.season == 2 }}")
+        }
         if (url.contains("/shorts/") && response is TvSeriesLoadResponse) {
             YoutubeUtils.extractYoutubeId(url)?.let { videoId ->
                 val episode = response.episodes.firstOrNull {
