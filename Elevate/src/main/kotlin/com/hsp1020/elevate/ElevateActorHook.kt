@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.util.Log
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
@@ -56,6 +57,7 @@ import java.util.WeakHashMap
 /** Universal cast binding based on sync IDs, never on provider names or URL schemas. */
 internal class ElevateActorHook(private val appContext: Application) :
     Application.ActivityLifecycleCallbacks {
+    private fun trace(step: String, detail: String) = Log.d("ElevateActorTrace", "$step $detail")
     private val main = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bindings = mutableMapOf<Fragment, Binding>()
@@ -63,7 +65,7 @@ internal class ElevateActorHook(private val appContext: Application) :
     private val responseField = runCatching {
         ResultViewModel2::class.java.getDeclaredField("currentResponse")
             .apply { isAccessible = true }
-    }.getOrNull()
+    }.getOrNull().also { Log.d("ElevateActorTrace", "REFLECTION currentResponse=${it != null}") }
     private data class CastResult(val actors: List<ActorData>,
         val people: List<ElevateActorPersonRef>?)
     private data class Cached(val at: Long, val result: CastResult)
@@ -100,32 +102,41 @@ internal class ElevateActorHook(private val appContext: Application) :
     }
 
     private suspend fun anilist(id: String): CastResult? {
+        trace("ANILIST_START", "id=$id")
         val cast = try {
             withContext(Dispatchers.IO) { AccountManager.aniListApi.load(null, id)?.actors }
         } catch (cancelled: CancellationException) { throw cancelled }
-          catch (_: Exception) { null }
+          catch (e: Exception) { trace("ANILIST_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}"); null }
+        trace("ANILIST_RESULT", "id=$id count=${cast?.size ?: 0}")
         return cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
     }
 
     private suspend fun animeMapped(source: String, id: String): CastResult? {
-        val mapped = ElevateAnimeIdResolver.resolve(source, id) ?: return null
+        trace("ANIME_MAP_START", "source=$source id=$id")
+        val mapped = ElevateAnimeIdResolver.resolve(source, id)
+        trace("ANIME_MAP_RESULT", "source=$source id=$id anilist=${mapped?.anilist}")
+        if (mapped == null) return null
         return mapped.anilist?.let { anilist(it) }
     }
 
     private suspend fun tmdb(raw: String, movie: Boolean): CastResult? {
-        val id = positive(raw) ?: return null
-        val apiKey = ElevateIdResolver.tmdbApiKey() ?: return null
+        val id = positive(raw)
+        val apiKey = ElevateIdResolver.tmdbApiKey()
+        trace("TMDB_PRECHECK", "raw=$raw id=$id movie=$movie apiKeyPresent=${!apiKey.isNullOrBlank()}")
+        if (id == null || apiKey == null) return null
         val key = "${if (movie) "movie" else "tv"}:$id:${apiKey.hashCode()}"
         val now = System.currentTimeMillis()
         val task = synchronized(tmdbCache) {
             tmdbCache[key]?.takeIf { now - it.at in 0 until 43_200_000L }
-                ?.let { return it.result }
+                ?.let { trace("TMDB_CACHE_HIT", "key=$key actors=${it.result.actors.size}"); return it.result }
             tmdbFlights[key] ?: io.async(start = CoroutineStart.LAZY) {
+                trace("TMDB_REQUEST_START", "type=${if (movie) "movie" else "tv"} id=$id")
                 val found = try {
                     withTimeoutOrNull(15_000L) {
                         val kind = if (movie) "movie" else "tv"
                         val res = app.get("https://api.themoviedb.org/3/$kind/$id/credits",
                             params = mapOf("api_key" to apiKey), timeout = 12L)
+                        trace("TMDB_HTTP", "id=$id status=${res.code} bytes=${res.text.length}")
                         val json = JSONObject(res.text)
                         val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
                         val crew = json.optJSONArray("crew")
@@ -159,12 +170,14 @@ internal class ElevateActorHook(private val appContext: Application) :
                                 roleString = obj.optString("character").takeIf(String::isNotBlank)) to
                                 ElevateActorPersonRef(personId, name, photo, false)
                         }
+                        trace("TMDB_PARSED", "id=$id crew=${crew?.length() ?: 0} cast=${cast?.length() ?: 0} valid=${pairs.size}")
                         pairs.takeIf { it.isNotEmpty() }?.let { rows ->
                             CastResult(rows.map { it.first }, rows.map { it.second })
                         }
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
-                  catch (_: Exception) { null }
+                  catch (e: Exception) { trace("TMDB_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}"); null }
+                trace("TMDB_RESULT", "id=$id actors=${found?.actors?.size ?: 0} timeoutOrEmpty=${found == null}")
                 if (found != null) synchronized(tmdbCache) {
                     tmdbCache[key] = Cached(System.currentTimeMillis(), found)
                     if (tmdbCache.size > 64) tmdbCache.remove(tmdbCache.keys.first())
@@ -179,6 +192,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 }
             }
         }
+        trace("TMDB_FLIGHT", "key=$key active=${tmdbFlights.containsKey(key)}")
         task.start()
         return task.await()
     }
@@ -191,6 +205,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         }.getOrNull()
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (type == TvType.Others && kind == "movie")
+        trace("RESOLVE_START", "url=${page.url.take(140)} type=$type kind=$kind ids=$ids native=${page.actors?.size ?: 0}")
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
@@ -202,7 +217,9 @@ internal class ElevateActorHook(private val appContext: Application) :
         val options = if (anime)
             listOf("anilist", "mal", "tmdb", "imdb", "simkl") else
             listOf("tmdb", "imdb", "simkl", "anilist", "mal")
+        trace("RESOLVE_ORDER", "anime=$anime movie=$movie options=$options")
         for (candidate in options) {
+            trace("RESOLVE_TRY", "candidate=$candidate hasId=${when(candidate) { "anilist" -> ids.anilist != null; "mal" -> ids.mal != null; "tmdb" -> ids.tmdb != null; "imdb" -> ids.imdb != null; "simkl" -> ids.simkl != null; else -> false }}")
             val result = when (candidate) {
                 "anilist" -> ids.anilist?.let { anilist(it) }
                 "mal" -> ids.mal?.let { animeMapped("mal", it) }
@@ -215,8 +232,10 @@ internal class ElevateActorHook(private val appContext: Application) :
                 }
                 else -> null
             }
+            trace("RESOLVE_STEP_RESULT", "candidate=$candidate actors=${result?.actors?.size ?: 0} personRefs=${result?.people?.size ?: 0}")
             if (result != null) return result
         }
+        trace("RESOLVE_EXHAUSTED", "kitsu=${ids.kitsu} nonKitsu=${ids.hasNonKitsu()}")
         return if (!ids.hasNonKitsu() && ids.kitsu != null)
             animeMapped("kitsu", ids.kitsu) else null
     }
@@ -225,10 +244,12 @@ internal class ElevateActorHook(private val appContext: Application) :
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
+            Log.d("ElevateActorTrace", "FRAGMENT_CREATED name=${fragment.javaClass.name}")
             attach(fragment, view)
             view.post { if (fragment.view === view) attach(fragment, view) }
         }
         override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            Log.d("ElevateActorTrace", "FRAGMENT_RESUMED name=${fragment.javaClass.name}")
             fragment.view?.let { attach(fragment, it) }
             bindings[fragment]?.render()
         }
@@ -242,7 +263,9 @@ internal class ElevateActorHook(private val appContext: Application) :
             fragment.javaClass.name !in setOf(
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentTv")) return
-        val list = root.findViewById<RecyclerView>(R.id.result_cast_items) ?: return
+        val list = root.findViewById<RecyclerView>(R.id.result_cast_items)
+        trace("ATTACH_CHECK", "fragment=${fragment.javaClass.name} castList=${list != null} adapter=${list?.adapter?.javaClass?.simpleName}")
+        if (list == null) return
         bindings[fragment] = Binding(fragment, list).also { it.start() }
     }
 
@@ -289,6 +312,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             val nav = activity?.let {
                 it.resources.getIdentifier("navigation_search", "id", it.packageName)
             } ?: 0
+            trace("LONG_PRESS", "pos=$pos query=$query activity=${activity != null} nav=$nav")
             if (query.isNullOrBlank() || activity == null || nav == 0)
                 false else {
                 longPressed = true
@@ -318,7 +342,9 @@ internal class ElevateActorHook(private val appContext: Application) :
         private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { attachClicks() }
         private var tree: ViewTreeObserver? = null
         private val observer = Observer<Resource<ResultData>?> { state ->
-            val page = (state as? Resource.Success<ResultData>)?.value ?: return@Observer
+            val page = (state as? Resource.Success<ResultData>)?.value
+            trace("PAGE_OBSERVER", "state=${state?.javaClass?.simpleName} url=${page?.url?.take(100)} actors=${page?.actors?.size ?: 0}")
+            if (page == null) return@Observer
             update(page)
         }
         private fun castEnabled(): Boolean =
@@ -326,6 +352,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 appContext.getString(R.string.show_cast_in_details_key), true)
 
         fun start() {
+            trace("BIND_START", "fragment=${fragment.javaClass.name} adapter=${list.adapter?.javaClass?.simpleName}")
             controller.start()
             model.page.observe(fragment.viewLifecycleOwner, observer)
             tree = list.viewTreeObserver.also { it.addOnGlobalLayoutListener(layoutListener) }
@@ -335,13 +362,17 @@ internal class ElevateActorHook(private val appContext: Application) :
             val response = runCatching { responseField?.get(model) as? LoadResponse }
                 .getOrNull()?.takeIf { it.url == page.url }
             val ids = ids(page, response)
+            trace("PAGE_UPDATE", "url=${page.url.take(140)} response=${response != null} responseType=${response?.type} ids=$ids nativeActors=${page.actors?.size ?: 0} enabled=${castEnabled()}")
             val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown")
             if (identity == pageIdentity) {
+                trace("PAGE_SAME", "identity=${identity.take(180)} adapterCount=${list.adapter?.itemCount}")
                 attachClicks()
                 return
             }
+            val previousIdentity = pageIdentity
             pageIdentity = identity
             pageUrl = page.url
+            trace("PAGE_CHANGED", "old=${previousIdentity?.take(100)} new=${identity.take(180)}")
             loadJob?.cancel()
             people = null
             lastActors = null
@@ -354,19 +385,24 @@ internal class ElevateActorHook(private val appContext: Application) :
             list.visibility = if (castEnabled() && !page.actors.isNullOrEmpty())
                 View.VISIBLE else View.GONE
             castText?.visibility = if (page.actorsText == null) View.GONE else View.VISIBLE
-            if (!castEnabled()) return
+            if (!castEnabled()) { trace("RESOLVE_SKIPPED", "castDisabled"); return }
             loadJob = main.launch {
-                val loaded = resolve(page, response) ?: return@launch
+                trace("LOAD_JOB_START", "identity=${identity.take(180)}")
+                val loaded = resolve(page, response)
+                trace("LOAD_JOB_RESULT", "actors=${loaded?.actors?.size ?: 0} people=${loaded?.people?.size ?: 0}")
+                if (loaded == null) return@launch
                 if (!fragment.isAdded || pageIdentity != identity ||
                     (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
                     !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
-                    return@launch
+                    run { trace("LOAD_REJECTED", "added=${fragment.isAdded} sameIdentity=${pageIdentity == identity} enabled=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}"); return@launch }
                 people = loaded.people
                 lastActors = loaded.actors
                 (list.adapter as? ActorAdaptor)?.let { adapter ->
+                    trace("ADAPTER_SUBMIT", "before=${adapter.itemCount} new=${loaded.actors.size} refs=${loaded.people?.size ?: 0}")
                     adapter.submitList(loaded.actors)
                     list.post {
                         if (list.adapter === adapter && pageIdentity == identity) {
+                            trace("ADAPTER_REBIND", "count=${adapter.itemCount} visible=${list.childCount}")
                             adapter.notifyDataSetChanged()
                             attachClicks()
                         }
@@ -381,6 +417,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         }
         fun render() = attachClicks()
 
+        private var lastBindTrace: String? = null
         private fun attachClicks() {
             val refs = people
             val actors = lastActors
@@ -388,7 +425,9 @@ internal class ElevateActorHook(private val appContext: Application) :
                 list.visibility = View.VISIBLE
                 castText?.visibility = View.GONE
             }
-            val adapter = list.adapter as? ActorAdaptor ?: return
+            val adapter = list.adapter as? ActorAdaptor ?: run { trace("CLICK_NO_ADAPTER", "adapter=${list.adapter?.javaClass?.name}"); return }
+            val signature = "${adapter.itemCount}:${list.childCount}:${refs?.size}:${actors?.size}:${pageIdentity?.hashCode()}"
+            if (signature != lastBindTrace) { trace("CLICK_BIND_SCAN", "signature=$signature"); lastBindTrace = signature }
             for (index in 0 until list.childCount) {
                 val card = list.getChildAt(index)
                 val pos = list.getChildAdapterPosition(card)
@@ -397,16 +436,23 @@ internal class ElevateActorHook(private val appContext: Application) :
                 // AniList: leave native click and cast/voice-actor inversion untouched.
                 val person = refs?.getOrNull(pos) ?: continue
                 val actor = actors?.getOrNull(pos) ?: continue
-                if (person.id == null || adapter.getItemOrNull(pos) !== actor) continue
+                if (person.id == null || adapter.getItemOrNull(pos) !== actor) {
+                    trace("CLICK_BIND_SKIP", "pos=$pos person=${person.id} sameActor=${adapter.getItemOrNull(pos) === actor}")
+                    continue
+                }
                 cards[card] = actor to person
                 card.setOnTouchListener(touch)
                 val click = object : View.OnClickListener {
                     override fun onClick(view: View) {
+                        trace("CARD_CLICK", "pos=$pos person=${person.id} pending=${pendingAnimation != null} pageUrl=$pageUrl")
                         if (pendingAnimation != null || pageUrl !=
                             (model.page.value as? Resource.Success<ResultData>)?.value?.url)
                             return
                         val current = list.getChildAdapterPosition(view)
-                        if (current != pos || adapter.getItemOrNull(current) !== actor) return
+                        if (current != pos || adapter.getItemOrNull(current) !== actor) {
+                            trace("CARD_CLICK_REJECT", "pos=$pos current=$current same=${adapter.getItemOrNull(current) === actor}")
+                            return
+                        }
                         card.findViewById<View>(R.id.voice_actor_image_holder2)?.let {
                             it.animate().cancel()
                             it.scaleX = 1f
@@ -423,6 +469,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                         }
                         val running = view.findViewById<View>(
                             R.id.voice_actor_image_holder2)?.animation
+                        trace("CARD_CLICK_DISPATCH", "pos=$pos running=${running != null}")
                         if (running == null) controller.click(person, view)
                         else {
                             pendingAnimation = running
@@ -437,13 +484,14 @@ internal class ElevateActorHook(private val appContext: Application) :
                                     if (fragment.isAdded && view.isAttachedToWindow &&
                                         list.getChildAdapterPosition(view) == pos &&
                                         adapter.getItemOrNull(pos) === actor)
-                                        controller.click(person, view)
+                                        controller.click(person, view).also { trace("CARD_ANIMATION_DISPATCH", "pos=$pos person=${person.id}") }
                                 }
                             })
                         }
                     }
                 }
                 card.setOnClickListener(click)
+                trace("CLICK_BOUND", "pos=$pos person=${person.id}")
                 // Long-press always opens the existing in-app CloudStream search.
             }
         }
@@ -459,6 +507,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             }
         }
         fun stop() {
+            trace("BIND_STOP", "fragment=${fragment.javaClass.name} page=${pageUrl?.take(100)}")
             pendingAnimation?.setAnimationListener(null)
             pendingAnimation = null
             list.childrenToReset()
@@ -482,12 +531,14 @@ internal class ElevateActorHook(private val appContext: Application) :
     }
 
     fun start() {
+        trace("HOOK_START", "feature=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}")
         appContext.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? MainActivity)?.let(::use)
     }
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        trace("HOST_ATTACH", "activity=${activity.javaClass.name}")
         detach()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
@@ -501,6 +552,7 @@ internal class ElevateActorHook(private val appContext: Application) :
     }
 
     private fun detach() {
+        trace("HOST_DETACH", "bindings=${bindings.size}")
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         bindings.values.toList().forEach { it.stop() }
         bindings.clear()
@@ -515,6 +567,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         synchronized(tmdbCache) { tmdbCache.clear() }
     }
     override fun onActivityResumed(activity: Activity) {
+        trace("ACTIVITY_RESUMED", "activity=${activity.javaClass.name}")
         if (activity is MainActivity) use(activity)
     }
     override fun onActivityDestroyed(activity: Activity) {

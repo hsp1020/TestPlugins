@@ -1,6 +1,7 @@
 package com.hsp1020.elevate
 
 import android.net.Uri
+import android.util.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
@@ -19,6 +20,7 @@ import org.json.JSONObject
 
 /** Shared, validated external IDs for Elevate features. */
 internal object ElevateIdResolver {
+    private fun trace(step: String, detail: String) = Log.d("ElevateActorTrace", "ID_$step $detail")
     data class Mapping(
         val imdb: String?, val tmdb: String?, val mal: String?,
         val anilist: String?, val kitsu: String?, val movie: Boolean,
@@ -49,12 +51,14 @@ internal object ElevateIdResolver {
 
 
     suspend fun simkl(rawId: String, movie: Boolean, route: String? = null): Mapping? {
+        trace("SIMKL_INPUT", "raw=$rawId movie=$movie route=$route")
         val id = rawId.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
         val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
             ?.authData()
         val clientId = simklClientId()
             ?: auth?.let { SimklApi.getHeaders(it.token)["simkl-api-key"] }
             ?: return null
+        trace("SIMKL_AUTH", "id=$id auth=${auth != null} clientId=${clientId != null}")
         val headers = auth?.let { SimklApi.getHeaders(it.token) }
             ?: mapOf("simkl-api-key" to clientId)
         val segment = when (route) {
@@ -78,13 +82,15 @@ internal object ElevateIdResolver {
             }
             simklCache[key]?.takeIf {
                 now - it.at in 0 until if (it.value == null) 300_000L else 3_600_000L
-            }?.let { return it.value }
+            }?.let { trace("SIMKL_CACHE", "id=$id hit=true found=${it.value != null}"); return it.value }
             simklFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                trace("SIMKL_REQUEST", "id=$id movie=$movie segment=$segment")
                 val found = try {
                     simklLimiter.withPermit {
                     withTimeoutOrNull(16_000L) {
                         val params = mapOf("client_id" to clientId)
                         val resolvedSegment = segment ?: run {
+                            trace("SIMKL_LOOKUP", "id=$id")
                             val result = JSONArray(app.get("https://api.simkl.com/search/id",
                                 params = params + ("simkl" to id), headers = headers,
                                 timeout = 7L).text)
@@ -105,6 +111,7 @@ internal object ElevateIdResolver {
                                 else -> return@withTimeoutOrNull null
                             }
                         }
+                        trace("SIMKL_DETAIL", "id=$id segment=$resolvedSegment")
                         val detail = JSONObject(app.get("https://api.simkl.com/" +
                             resolvedSegment + "/" + id, params = params, headers = headers,
                             timeout = 7L).text)
@@ -131,7 +138,8 @@ internal object ElevateIdResolver {
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
-                } catch (_: Exception) { null }
+                } catch (e: Exception) { trace("SIMKL_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}"); null }
+                trace("SIMKL_RESULT", "id=$id found=$found")
                 synchronized(simklCache) {
                     val entry = Cached(System.currentTimeMillis(), found)
                     simklCache[key] = entry
@@ -159,7 +167,7 @@ internal object ElevateIdResolver {
             }
         }
         flight.start()
-        return flight.await()
+        return flight.await().also { trace("SIMKL_AWAIT", "id=$id found=${it != null}") }
     }
 
     suspend fun imdbForTmdb(rawId: String, movie: Boolean): String? {
@@ -205,21 +213,26 @@ internal object ElevateIdResolver {
 
     /** Public Simkl ID lookup, independent of the user's Simkl login state. */
     suspend fun tmdbForImdb(rawImdb: String, movie: Boolean): String? {
+        trace("IMDB_INPUT", "raw=$rawImdb movie=$movie")
         val imdb = rawImdb.takeIf(imdbPattern::matches) ?: return null
-        val clientId = simklClientId() ?: return null
+        val clientId = simklClientId()
+        trace("IMDB_CLIENT", "imdb=$imdb clientIdPresent=${clientId != null}")
+        if (clientId == null) return null
         val key = "${if (movie) "movie" else "tv"}:$imdb"
         val now = System.currentTimeMillis()
         val task = synchronized(imdbCache) {
             imdbCache[key]?.takeIf {
                 now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
-            }?.let { return it.value }
+            }?.let { trace("IMDB_CACHE", "key=$key value=${it.value}"); return it.value }
             imdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                trace("IMDB_REQUEST", "imdb=$imdb movie=$movie")
                 val result = try {
                     simklLimiter.withPermit {
                         withTimeoutOrNull(10_000L) {
                             val response = app.get("https://api.simkl.com/search/id",
                                 params = mapOf("client_id" to clientId, "imdb" to imdb),
                                 headers = mapOf("simkl-api-key" to clientId), timeout = 8L)
+                            trace("IMDB_HTTP", "imdb=$imdb code=${response.code} bytes=${response.text.length}")
                             val rows = JSONArray(response.text)
                             (0 until rows.length()).mapNotNull(rows::optJSONObject)
                                 .firstNotNullOfOrNull { entry ->
@@ -235,7 +248,8 @@ internal object ElevateIdResolver {
                         }
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
-                  catch (_: Exception) { null }
+                  catch (e: Exception) { trace("IMDB_ERROR", "imdb=$imdb error=${e.javaClass.simpleName}:${e.message}"); null }
+                trace("IMDB_RESULT", "imdb=$imdb tmdb=$result")
                 synchronized(imdbCache) {
                     imdbCache[key] = Cached(System.currentTimeMillis(), result)
                     if (imdbCache.size > 256) imdbCache.remove(imdbCache.keys.first())
@@ -251,7 +265,7 @@ internal object ElevateIdResolver {
             }
         }
         task.start()
-        return task.await()
+        return task.await().also { trace("IMDB_AWAIT", "imdb=$imdb tmdb=$it") }
     }
 
 }

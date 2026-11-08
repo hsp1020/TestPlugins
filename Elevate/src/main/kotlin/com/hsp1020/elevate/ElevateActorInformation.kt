@@ -9,6 +9,7 @@ import android.graphics.Rect
 import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewTreeObserver
@@ -95,11 +96,13 @@ internal object ElevateActorInformation {
     private suspend fun request(
         personId: Int, endpoint: String, language: String, apiKey: String
     ): JSONObject {
+        Log.d("ElevateActorTrace", "PERSON_REQUEST_START id=$personId endpoint=$endpoint language=$language keyPresent=${apiKey.isNotBlank()}")
         if (apiKey.isBlank()) throw IllegalStateException("TMDB API key is not configured")
         val url = android.net.Uri.parse("https://api.themoviedb.org/3/person/" + personId + endpoint)
             .buildUpon().appendQueryParameter("language", language)
             .appendQueryParameter("api_key", apiKey).build().toString()
         val response = app.get(url, timeout = 15L)
+        Log.d("ElevateActorTrace", "PERSON_HTTP id=$personId endpoint=$endpoint code=${response.code} bytes=${response.text.length}")
         if (response.code !in 200..299) {
             throw IllegalStateException(when (response.code) {
                 401 -> "TMDB API key was rejected (401)"
@@ -122,6 +125,7 @@ internal object ElevateActorInformation {
             }
         }
         if (hit != null) {
+            Log.d("ElevateActorTrace", "PERSON_CACHE_HIT id=$personId endpoint=$endpoint lang=$lang bytes=${hit.size}")
             runCatching { JSONObject(String(hit, Charsets.UTF_8)) }.getOrNull()?.let {
                 return it
             }
@@ -129,6 +133,7 @@ internal object ElevateActorInformation {
                 cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
             }
         }
+        Log.d("ElevateActorTrace", "PERSON_CACHE_MISS id=$personId endpoint=$endpoint lang=$lang")
         val task = synchronized(flights) {
             flights[cacheKey] ?: sharedScope.async(start = CoroutineStart.LAZY) {
                 val result = request(personId, endpoint, lang, apiKey)
@@ -217,11 +222,13 @@ internal object ElevateActorInformation {
         private val pageObserver = Observer<Resource<ResultData>?> { maybeRestore() }
 
         fun start() {
+            Log.d("ElevateActorTrace", "DIALOG_CONTROLLER_START fragment=${fragment.javaClass.name}")
             fragment.viewLifecycleOwner.lifecycle.addObserver(resumeObserver)
             model.page.observe(fragment.viewLifecycleOwner, pageObserver)
         }
 
         fun click(person: ElevateActorPersonRef, originCard: View? = null) {
+            Log.d("ElevateActorTrace", "DIALOG_CLICK id=${person.id} name=${person.name} fragment=${fragment.javaClass.name} added=${fragment.isAdded}")
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
             originActorFocus = if (isLayout(TV)) originCard else null
             focusedCreditKey = null
@@ -296,6 +303,7 @@ internal object ElevateActorInformation {
         }
 
         private fun show(originProvider: String?, actor: ElevateActorPersonRef, origin: String, resumeY: Int = 0) {
+            Log.d("ElevateActorTrace", "DIALOG_SHOW_ATTEMPT id=${actor.id} added=${fragment.isAdded} closed=$closed existing=${dialog?.isShowing}")
             if (!fragment.isAdded || closed) return
             if (dialog?.isShowing == true && currentPerson == actor && currentSource == originProvider) return
             originState = runCatching {
@@ -411,6 +419,7 @@ internal object ElevateActorInformation {
                         windowDialog.dismiss()
                     } else {
                         windowDialog.show()
+            Log.d("ElevateActorTrace", "DIALOG_SHOWN id=${actor.id} showing=${windowDialog.isShowing}")
                         focusedCreditView?.takeIf { it.isAttachedToWindow }?.let { focus ->
                             focus.post {
                                 if (dialog === windowDialog && windowDialog.isShowing &&
@@ -646,6 +655,7 @@ internal object ElevateActorInformation {
                 return
             }
             val (key, language) = configuration(fragment.requireContext())
+            Log.d("ElevateActorTrace", "DIALOG_CONFIG id=${actor.id} keyPresent=${key.isNotBlank()} language=$language")
             if (key.isBlank()) {
                 biography.text = "CloudStream TMDB API key is unavailable."
                 revealBody()
@@ -697,6 +707,7 @@ internal object ElevateActorInformation {
                         catch (e: Exception) { Result.failure<JSONObject>(e) }
                     }
                     val personResult = profile.await()
+                    Log.d("ElevateActorTrace", "PERSON_PROFILE_RESULT id=${actor.id} success=${personResult.isSuccess} error=${personResult.exceptionOrNull()?.message}")
                     if (dialog !== windowDialog || generation != ticket) return@launch
                     personResult.onSuccess { info ->
                         val birth = info.optString("birthday").takeIf { it.isNotBlank() && it != "null" }
@@ -728,6 +739,7 @@ internal object ElevateActorInformation {
                         })
                     }
                     val workResult = work.await()
+                    Log.d("ElevateActorTrace", "PERSON_CREDITS_RESULT id=${actor.id} success=${workResult.isSuccess} error=${workResult.exceptionOrNull()?.message}")
                     if (dialog !== windowDialog || generation != ticket) return@launch
                     filmArea.removeAllViews()
                     workResult.onSuccess {
@@ -952,6 +964,7 @@ internal object ElevateActorInformation {
         }
 
         fun stop() {
+            Log.d("ElevateActorTrace", "DIALOG_CONTROLLER_STOP fragment=${fragment.javaClass.name}")
             if (closed) return
             closed = true
             preserve = true
