@@ -147,7 +147,6 @@ class ElevateSettingsFragment : DialogFragment() {
             phoneHeroLabels?.alpha = if (available) 1f else 0.5f
         }
         var savePosterSettings: (() -> Unit)? = null
-        var syncDownloadButton: android.widget.Button? = null
         ElevateFeature.entries.groupBy { it.section }.forEach { (section, features) ->
             content.addView(TextView(ctx).apply {
                 text = section
@@ -375,10 +374,12 @@ class ElevateSettingsFragment : DialogFragment() {
                         }, LinearLayout.LayoutParams(
                             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                         ))
-                        selectorRow.addView(androidx.appcompat.widget.AppCompatButton(ctx).apply {
+                        selectorRow.addView(com.google.android.material.button.MaterialButton(
+                            android.view.ContextThemeWrapper(ctx, R.style.Theme_AlertDialog),
+                            null, androidx.appcompat.R.attr.buttonBarPositiveButtonStyle
+                        ).apply {
                             text = "Sync Download Files"
                             isAllCaps = false
-                            syncDownloadButton = this
                             setOnClickListener { ExternalDownloads.syncNow(ctx.applicationContext) }
                         }, LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -429,25 +430,6 @@ class ElevateSettingsFragment : DialogFragment() {
             .setTitle("Elevate Settings")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ -> savePosterSettings?.invoke() }
-            .create().apply {
-                setOnShowListener {
-                    // Use the rendered Save button's actual themed appearance, not
-                    // buttonBarPositiveButtonStyle (which is text-only in this theme).
-                    val save = getButton(AlertDialog.BUTTON_POSITIVE)
-                    syncDownloadButton?.apply {
-                        save.background?.constantState
-                            ?.newDrawable(ctx.resources, ctx.theme)?.mutate()
-                            ?.let { background = it }
-                        backgroundTintList = save.backgroundTintList
-                        setTextColor(save.textColors)
-                        typeface = save.typeface
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, save.textSize)
-                        minimumHeight = save.minimumHeight
-                        minimumWidth = save.minimumWidth
-                        setPadding(save.paddingLeft, save.paddingTop,
-                            save.paddingRight, save.paddingBottom)
-                    }
-                }
-            }
+            .create()
     }
 }

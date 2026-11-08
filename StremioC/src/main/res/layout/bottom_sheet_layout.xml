@@ -250,15 +250,16 @@
                     android:tag="stremioc_secondary" />
                 <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="24dp"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="12dp"
                     android:layout_marginTop="3dp">
                     <EditText
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
-                        android:layout_height="24dp"
+                        android:layout_height="28dp"
                         android:minHeight="0dp"
                         android:layout_gravity="top"
-                        android:gravity="top|start"
+                        android:gravity="center_vertical|start"
                         android:includeFontPadding="false"
                         android:hint="Enter TMDb API Key"
                         android:inputType="text"
@@ -279,7 +280,7 @@
                     android:gravity="top"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
-                    android:paddingTop="12dp"
+                    android:paddingTop="8dp"
                     android:paddingBottom="10dp"
                     android:focusable="true"
                     android:clickable="true"
@@ -353,13 +354,14 @@
                         <FrameLayout
                             android:layout_width="0dp"
                             android:layout_height="48dp"
-                            android:layout_weight="1">
+                            android:layout_weight="1"
+                            android:layout_marginStart="12dp">
                             <EditText
                                 android:id="@+id/etHistorySyncUrl"
                                 android:layout_width="match_parent"
                                 android:layout_height="28dp"
                                 android:layout_gravity="top"
-                                android:gravity="top|start"
+                                android:gravity="center_vertical|start"
                                 android:includeFontPadding="false"
                                 android:hint="Aiometadata URL"
                                 android:inputType="textUri"

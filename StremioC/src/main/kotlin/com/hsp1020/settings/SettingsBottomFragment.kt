@@ -462,10 +462,13 @@ class SettingsBottomFragment(
     private fun prepareInput(field: EditText) {
         field.backgroundTintList = null
         field.background = getCardBg()
-        // Keep metadata text flush below its label; background drawable may reset XML padding.
+        // Use identical heights and center the input text after applying the themed background.
         when (field.id) {
             getCachedResId("etTmdbApiKey", "id"),
-            getCachedResId("etHistorySyncUrl", "id") -> field.setPadding(dp(12), 0, dp(12), 0)
+            getCachedResId("etHistorySyncUrl", "id") -> {
+                field.setPadding(dp(12), 0, dp(12), 0)
+                field.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            }
         }
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
@@ -483,15 +486,13 @@ class SettingsBottomFragment(
         if (slot.getTag(tagKey) == true) return
         slot.setTag(tagKey, true)
         fun update() {
-            val visual = maxOf(dp(if (compactApiKey) 24 else 35), kotlin.math.ceil(
-                (field.paint.fontMetrics.bottom - field.paint.fontMetrics.top).toDouble()
-            ).toInt() + field.compoundPaddingTop + field.compoundPaddingBottom +
-                dp(if (compactApiKey) 2 else 4))
-            if (field.layoutParams.height != visual) field.layoutParams = field.layoutParams.apply { height = visual }
-            slot.minimumHeight = if (compactApiKey) visual else maxOf(dp(48), visual)
-            if (compactApiKey || slot.layoutParams.height in 1 until slot.minimumHeight)
-                if (slot.layoutParams.height != slot.minimumHeight)
-                    slot.layoutParams = slot.layoutParams.apply { height = slot.minimumHeight }
+            val visual = dp(28)
+            if (field.layoutParams.height != visual)
+                field.layoutParams = field.layoutParams.apply { height = visual }
+            val slotHeight = if (compactApiKey) visual else dp(48)
+            slot.minimumHeight = slotHeight
+            if (slot.layoutParams.height != slotHeight)
+                slot.layoutParams = slot.layoutParams.apply { height = slotHeight }
             slot.touchDelegate = TouchDelegate(Rect(0, 0, slot.width, slot.height), field)
         }
         val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> update() }
