@@ -380,9 +380,12 @@ class ElevateSettingsFragment : DialogFragment() {
                         ).apply {
                             text = "Sync Download Files"
                             isAllCaps = false
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            applyElevateNativeFont(bold = true)
+                            gravity = Gravity.CENTER
                             setOnClickListener { ExternalDownloads.syncNow(ctx.applicationContext) }
                         }, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                            ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)
                         ).apply { marginStart = dp(10) })
                         addView(selectorRow)
                     }
