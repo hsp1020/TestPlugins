@@ -1481,15 +1481,18 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         if (loaded == null) {
                             Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=native_response_missing")
                         } else {
-                            val targetPages = provider.channelLoadedPages(pageUrl)
-                                .coerceAtLeast(2).coerceAtMost(provider.channelPageLimit())
                             val beforeVideos = loaded.episodes.count { it.season == 1 }
-                            Log.i("YouTubeChannel", "event=CHANNEL_SORT_REQUEST from=$previous to=$next " +
-                                "pages=$targetPages beforeVideos=$beforeVideos")
                             channelLoading = true
                             owner.viewLifecycleOwner.lifecycleScope.launch {
                                 try {
                                     YoutubeProvider.setChannelSortMode(pageUrl, next)
+                                    // Each sort has its own paginated cache. Do not inherit
+                                    // the page depth from the previously selected sort.
+                                    val cachedPages = provider.channelLoadedPages(pageUrl)
+                                    val targetPages = cachedPages.coerceAtLeast(2)
+                                        .coerceAtMost(provider.channelPageLimit())
+                                    Log.i("YouTubeChannel", "event=CHANNEL_SORT_REQUEST from=$previous to=$next " +
+                                        "cachedPages=$cachedPages targetPages=$targetPages beforeVideos=$beforeVideos")
                                     val response = withContext(Dispatchers.IO) {
                                         provider.loadChannelPages(pageUrl, targetPages)
                                     }
@@ -1503,10 +1506,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                         Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=screen_changed")
                                         YoutubeProvider.setChannelSortMode(pageUrl, previous)
                                     } else {
-                                        val current = (model.episodes.value as? Resource.Success)
-                                            ?.value?.firstOrNull()
                                         if (deliverChannelEpisodes(model, provider, response, "sort")) {
-                                            current?.parentId?.let { setResultEpisode(it, 1) }
+                                            channelInitialExpansionStarted = false
                                             Log.i("YouTubeChannel", "event=CHANNEL_SORT_APPLIED mode=$next " +
                                                 "videos=$afterVideos first=${response.episodes.firstOrNull { it.season == 1 }?.data}")
                                         } else {
@@ -1519,7 +1520,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                         "reason=${error.javaClass.simpleName}", error)
                                 } finally {
                                     channelLoading = false
-                                    root.post { bindChannelSort(model) }
+                                    root.post {
+                                        bindChannelSort(model)
+                                        loadMoreChannelIfNeeded(model)
+                                    }
                                 }
                             }
                         }
@@ -1558,13 +1562,20 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
          */
         private suspend fun rebuildChannelEpisodes(
             model: ResultViewModel2,
-            response: TvSeriesLoadResponse
+            response: TvSeriesLoadResponse,
+            resetRange: Boolean
         ): Boolean {
             return try {
                 val field = model.javaClass.getDeclaredField("currentId").apply {
                     isAccessible = true
                 }
                 val id = field.get(model) as? Int ?: error("No native channel ID")
+                if (resetRange) {
+                    model.javaClass.getDeclaredField("preferStartEpisode").apply {
+                        isAccessible = true
+                        set(model, 1)
+                    }
+                }
                 val method = model.javaClass.declaredMethods.firstOrNull {
                     it.name == "postEpisodes" && it.parameterTypes.size == 4
                 } ?: error("Native postEpisodes method unavailable")
@@ -1609,7 +1620,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             val previous = cached.episodes.size
             cached.episodes = response.episodes
-            if (rebuildChannelEpisodes(model, cached)) {
+            cached.seasonNames = response.seasonNames
+            if (rebuildChannelEpisodes(model, cached, reason == "sort")) {
                 Log.i("YouTubeChannel", "event=CHANNEL_UI_CACHE_UPDATED reason=$reason " +
                     "before=$previous after=${cached.episodes.size} nativeEpisodesRebuilt=true")
                 return true

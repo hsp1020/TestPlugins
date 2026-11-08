@@ -3716,6 +3716,17 @@ class YoutubeProvider(
                 val html = response.text
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
                 rememberChannelSortLabels(cleanUrl, data)
+                val channelTabs = (safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs")
+                    ?: safeGet(data, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
+                fun channelTabTitle(suffix: String): String? = channelTabs?.firstNotNullOfOrNull { tab ->
+                    val endpoint = safeGet(tab, "tabRenderer", "endpoint",
+                        "commandMetadata", "webCommandMetadata", "url") as? String
+                    if (endpoint?.substringBefore("?")?.endsWith(suffix) == true) {
+                        (safeGet(tab, "tabRenderer", "title") as? String)?.takeIf { it.isNotBlank() }
+                    } else null
+                }
+                val videosTitle = channelTabTitle("/videos")
+                val shortsTitle = channelTabTitle("/shorts")
 
                 val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
                 val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -4129,6 +4140,16 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
+                    this.seasonNames = buildList {
+                        if (videosEpisodes.isNotEmpty()) {
+                            videosTitle?.let { add(SeasonData(season = 1, name = it)) }
+                            if (shortsEpisodes.isNotEmpty()) {
+                                shortsTitle?.let { add(SeasonData(season = 2, name = it)) }
+                            }
+                        } else if (shortsEpisodes.isNotEmpty()) {
+                            shortsTitle?.let { add(SeasonData(season = 1, name = it)) }
+                        }
+                    }.ifEmpty { null }
                     this.posterUrl = poster
                     this.plot = descriptionAsHtml(channelDescription).ifBlank { "\u200b" }
 
