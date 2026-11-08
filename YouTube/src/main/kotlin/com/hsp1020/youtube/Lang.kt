@@ -1,3 +1,5 @@
+package com.hsp1020.youtube
+
 import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.CloudStreamApp
