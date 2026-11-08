@@ -230,12 +230,11 @@ internal class RecommendationPosterHook(private val application: Application) :
                 prefetchJobs.add(scope.launch {
                     if (!root.isAttachedToWindow || !config.ready) return@launch
                     val tmdb = match.groupValues[2]
-                    val imdb = if (config.service == PosterService.XRDB)
-                        ElevateIdResolver.imdbForTmdb(tmdb, movie) else null
+                    val ids = PosterIds(tmdb = tmdb).preferImdb(movie)
                     val version = if (config.service == PosterService.XRDB)
                         ElevateXrdbVersion.resolve(config) else null
                     if (!root.isAttachedToWindow || setting != config) return@launch
-                    val poster = config.image(PosterIds(imdb, tmdb), movie, version)
+                    val poster = config.image(ids, movie, version)
                         ?: return@launch
                     if (poster !in unavailable) {
                         PosterWipe.prefetch(root.context, poster,
@@ -310,15 +309,13 @@ internal class RecommendationPosterHook(private val application: Application) :
                             loads.remove(image)?.cancel()
                             loads[image] = scope.launch {
                                 val tmdb = match.groupValues[2]
-                                val imdb = if (config.service == PosterService.XRDB)
-                                    ElevateIdResolver.imdbForTmdb(tmdb, movie) else null
+                                val ids = PosterIds(tmdb = tmdb).preferImdb(movie)
                                 val version = if (config.service == PosterService.XRDB)
                                     ElevateXrdbVersion.resolve(config) else null
                                 if (applied[image] == value && setting == config &&
                                     image.isAttachedToWindow) {
-                                    val ids = PosterIds(imdb, tmdb)
                                     val primary = config.image(ids, movie, version)
-                                    val alternate = if (imdb != null && config.service == PosterService.XRDB)
+                                    val alternate = if (ids.imdb != null)
                                         config.image(PosterIds(tmdb = tmdb), movie, version)
                                     else null
                                     for (poster in listOfNotNull(primary, alternate).distinct()) {
@@ -466,11 +463,11 @@ internal class RecommendationPosterHook(private val application: Application) :
                 return
             }
             unavailable.add(poster)
-            val imdbPoster = cover.alternativePoster?.takeIf { it != poster && it !in unavailable }
+            val alternatePoster = cover.alternativePoster?.takeIf { it != poster && it !in unavailable }
             cover.alternativePoster = null
-            if (imdbPoster != null) {
-                cover.custom = imdbPoster
-                loadCustom(image, cover, imdbPoster)
+            if (alternatePoster != null) {
+                cover.custom = alternatePoster
+                loadCustom(image, cover, alternatePoster)
                 return
             }
             val fallback = cover.fallback?.takeUnless { cover.fallbackAttempted }
@@ -480,7 +477,11 @@ internal class RecommendationPosterHook(private val application: Application) :
                     ?: withContext(Dispatchers.IO) { animeIds(fallback) }
                 if (covers[image] !== cover || revision != cover.generation ||
                     !image.isAttachedToWindow) return
-                val next = mapped?.let { setting.image(it, cover.fallbackMovie) }
+                val config = setting
+                val selected = mapped?.preferImdb(cover.fallbackMovie)
+                val version = if (config.service == PosterService.XRDB)
+                    ElevateXrdbVersion.resolve(config) else null
+                val next = selected?.let { config.image(it, cover.fallbackMovie, version) }
                 if (next != null && next != poster && next !in unavailable) {
                     cover.custom = next
                     loadCustom(image, cover, next)
@@ -565,23 +566,13 @@ internal class RecommendationPosterHook(private val application: Application) :
                             candidate.copy(imdb = null, tmdb = null)
                         else -> candidate
                     }
-                    val selected = if (config.service == PosterService.XRDB &&
-                        posterIds.imdb == null && posterIds.tmdb != null)
-                        posterIds.copy(imdb = ElevateIdResolver.imdbForTmdb(
-                            posterIds.tmdb, mapped.movie)) else posterIds
+                    val selected = posterIds.preferImdb(mapped.movie)
                     val version = if (config.service == PosterService.XRDB)
                         ElevateXrdbVersion.resolve(config) else null
-                    val primaryIds = if (config.service != PosterService.XRDB &&
-                        selected.tmdb != null) selected.copy(imdb = null) else selected
-                    val alternativeIds = when {
-                        selected.tmdb == null || selected.imdb == null -> null
-                        config.service == PosterService.XRDB -> selected.copy(imdb = null)
-                        else -> PosterIds(imdb = selected.imdb)
-                    }
-                    val primary = config.image(primaryIds, mapped.movie, version)
-                    val alternative = alternativeIds?.let {
-                        config.image(it, mapped.movie, version)
-                    }
+                    val primary = config.image(selected, mapped.movie, version)
+                    val alternative = if (selected.tmdb != null && selected.imdb != null)
+                        config.image(selected.copy(imdb = null), mapped.movie, version)
+                    else null
                     val poster = primary?.takeUnless { it in unavailable }
                         ?: alternative?.takeUnless { it in unavailable }
                     current.alternativePoster = alternative?.takeIf {

@@ -415,12 +415,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
         pending[image] = scope.launch {
             try {
                 val ids = withContext(Dispatchers.IO) {
-                    val mapped = resolve(item, setting.service == PosterService.XRDB)
-                    if (setting.service == PosterService.XRDB && mapped?.imdb == null &&
-                        mapped?.tmdb != null) {
-                        mapped.copy(imdb = ElevateIdResolver.imdbForTmdb(
-                            mapped.tmdb, item.type == TvType.Movie))
-                    } else mapped
+                    resolve(item, setting.service == PosterService.XRDB)
+                        ?.preferImdb(item.type == TvType.Movie || item.type == TvType.AnimeMovie)
                 }
                 if (revision != token || bound[image] !== marker ||
                     !image.isAttachedToWindow) return@launch
@@ -704,6 +700,11 @@ internal data class PosterIds(
 ) {
     val available get() = imdb != null || tmdb != null ||
         mal != null || anilist != null || kitsu != null
+
+    suspend fun preferImdb(movie: Boolean): PosterIds {
+        if (imdb != null || tmdb == null) return this
+        return copy(imdb = ElevateIdResolver.imdbForTmdb(tmdb, movie))
+    }
 }
 
 internal data class PosterConfig(
