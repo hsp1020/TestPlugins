@@ -242,19 +242,34 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val savedAnime = if (offline != null && response == null)
             ElevateOfflineMedia.anime(application, offline.parentId) else null
         if (savedAnime == true) isAnime = true
-        if (offline != null && response == null && !isAnime && savedAnime == null) {
-            // The native download generator often labels anime as TvSeries.
-            // Resolve the saved title ID without blocking the player or picking English first.
+        val onlineIds = if (!isAnime && response != null && offline == null)
+            ElevateMediaIdentity.collect(response, episode?.data) else null
+        val detectOnline = onlineIds?.let {
+            it.simkl != null || it.imdb != null || it.tmdb != null
+        } == true
+        val detectOffline = offline != null && response == null &&
+            !isAnime && savedAnime == null
+        if (detectOffline || detectOnline) {
+            // Defer fallback-language selection until existing Simkl ID mapping resolves.
+            // The same pending-track guard protects manual choices during offline detection.
             awaitingAnime = true
             val expectedFragment = fragment
             val expectedInstance = state.instance
             animeJob = scope.launch {
-                val header = withContext(Dispatchers.IO) {
-                    application.getKey<DownloadObjects.DownloadHeaderCached>(
-                        DOWNLOAD_HEADER_CACHE, offline.parentId.toString()
-                    )
+                val detected = if (detectOffline) {
+                    val header = withContext(Dispatchers.IO) {
+                        application.getKey<DownloadObjects.DownloadHeaderCached>(
+                            DOWNLOAD_HEADER_CACHE, offline!!.parentId.toString()
+                        )
+                    }
+                    header?.let { ElevateSkipRepository.isDownloadedAnime(it, offline!!) }
+                } else {
+                    val movie = (episode?.tvType ?: response?.type) in setOf(TvType.Movie, TvType.AnimeMovie)
+                    kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                        onlineIds?.let { ElevateMediaIdentity.simklMapping(it, movie) }
+                            ?.segment?.let { it == "anime" }
+                    }
                 }
-                val detected = header?.let { ElevateSkipRepository.isDownloadedAnime(it, offline) }
                 if (fragment !== expectedFragment || lastInstance != expectedInstance ||
                     lastEpisodeId != episodeId) return@launch
                 awaitingAnime = false

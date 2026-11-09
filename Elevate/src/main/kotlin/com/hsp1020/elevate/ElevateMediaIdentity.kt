@@ -170,6 +170,18 @@ internal object ElevateMediaIdentity {
             (tags.contains("animation") && tags.contains("japanese")) ||
             ids.animeIds || ids.simklAnime
     }
+    /** Reuse Elevate's exact Simkl mapping, even when only IMDb or TMDB is available. */
+    suspend fun simklMapping(ids: Ids, movie: Boolean): ElevateIdResolver.Mapping? {
+        ids.simkl?.let { ElevateIdResolver.simkl(it, movie)?.let { found -> return found } }
+        val tmdb = ids.tmdb ?: ids.imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
+        val (simklId, segment) = tmdb?.toIntOrNull()
+            ?.let { ElevateIdResolver.simklForTmdb(it, movie) } ?: return null
+        val found = ElevateIdResolver.simkl(simklId, movie, segment) ?: return null
+        if (ids.imdb != null && found.imdb != null && ids.imdb != found.imdb) return null
+        if (ids.tmdb != null && found.tmdb != null && ids.tmdb != found.tmdb) return null
+        return found
+    }
+
     suspend fun enrichSimkl(ids: Ids, movie: Boolean): Ids {
         val raw = ids.simkl ?: return ids
         val mapped = ElevateIdResolver.simkl(raw, movie) ?: return ids
