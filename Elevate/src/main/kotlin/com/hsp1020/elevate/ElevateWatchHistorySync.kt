@@ -1145,18 +1145,16 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 resolve()
             }
             syncModel?.let { model ->
+                // The native fragment observes these values first and writes to the same
+                // views. Restore the selected provider before the frame is drawn.
                 observe(model.userData, owner) {
-                    if (combo != null) {
-                        root.post { if (active) render() }
-                    }
+                    if (combo != null) render()
                 }
-                observe(model.metadata, owner) { result ->
-                    if (combo != null) {
-                        root.post { if (active) render() }
-                    }
+                observe(model.metadata, owner) {
+                    if (combo != null) render()
                 }
                 observe(model.synced, owner) {
-                    if (combo != null) root.post { if (active) render() }
+                    if (combo != null) render()
                 }
             }
         }
@@ -1650,6 +1648,14 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 return
             }
             val edit = tracker.draft ?: return
+            val completedEpisodes = ElevateWatchHistoryRules.verifiedCompletionEpisodes(
+                tracker.prefix, tracker.total, tracker.totalSource)
+            if (status == SyncWatchType.COMPLETED &&
+                (tracker.prefix == "kitsu" || tracker.prefix == "anilist") &&
+                completedEpisodes == null) {
+                render()
+                return
+            }
             edit.status = status
             val tv = tracker.simklSeason
             val anime = tracker.simklAnime
@@ -1663,6 +1669,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 edit.status == SyncWatchType.COMPLETED &&
                 tracker.totalSource == "mal-lightweight") {
                 tracker.total?.takeIf { it > 0 }?.let { edit.watched = it }
+            } else if (edit.status == SyncWatchType.COMPLETED && completedEpisodes != null) {
+                edit.watched = completedEpisodes
             }
             edit.explicitNone = edit.status == SyncWatchType.NONE
             render()
@@ -1828,6 +1836,17 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             if (tracker.writeBlocked != null || isWriteInFlight(tracker)) {
                 return
             }
+            val completedEpisodes = ElevateWatchHistoryRules.verifiedCompletionEpisodes(
+                prefix, tracker.total, tracker.totalSource)
+            if ((prefix == "kitsu" || prefix == "anilist") &&
+                draft.status == SyncWatchType.COMPLETED) {
+                if (completedEpisodes == null) {
+                    if (before.status != SyncWatchType.COMPLETED) return
+                } else {
+                    draft.watched = completedEpisodes
+                    tracker.draft?.watched = completedEpisodes
+                }
+            }
             if (prefix == "mal" && draft.status == SyncWatchType.COMPLETED &&
                 before.status != SyncWatchType.COMPLETED) {
 
@@ -1915,6 +1934,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                         if (remote.status != SyncWatchType.NONE && remote.watchedEpisodes == null)
                             remote.watchedEpisodes = 0
                         val issued = tracker.repo.updateStatus(id, remote)
+                        val verifyCompletion = completedEpisodes != null &&
+                            draft.status == SyncWatchType.COMPLETED
                         var verified = false
                         val maxAttempts=if(prefix=="mal")7 else 5
                         for (attempt in 1..maxAttempts) {
@@ -1928,7 +1949,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                             verified = got != null &&
                                 (draft.status == before.status || got.status == remote.status) &&
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
-                                (draft.score == before.score || got.score == remote.score)
+                                (draft.score == before.score || got.score == remote.score) &&
+                                (!verifyCompletion || ElevateWatchHistoryRules.completedReadbackMatches(
+                                    completedEpisodes, got.status == SyncWatchType.COMPLETED,
+                                    got.watchedEpisodes))
                             if (verified) break
                         }
                         if(!verified && prefix=="mal" && issued.getOrNull()==true) {
@@ -1952,7 +1976,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                     (draft.status == before.status || after.status == remote.status) &&
                                     (draft.watched == before.watched ||
                                         (after.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
-                                    (draft.score == before.score || after.score == remote.score)
+                                    (draft.score == before.score || after.score == remote.score) &&
+                                    (!verifyCompletion || ElevateWatchHistoryRules.completedReadbackMatches(
+                                        completedEpisodes, after.status == SyncWatchType.COMPLETED,
+                                        after.watchedEpisodes))
                             }
                         }
                         verified

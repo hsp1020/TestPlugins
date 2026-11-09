@@ -46,6 +46,19 @@ internal object ElevateWatchHistoryRules {
         clearSelectedSeason: Boolean, otherSeasons: Map<Int, Set<Int>>
     ): Boolean = clearSelectedSeason && otherSeasons.values.all { it.isEmpty() }
 
+    /** Completion must use the selected provider's own title/season episode count. */
+    fun verifiedCompletionEpisodes(provider: String, total: Int?, source: String): Int? =
+        total?.takeIf { count ->
+            count > 0 && when (provider) {
+                "kitsu" -> source == "kitsu-episodeCount"
+                "anilist" -> source == "provider-metadata" || source == "provider-status"
+                else -> false
+            }
+        }
+
+    fun completedReadbackMatches(total: Int?, completed: Boolean, watched: Int?): Boolean =
+        total != null && total > 0 && completed && watched == total
+
     /** The returned delta consists exclusively of verified episode keys in the selected season. */
     fun episodeDelta(
         available: List<Int>, watched: Set<Int>, desiredWatched: Int

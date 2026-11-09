@@ -120,6 +120,34 @@ class ElevateWatchHistoryRulesTest {
         assertTrue(rules.originalSeasonId("kitsu:invalid", singleSeason = true).isEmpty())
     }
 
+    @Test fun completionNeverUsesOtherProvidersOrUnverifiedEpisodeCounts() {
+        val rules = ElevateWatchHistoryRules
+        assertEquals(12, rules.verifiedCompletionEpisodes("kitsu", 12, "kitsu-episodeCount"))
+        assertEquals(12, rules.verifiedCompletionEpisodes("anilist", 12, "provider-metadata"))
+        assertEquals(12, rules.verifiedCompletionEpisodes("anilist", 12, "provider-status"))
+        for (provider in listOf("kitsu", "anilist")) {
+            for (source in listOf("season-mapped-peer", "single-season-peer", "unknown")) {
+                assertNull(rules.verifiedCompletionEpisodes(provider, 12, source))
+            }
+            assertNull(rules.verifiedCompletionEpisodes(provider, 0,
+                if (provider == "kitsu") "kitsu-episodeCount" else "provider-metadata"))
+        }
+        assertNull(rules.verifiedCompletionEpisodes("kitsu", 12, "provider-status"))
+        assertNull(rules.verifiedCompletionEpisodes("anilist", 12, "kitsu-episodeCount"))
+        assertNull(rules.verifiedCompletionEpisodes("mal", 12, "mal-lightweight"))
+        assertNull(rules.verifiedCompletionEpisodes("simkl", 12, "simkl-season-episode-keys"))
+    }
+
+    @Test fun completedReadbackRequiresCompletedStateAndFullProgress() {
+        val rules = ElevateWatchHistoryRules
+        assertTrue(rules.completedReadbackMatches(12, true, 12))
+        assertFalse(rules.completedReadbackMatches(12, true, 0))
+        assertFalse(rules.completedReadbackMatches(12, true, 11))
+        assertFalse(rules.completedReadbackMatches(12, false, 12))
+        assertFalse(rules.completedReadbackMatches(12, true, null))
+        assertFalse(rules.completedReadbackMatches(null, true, 12))
+    }
+
     @Test fun malformedRemoteEpisodeDataBlocksWrites() {
         assertNull(ElevateWatchHistoryRules.episodeDelta(emptyList(), emptySet(), 0))
         assertNull(ElevateWatchHistoryRules.episodeDelta(listOf(1, 1), setOf(1), 0))
