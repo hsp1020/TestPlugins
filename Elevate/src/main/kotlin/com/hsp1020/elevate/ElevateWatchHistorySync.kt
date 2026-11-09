@@ -1764,7 +1764,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     minus?.isEnabled = false
                     if (maximum?.text?.toString() != "/ ?") maximum?.text = "/ ?"
                     if (bar?.progress != 0) bar?.progress = 0
-                    if (!current?.text.isNullOrEmpty()) current?.setText("")
                     if (checks?.checkedItemCount != 0) checks?.clearChoices()
                     if (scoreLabel?.text?.toString() != "?") scoreLabel?.text = "?"
                 } finally { applying = false }
