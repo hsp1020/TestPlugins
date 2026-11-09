@@ -535,6 +535,13 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val pos = list.getChildAdapterPosition(card)
                 if (pos == RecyclerView.NO_POSITION) continue
                 card.setOnLongClickListener(searchLongPress)
+                // Native loadImage(null) leaves a recycled actor image drawable in place.
+                val visibleActor = actors?.getOrNull(pos)
+                if (visibleActor != null && adapter.getItemOrNull(pos) === visibleActor &&
+                    visibleActor.actor.image.isNullOrBlank() &&
+                    (adapter.inverted[visibleActor] != true || visibleActor.voiceActor?.image.isNullOrBlank())) {
+                    card.findViewById<android.widget.ImageView>(R.id.actor_image)?.setImageDrawable(null)
+                }
                 // AniList: leave native click and cast/voice-actor inversion untouched.
                 val person = refs?.getOrNull(pos) ?: continue
                 val actor = actors?.getOrNull(pos) ?: continue
