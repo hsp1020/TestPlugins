@@ -2,7 +2,8 @@ package com.hsp1020.elevate
 
 import android.text.Editable
 import android.text.TextWatcher
-import android.view.ContextThemeWrapper
+import android.content.Context
+import android.util.Xml
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -25,6 +26,7 @@ import com.google.android.material.slider.Slider
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.SyncWatchType
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
+import org.xmlpull.v1.XmlPullParser
 
 /** TV uses the native right-side episode treatment and the phone's sync controls. */
 internal class ElevateWatchHistoryTvUi(
@@ -72,21 +74,44 @@ internal class ElevateWatchHistoryTvUi(
     private var cached: State? = null
     private var rendering = false
 
-    /** Match the stock TV result buttons, including their icon tint and label style. */
+    /** Build from CloudStream's own TV search-button XML attributes, not a theme wrapper. */
+    private fun nativeAction(activity: Context): Pair<MaterialButton, TextView>? {
+        val parser = activity.resources.getXml(R.layout.fragment_result_tv)
+        try {
+            var button: MaterialButton? = null
+            var label: TextView? = null
+            while (parser.next() != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType != XmlPullParser.START_TAG) continue
+                val attrs = Xml.asAttributeSet(parser)
+                when (attrs.getAttributeResourceValue(
+                    "http://schemas.android.com/apk/res/android", "id", 0
+                )) {
+                    R.id.result_search_Button -> button = MaterialButton(activity, attrs)
+                    R.id.result_search_text -> label = TextView(activity, attrs)
+                }
+                if (button != null && label != null) return button to label
+            }
+        } finally {
+            parser.close()
+        }
+        return null
+    }
+
+    /** Exact native XML styling, with only the icon, translation and callback changed. */
     fun available(enabled: Boolean) {
         if (!fragment.isAdded || fragment.view == null) return
         if (enabled && action == null) {
             val parent = root.findViewById<LinearLayout>(R.id.result_play_parent) ?: return
             val activity = fragment.requireActivity()
+            val (button, label) = nativeAction(activity) ?: return
             val holder = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(-2, -2).apply {
                     marginEnd = dp(8)
                 }
             }
-            val button = MaterialButton(
-                ContextThemeWrapper(activity, R.style.ResultSmallButtonTV)
-            ).apply {
+            button.apply {
+                id = View.generateViewId()
                 layoutParams = LinearLayout.LayoutParams(dp(60), dp(40)).apply {
                     marginStart = dp(4)
                     marginEnd = dp(4)
@@ -97,15 +122,14 @@ internal class ElevateWatchHistoryTvUi(
                 text = null
                 isFocusable = true
                 contentDescription = activity.getString(R.string.upload_sync)
+                nextFocusUpId = id
                 nextFocusDownId = R.id.result_description
                 setOnClickListener { show() }
             }
-            val label = TextView(
-                ContextThemeWrapper(activity, R.style.ResultMarqueeButtonText)
-            ).apply {
+            label.apply {
+                id = View.NO_ID
+                layoutParams = LinearLayout.LayoutParams(-1, -2)
                 text = activity.getString(R.string.upload_sync)
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                setSingleLine(true)
             }
             button.setOnFocusChangeListener { _, focused -> label.isSelected = focused }
             holder.addView(button)
