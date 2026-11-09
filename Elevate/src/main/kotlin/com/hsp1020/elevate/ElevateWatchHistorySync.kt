@@ -3,8 +3,6 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -27,7 +25,6 @@ import com.lagradost.cloudstream3.ui.SyncWatchType
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
-import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.*
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -1053,7 +1050,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private var applying = false
         private var combo: AppCompatSpinner? = null
         private var comboContainer: View? = null
-        private var comboArrow: TextView? = null
         private var oldNames: TextView? = null
         private var syncModel: SyncViewModel? = null
         private val isTv = fragment.javaClass.name.endsWith("ResultFragmentTv")
@@ -1590,21 +1586,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 ).apply { bottomMargin = (10 * dp).toInt() }
                 addView(spinner, FrameLayout.LayoutParams(-1, -1))
             }
-            val arrow = TextView(activity).apply {
-                text = "▼"
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize * 0.7f)
-                setTextColor(activity.colorFromAttribute(R.attr.textColor))
-                gravity = Gravity.CENTER
-                isClickable = false
-                isFocusable = false
-            }
-            container.addView(arrow, FrameLayout.LayoutParams(
-                (40 * dp).toInt(), -1, Gravity.END))
             parent.addView(container, index)
             names.visibility = View.GONE
             combo = spinner
             comboContainer = container
-            comboArrow = arrow
             spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -1674,7 +1659,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 spinner.isEnabled = statuses.size > 1
                 spinner.isClickable = statuses.size > 1
                 spinner.isFocusable = statuses.size > 1
-                comboArrow?.visibility = if (statuses.size > 1) View.VISIBLE else View.GONE
                 val position = statuses.keys.indexOf(selected).coerceAtLeast(0)
                 if (names.isNotEmpty() && spinner.selectedItemPosition != position)
                     spinner.setSelection(position, false)
@@ -2158,7 +2142,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val spinner = combo ?: return
             (comboContainer?.parent as? android.view.ViewGroup)?.removeView(comboContainer)
             comboContainer = null
-            comboArrow = null
             combo = null
             lastProviderOptions = emptyList()
             oldNames?.visibility = View.VISIBLE

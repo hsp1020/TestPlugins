@@ -1,20 +1,32 @@
 package com.hsp1020.elevate
 
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
+import android.widget.AbsListView
+import android.widget.ArrayAdapter
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
+import androidx.activity.OnBackPressedCallback
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.slider.Slider
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.SyncWatchType
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 
-/** TV detail watch controls: native TV buttons, with no phone-style spinner. */
+/** TV uses the native right-side episode treatment and the phone's sync controls. */
 internal class ElevateWatchHistoryTvUi(
     private val fragment: Fragment,
     private val root: View,
@@ -37,45 +49,30 @@ internal class ElevateWatchHistoryTvUi(
         val scoreEnabled: Boolean,
         val error: String?
     )
+
     private val density get() = root.resources.displayMetrics.density
-    private fun dp(value: Int): Int = (value * density + 0.5f).toInt()
+    private fun dp(value: Int) = (value * density + 0.5f).toInt()
     private var actionHolder: LinearLayout? = null
     private var action: MaterialButton? = null
-    private var dialog: AlertDialog? = null
+    private var overlay: FrameLayout? = null
+    private var backCallback: OnBackPressedCallback? = null
     private var providerRow: LinearLayout? = null
-    private var statusRow: LinearLayout? = null
     private var providerButtons = emptyMap<String, MaterialButton>()
-    private var statusButtons = emptyMap<Int, MaterialButton>()
     private var selectionKeys = emptyList<String>()
-    private var titleText: TextView? = null
-    private var count: TextView? = null
-    private var rating: TextView? = null
-    private var warning: TextView? = null
+    private var current: EditText? = null
+    private var maximum: TextView? = null
+    private var progress: ProgressBar? = null
+    private var scoreText: TextView? = null
+    private var scoreSlider: Slider? = null
+    private var statuses: ListView? = null
+    private var minus: ImageView? = null
+    private var plus: ImageView? = null
     private var saveButton: MaterialButton? = null
-    private var controlButtons = emptyList<MaterialButton>()
+    private var warning: TextView? = null
     private var cached: State? = null
+    private var rendering = false
 
-    /** Same result_selection.xml / SelectableButtonTV used by native TV seasons. */
-    private fun selection(parent: LinearLayout, label: String, click: () -> Unit): MaterialButton =
-        (LayoutInflater.from(parent.context)
-            .inflate(R.layout.result_selection, parent, false) as MaterialButton).apply {
-            text = label
-            isFocusable = true
-            isFocusableInTouchMode = true
-            setOnClickListener { click() }
-            parent.addView(this)
-        }
-
-    private fun group(name: String): LinearLayout = LinearLayout(root.context).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(6), dp(4), dp(6), dp(4))
-        addView(TextView(context).apply {
-            text = name
-            textSize = 16f
-            setPadding(dp(4), 0, 0, dp(6))
-        })
-    }
-
+    /** Match the stock TV result buttons, including their icon tint and label style. */
     fun available(enabled: Boolean) {
         if (!fragment.isAdded || fragment.view == null) return
         if (enabled && action == null) {
@@ -83,11 +80,10 @@ internal class ElevateWatchHistoryTvUi(
             val activity = fragment.requireActivity()
             val holder = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) }
+                layoutParams = LinearLayout.LayoutParams(-2, -2).apply {
+                    marginEnd = dp(8)
+                }
             }
-            // Reuse the exact native ResultSmallButtonTV style and label typography.
             val button = MaterialButton(
                 ContextThemeWrapper(activity, R.style.ResultSmallButtonTV)
             ).apply {
@@ -96,22 +92,24 @@ internal class ElevateWatchHistoryTvUi(
                     marginEnd = dp(4)
                     bottomMargin = dp(4)
                 }
-                text = "History"
-                textSize = 11f
-                setAllCaps(false)
+                setIconResource(R.drawable.bookmark_star_24px)
+                iconPadding = 0
+                text = null
                 isFocusable = true
-                isFocusableInTouchMode = true
-                contentDescription = "Watch History Sync"
+                contentDescription = activity.getString(R.string.upload_sync)
+                nextFocusDownId = R.id.result_description
                 setOnClickListener { show() }
             }
-            holder.addView(button)
-            holder.addView(TextView(
+            val label = TextView(
                 ContextThemeWrapper(activity, R.style.ResultMarqueeButtonText)
             ).apply {
-                text = "Watch History"
+                text = activity.getString(R.string.upload_sync)
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 setSingleLine(true)
-            })
+            }
+            button.setOnFocusChangeListener { _, focused -> label.isSelected = focused }
+            holder.addView(button)
+            holder.addView(label)
             parent.addView(holder)
             actionHolder = holder
             action = button
@@ -120,133 +118,214 @@ internal class ElevateWatchHistoryTvUi(
         if (!enabled) dismiss()
     }
 
+    /** The actual native result_sync layout supplies the episode bar, rating and watch list. */
     private fun show() {
-        if (!fragment.isAdded || dialog?.isShowing == true) return
+        if (!fragment.isAdded || overlay != null) return
+        val host = root as? ViewGroup ?: return
         val activity = fragment.requireActivity()
-        val outer = LinearLayout(activity).apply {
+        val screenWidth = root.width.takeIf { it > 0 }
+            ?: root.resources.displayMetrics.widthPixels
+        val panelWidth = minOf(
+            screenWidth,
+            maxOf(dp(320), minOf(dp(600), (screenWidth * 0.38f).toInt()))
+        )
+        val surface = FrameLayout(activity)
+        val shade = ImageView(activity).apply {
+            setImageResource(R.drawable.episodes_shadow)
+            scaleType = ImageView.ScaleType.FIT_XY
+            if (root.layoutDirection == View.LAYOUT_DIRECTION_RTL) scaleX = -1f
+        }
+        surface.addView(shade, FrameLayout.LayoutParams(
+            minOf(screenWidth, panelWidth + dp(240)), -1, Gravity.END
+        ))
+        val panel = FrameLayout(activity).apply {
+            setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
+            isClickable = true
+        }
+        surface.addView(panel, FrameLayout.LayoutParams(panelWidth, -1, Gravity.END))
+        surface.setOnClickListener { dismiss() }
+
+        val phone = LayoutInflater.from(activity).inflate(R.layout.result_sync, panel, false)
+        panel.addView(phone, FrameLayout.LayoutParams(-1, -1))
+        phone.findViewById<View>(R.id.result_sync_loading_shimmer)?.visibility = View.GONE
+        val holder = phone.findViewById<ScrollView>(R.id.result_sync_holder)
+        holder.visibility = View.VISIBLE
+        holder.isFillViewport = false
+        val names = phone.findViewById<TextView>(R.id.result_sync_names)
+        val column = names.parent as LinearLayout
+        providerRow = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            titleText = TextView(context).apply {
-                text = "Watch History Sync"
-                textSize = 20f
-                setPadding(0, 0, 0, dp(12))
-            }.also { addView(it) }
+            setPadding(0, 0, 0, dp(10))
         }
-        val columns = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-        providerRow = group("Provider")
-        statusRow = group("Watch status")
-        columns.addView(providerRow, LinearLayout.LayoutParams(-2, -2).apply {
-            marginEnd = dp(12)
+        column.addView(providerRow, column.indexOfChild(names))
+        column.removeView(names)
+
+        current = phone.findViewById(R.id.result_sync_current_episodes)
+        maximum = phone.findViewById(R.id.result_sync_max_episodes)
+        progress = phone.findViewById(R.id.result_sync_episodes)
+        scoreText = phone.findViewById(R.id.result_sync_score_text)
+        scoreSlider = phone.findViewById(R.id.result_sync_rating)
+        statuses = phone.findViewById(R.id.result_sync_check)
+        minus = phone.findViewById(R.id.result_sync_sub_episode)
+        plus = phone.findViewById(R.id.result_sync_add_episode)
+        saveButton = phone.findViewById(R.id.result_sync_set_score)
+        warning = TextView(activity).apply {
+            setPadding(0, dp(8), 0, dp(8))
+            visibility = View.GONE
+        }
+        column.addView(warning, column.indexOfChild(saveButton))
+
+        val labels = listOf(
+            R.string.none, R.string.type_watching, R.string.type_completed,
+            R.string.type_on_hold, R.string.type_dropped,
+            R.string.type_plan_to_watch, R.string.type_re_watching
+        ).map(activity::getString)
+        statuses?.apply {
+            choiceMode = AbsListView.CHOICE_MODE_SINGLE
+            adapter = ArrayAdapter<String>(activity, R.layout.sort_bottom_single_choice, labels)
+            isNestedScrollingEnabled = false
+            val sampleWidth = View.MeasureSpec.makeMeasureSpec(
+                panelWidth - dp(32), View.MeasureSpec.EXACTLY
+            )
+            val itemAdapter = adapter
+            var totalHeight = 0
+            for (i in 0 until itemAdapter.count) {
+                val item = itemAdapter.getView(i, null, this)
+                item.measure(sampleWidth, View.MeasureSpec.makeMeasureSpec(
+                    0, View.MeasureSpec.UNSPECIFIED
+                ))
+                totalHeight += item.measuredHeight
+            }
+            layoutParams = layoutParams.apply {
+                height = totalHeight + dividerHeight * (itemAdapter.count - 1)
+            }
+            setOnItemClickListener { _, _, position, _ ->
+                onStatus(SyncWatchType.fromInternalId(position - 1))
+            }
+        }
+        listOf(minus, plus).forEach { control ->
+            control?.isFocusable = true
+            control?.isClickable = true
+        }
+        minus?.setOnClickListener { onEpisodes(-1) }
+        plus?.setOnClickListener { onEpisodes(1) }
+        current?.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (rendering || current?.hasFocus() != true) return
+                val value = s?.toString()?.toIntOrNull() ?: return
+                onEpisodes(value - (cached?.watched ?: 0))
+            }
+            override fun afterTextChanged(s: Editable?) {}
         })
-        columns.addView(statusRow, LinearLayout.LayoutParams(-2, -2).apply {
-            marginEnd = dp(12)
-        })
-        val details = group(activity.getString(R.string.episodes))
-        val episodes = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-        val epMinus = selection(episodes, "−") { onEpisodes(-1) }
-        count = TextView(activity).apply {
-            textSize = 16f
-            gravity = Gravity.CENTER
-            minWidth = dp(74)
+        scoreSlider?.apply {
+            isFocusable = true
+            addOnChangeListener { _, value, fromUser ->
+                if (fromUser && !rendering) onScore(value.toInt() - (cached?.score ?: 0))
+            }
         }
-        episodes.addView(count)
-        val epPlus = selection(episodes, "+") { onEpisodes(1) }
-        details.addView(episodes)
-        details.addView(TextView(activity).apply {
-            text = activity.getString(R.string.sync_score)
-            textSize = 16f
-            setPadding(dp(4), dp(8), 0, dp(4))
-        })
-        val scores = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-        val scMinus = selection(scores, "−") { onScore(-1) }
-        rating = TextView(activity).apply {
-            textSize = 16f
-            gravity = Gravity.CENTER
-            minWidth = dp(74)
-        }
-        scores.addView(rating)
-        val scPlus = selection(scores, "+") { onScore(1) }
-        details.addView(scores)
-        controlButtons = listOf(epMinus, epPlus, scMinus, scPlus)
-        columns.addView(details)
-        outer.addView(columns)
-        warning = TextView(activity).apply { setPadding(dp(4), dp(8), 0, dp(8)) }
-        outer.addView(warning)
-        saveButton = selection(outer, activity.getString(R.string.upload_sync)) { onSave() }
-        val scroll = ScrollView(activity).apply {
-            isFillViewport = true
-            addView(outer)
-        }
-        val created = AlertDialog.Builder(activity, R.style.AlertDialogCustom)
-            .setView(scroll)
-            .setNegativeButton(android.R.string.cancel, null)
-            .create()
-        dialog = created
-        created.setOnDismissListener {
-            dialog = null
-            providerRow = null
-            statusRow = null
-            providerButtons = emptyMap()
-            statusButtons = emptyMap()
-            selectionKeys = emptyList()
-            titleText = null
-            count = null
-            rating = null
-            warning = null
-            saveButton = null
-            controlButtons = emptyList()
-            if (fragment.isAdded && action?.visibility == View.VISIBLE) action?.requestFocus()
-        }
-        created.show()
+        saveButton?.setOnClickListener { onSave() }
+
+        overlay = surface
+        host.addView(surface, ViewGroup.LayoutParams(-1, -1))
+        backCallback = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { dismiss() }
+        }.also { activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, it) }
+        surface.alpha = 0f
+        surface.translationX = if (root.layoutDirection == View.LAYOUT_DIRECTION_RTL)
+            -dp(100).toFloat() else dp(100).toFloat()
+        surface.animate().alpha(0.97f).translationX(0f)
+            .setInterpolator(DecelerateInterpolator()).setDuration(200).start()
         cached?.let(::render)
         providerButtons[cached?.selected]?.requestFocus()
+            ?: providerButtons.values.firstOrNull()?.requestFocus()
     }
 
+    /** Render the same draft tracked by the phone implementation; no TV-specific sync API. */
     fun render(state: State) {
         cached = state
-        if (dialog?.isShowing != true) return
-        titleText?.text = "Watch History Sync" +
-            (state.season?.let { " · " + root.context.getString(R.string.season) + " " + it } ?: "")
-        if (selectionKeys != state.providers.map { it.first }) {
-            selectionKeys = state.providers.map { it.first }
-            providerRow?.let { row ->
-                row.removeViews(1, row.childCount - 1)
-                providerButtons = state.providers.associate { (id, label) ->
-                    id to selection(row, label) { onProvider(id) }
+        if (overlay == null) return
+        rendering = true
+        try {
+            if (selectionKeys != state.providers.map { it.first }) {
+                selectionKeys = state.providers.map { it.first }
+                providerRow?.let { row ->
+                    row.removeAllViews()
+                    providerButtons = state.providers.associate { (id, label) ->
+                        val button = LayoutInflater.from(row.context)
+                            .inflate(R.layout.result_selection, row, false) as MaterialButton
+                        button.text = label
+                        button.isFocusable = true
+                        button.setOnClickListener { onProvider(id) }
+                        row.addView(button)
+                        id to button
+                    }
                 }
             }
-        }
-        if (statusButtons.isEmpty()) {
-            statusRow?.let { row ->
-                val labels = listOf(R.string.none, R.string.type_watching,
-                    R.string.type_completed, R.string.type_on_hold, R.string.type_dropped,
-                    R.string.type_plan_to_watch, R.string.type_re_watching)
-                statusButtons = labels.mapIndexed { i, label ->
-                    i to selection(row, row.context.getString(label)) {
-                        onStatus(SyncWatchType.fromInternalId(i - 1))
-                    }
-                }.toMap()
+            providerButtons.forEach { (id, button) ->
+                button.isSelected = id == state.selected
             }
-        }
-        providerButtons.forEach { (id, button) -> button.isSelected = id == state.selected }
-        statusButtons.forEach { (i, button) ->
-            button.isSelected = state.status?.internalId == i - 1
-            button.isEnabled = state.enabled && state.statusEnabled
-        }
-        count?.text = (state.watched ?: 0).toString() + " / " +
-            (state.maximum?.toString() ?: "?")
-        rating?.text = (state.score?.toString() ?: "?") + " / 10"
-        controlButtons.forEachIndexed { i, button ->
-            button.isEnabled = state.enabled && (i < 2 || state.scoreEnabled)
-        }
-        saveButton?.isEnabled = state.enabled
-        warning?.apply {
-            text = state.error.orEmpty()
-            visibility = if (state.error.isNullOrBlank()) View.GONE else View.VISIBLE
+            val watched = state.watched ?: 0
+            val total = state.maximum?.takeIf { it > 0 }
+            val maxText = if (total == null) "/ ?" else "/ " + total
+            if (maximum?.text?.toString() != maxText) maximum?.text = maxText
+            val watchedText = state.watched?.toString().orEmpty()
+            if (current?.text?.toString() != watchedText) {
+                current?.setText(watchedText)
+                current?.setSelection(watchedText.length)
+            }
+            val barMax = (total ?: maxOf(1, watched)).coerceAtMost(1_000_000) * 1000
+            val barValue = watched.coerceIn(0, 1_000_000) * 1000
+            progress?.max = barMax
+            progress?.progress = barValue.coerceAtMost(barMax)
+            val checked = state.status?.internalId?.plus(1) ?: -1
+            if (checked in 0..6) statuses?.setItemChecked(checked, true)
+            else statuses?.clearChoices()
+            val score = state.score?.coerceIn(0, 10)
+            val scoreLabel = score?.let { it.toString() + "/10" } ?: "?"
+            if (scoreText?.text?.toString() != scoreLabel) scoreText?.text = scoreLabel
+            scoreSlider?.value = (score ?: 0).toFloat()
+            current?.isEnabled = state.enabled
+            minus?.isEnabled = state.enabled
+            plus?.isEnabled = state.enabled
+            statuses?.isEnabled = state.enabled && state.statusEnabled
+            scoreSlider?.isEnabled = state.enabled && state.scoreEnabled
+            saveButton?.isEnabled = state.enabled
+            warning?.apply {
+                text = state.error.orEmpty()
+                visibility = if (state.error.isNullOrBlank()) View.GONE else View.VISIBLE
+            }
+        } finally {
+            rendering = false
         }
     }
 
-    fun dismiss() { dialog?.dismiss() }
+    fun dismiss() {
+        val surface = overlay ?: return
+        overlay = null
+        backCallback?.remove()
+        backCallback = null
+        providerRow = null
+        providerButtons = emptyMap()
+        selectionKeys = emptyList()
+        current = null
+        maximum = null
+        progress = null
+        scoreText = null
+        scoreSlider = null
+        statuses = null
+        minus = null
+        plus = null
+        saveButton = null
+        warning = null
+        action?.takeIf { it.visibility == View.VISIBLE }?.requestFocus()
+        surface.animate().cancel()
+        val exit = if (root.layoutDirection == View.LAYOUT_DIRECTION_RTL) -dp(100) else dp(100)
+        surface.animate().alpha(0f).translationX(exit.toFloat())
+            .setInterpolator(DecelerateInterpolator()).setDuration(200)
+            .withEndAction { (surface.parent as? ViewGroup)?.removeView(surface) }
+            .start()
+    }
 
     fun release() {
         dismiss()
