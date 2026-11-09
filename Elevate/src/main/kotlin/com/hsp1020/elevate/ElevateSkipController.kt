@@ -1186,7 +1186,7 @@ internal object ElevateSkipRepository {
         return stamps("TheIntroDB", intervals, i)
     }
 
-    private suspend fun aniSkip(i: Identity, mapped: Mapping?): List<VideoSkipStamp> {
+    private suspend fun aniSkip(i: Identity, mapped: ElevateAnimeIdResolver.EpisodeMapping?): List<VideoSkipStamp> {
         if (!i.anime) return emptyList()
         val mal = mapped?.mal ?: i.mal ?: return emptyList()
         val episode = mapped?.episode ?: i.episode
@@ -1216,7 +1216,7 @@ internal object ElevateSkipRepository {
         return stamps("AniSkip", intervals, i)
     }
 
-    private suspend fun animeSkip(i: Identity, mapped: Mapping?): List<VideoSkipStamp> {
+    private suspend fun animeSkip(i: Identity, mapped: ElevateAnimeIdResolver.EpisodeMapping?): List<VideoSkipStamp> {
         if (!i.anime) return emptyList()
         val anilist = mapped?.anilist ?: i.anilist ?: return emptyList()
         val payload = try { PlainAuthRepo(animeSkipApi).authData()?.token?.payload }
