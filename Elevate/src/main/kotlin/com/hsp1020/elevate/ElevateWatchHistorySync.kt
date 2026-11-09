@@ -2143,8 +2143,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             active = false
             generation++
             fetchJob?.cancel()
-            writeJobs.toList().forEach { it.cancel() }
-            saveScope.cancel()
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
