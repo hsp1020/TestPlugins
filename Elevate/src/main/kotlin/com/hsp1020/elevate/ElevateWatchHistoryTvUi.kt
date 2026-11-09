@@ -178,7 +178,8 @@ internal class ElevateWatchHistoryTvUi(
         val names = phone.findViewById<TextView>(R.id.result_sync_names)
         val column = names.parent as LinearLayout
         providerRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(-1, -2)
             setPadding(0, 0, 0, dp(10))
         }
         column.addView(providerRow, column.indexOfChild(names))
@@ -279,6 +280,13 @@ internal class ElevateWatchHistoryTvUi(
                         val button = LayoutInflater.from(row.context)
                             .inflate(R.layout.result_selection, row, false) as MaterialButton
                         button.text = label
+                        button.minWidth = 0
+                        button.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                            marginStart = dp(2)
+                            marginEnd = dp(2)
+                        }
+                        button.iconPadding = 0
+                        button.setPadding(dp(2), 0, dp(2), 0)
                         button.isFocusable = true
                         button.setOnClickListener { onProvider(id) }
                         row.addView(button)
