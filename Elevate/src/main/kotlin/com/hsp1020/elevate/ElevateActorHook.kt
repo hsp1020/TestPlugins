@@ -218,7 +218,8 @@ internal class ElevateActorHook(private val appContext: Application) :
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (type == null || type == TvType.Others) && kind == "movie"
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
-            ids.anilist != null || ids.mal != null || ids.kitsu != null
+            (type in setOf(TvType.Others, TvType.Cartoon) &&
+                (ids.anilist != null || ids.mal != null))
         trace("RESOLVE_START", "url=${page.url.take(140)} type=$type ids=$ids season=$selectedSeason multi=$multiSeason anime=$anime")
         val options = if (anime) {
             if (multiSeason) emptyList() else listOf("anilist", "mal")
