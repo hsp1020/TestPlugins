@@ -157,6 +157,50 @@ class ElevateWatchHistoryRulesTest {
         assertFalse(rules.removedLibraryEntryMatches(false, null))
     }
 
+    @Test fun simklClassificationTakesPrecedenceOverSpeculativeNativeAnimeId() {
+        val r = ElevateWatchHistoryRules
+        assertFalse(r.verifiedAnime(true, true, "tv", true)) // Dexter / From
+        assertFalse(r.verifiedAnime(true, true, "movies", true))
+        assertTrue(r.verifiedAnime(true, true, "anime", false)) // Tokyo Revengers
+        assertTrue(r.verifiedAnime(true, true, null, true)) // Unknown + AIOStreams
+        assertFalse(r.verifiedAnime(true, true, null, false)) // No verification
+        assertTrue(r.verifiedAnime(true, false, null, false)) // Original Anime/Kitsu
+        assertTrue(r.verifiedAnime(false, false, "anime", false)) // Simkl-only
+    }
+
+    @Test fun wrongNativeIdsCannotReenterSyncOrLeakIntoOtherSeasons() {
+        val r = ElevateWatchHistoryRules
+        val raw = mapOf("simkl" to """{"Imdb":"tt13196080"}""",
+            "mal" to "73", "anilist" to "6887", "kitsu" to "73")
+        assertEquals(mapOf("simkl" to raw.getValue("simkl")),
+            r.verifiedSyncIds(raw, emptyMap(), true))
+        val season2 = mapOf("mal" to "50608", "anilist" to "142853")
+        assertEquals(season2, r.animeIdsForSeason(season2,
+            mapOf("anilist" to "120120"), multi = true, season = 2))
+        assertTrue(r.animeIdsForSeason(emptyMap(),
+            mapOf("anilist" to "120120"), multi = true, season = 1).isEmpty())
+        assertTrue(r.animeIdsForSeason(emptyMap(),
+            mapOf("anilist" to "120120"), multi = false, season = 2).isEmpty())
+        assertEquals(mapOf("anilist" to "120120"), r.animeIdsForSeason(
+            emptyMap(), mapOf("anilist" to "120120"), multi = false, season = 1))
+        assertEquals("142853", r.verifiedSyncIds(raw, season2, true)["anilist"])
+        assertEquals(raw, r.verifiedSyncIds(raw, season2, false))
+    }
+
+    @Test fun reverseAioRequiresIndependentIMDbTMDBAndSelectedSeason() {
+        val r = ElevateWatchHistoryRules
+        assertFalse(r.matchingAnimeIdentity(null, null,
+            "tt13196080", "105009", 1, listOf(1)))
+        assertFalse(r.matchingAnimeIdentity("tt1111111", "105009",
+            "tt13196080", "105009", 1, listOf(1)))
+        assertTrue(r.matchingAnimeIdentity("tt13196080", null,
+            "tt13196080", "105009", 2, listOf(2)))
+        assertFalse(r.matchingAnimeIdentity("tt13196080", null,
+            "tt13196080", "105009", 2, listOf(1)))
+        assertTrue(r.matchingAnimeIdentity(null, "105009",
+            "tt13196080", "105009", 1, emptyList()))
+    }
+
     @Test fun malformedRemoteEpisodeDataBlocksWrites() {
         assertNull(ElevateWatchHistoryRules.episodeDelta(emptyList(), emptySet(), 0))
         assertNull(ElevateWatchHistoryRules.episodeDelta(listOf(1, 1), setOf(1), 0))

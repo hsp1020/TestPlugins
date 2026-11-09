@@ -134,9 +134,9 @@ internal object ElevateMediaIdentity {
     fun collect(
         response: LoadResponse? = null, episodeData: String? = null,
         extraSync: Map<String, String>? = null, urls: List<String> = emptyList(),
-        episodeFirst: Boolean = false
+        episodeFirst: Boolean = false, preserveUnverifiedAnimeIds: Boolean = false
     ): Ids {
-        val ignoreNativeAnimeIds = ignoreNativeAnimeIds(response)
+        val ignoreNativeAnimeIds = !preserveUnverifiedAnimeIds && ignoreNativeAnimeIds(response)
         val native = if (response == null) Ids() else Ids(
             imdb(response.getImdbId()), number(response.getTMDbId(), "tmdb"),
             if (ignoreNativeAnimeIds) null else number(response.getMalId(), "mal"),

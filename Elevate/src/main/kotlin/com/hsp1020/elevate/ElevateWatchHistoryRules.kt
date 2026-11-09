@@ -11,6 +11,42 @@ internal object ElevateWatchHistoryRules {
         else -> MediaMode.SINGLE_ANIME
     }
 
+    /** Simkl's explicit non-anime result overrides speculative native anime IDs. */
+    fun verifiedAnime(native: Boolean, speculative: Boolean, segment: String?,
+        aioConfirmed: Boolean): Boolean =
+        if (!speculative) native || segment == "anime" else when (segment) {
+            "anime" -> true
+            "tv", "movies" -> false
+            else -> aioConfirmed
+        }
+
+    /** A reverse anime-ID lookup needs a separate IMDb/TMDB anchor and the selected season. */
+    fun matchingAnimeIdentity(imdb: String?, tmdb: String?, mappedImdb: String?,
+        mappedTmdb: String?, season: Int, seasonClaims: Collection<Int?>): Boolean {
+        val matched = (imdb != null && imdb == mappedImdb) ||
+            (tmdb != null && tmdb == mappedTmdb)
+        return matched && (imdb == null || mappedImdb == null || imdb == mappedImdb) &&
+            (tmdb == null || mappedTmdb == null || tmdb == mappedTmdb) &&
+            consistentSeason(season, seasonClaims)
+    }
+
+    /** Never reuse a title-wide Simkl anime ID for another or an unverified season. */
+    fun animeIdsForSeason(aio: Map<String, String>, simkl: Map<String, String>,
+        multi: Boolean, season: Int): Map<String, String> = when {
+        aio.isNotEmpty() -> aio
+        !multi && season == 1 -> simkl
+        else -> emptyMap()
+    }
+
+    /** Discard speculative native IDs before merging verified IDs into provider sync data. */
+    fun verifiedSyncIds(raw: Map<String, String>, trusted: Map<String, String>,
+        speculative: Boolean): Map<String, String> {
+        if (!speculative) return raw
+        val animeKeys = setOf("mal", "anilist", "kitsu")
+        return raw.filterKeys { it !in animeKeys } +
+            trusted.filterKeys { it in animeKeys }
+    }
+
     /** StremioC selects the first valid IMDb, TVDB, Trakt or TMDB season. */
     fun preferredSeason(claims: List<Int?>): Int? = claims.firstOrNull { it != null && it > 0 }
 

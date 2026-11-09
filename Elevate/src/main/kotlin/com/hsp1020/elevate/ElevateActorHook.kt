@@ -224,16 +224,24 @@ internal class ElevateActorHook(private val appContext: Application) :
             ElevateMediaIdentity.simklMapping(
                 ElevateMediaIdentity.Ids(imdb = ids.imdb, tmdb = ids.tmdb, simkl = ids.simkl), movie)
             else null
-        if (simklMapping?.segment == "anime") {
-            if (movie) return simklMapping.anilist?.let { anilist(it) }
-                ?: simklMapping.mal?.let { animeMapped("mal", it) }
-            val imdb = ids.imdb ?: simklMapping.imdb
-            if (imdb != null && selectedSeason != null) {
-                val mapped = ElevateAnimeIdResolver.resolveImdbSeason(imdb, selectedSeason)
-                mapped?.anilist?.let { anilist(it) }?.let { return it }
+        val aioMapping = if (!nativeAnime && simklMapping == null && !movie &&
+            selectedSeason != null) {
+            val imdb = ids.imdb ?: ids.tmdb?.let {
+                ElevateIdResolver.imdbForTmdb(it, false)
             }
-            // Simkl title-wide IDs are not verified for other seasons.
-            return if (!multiSeason && (selectedSeason == null || selectedSeason == 1))
+            imdb?.let { ElevateAnimeIdResolver.resolveImdbSeason(it, selectedSeason) }
+        } else null
+        if (simklMapping?.segment == "anime" || aioMapping != null) {
+            if (movie) return simklMapping?.anilist?.let { anilist(it) }
+                ?: simklMapping?.mal?.let { animeMapped("mal", it) }
+            val imdb = ids.imdb ?: simklMapping?.imdb
+            val mapped = aioMapping ?: if (imdb != null && selectedSeason != null)
+                ElevateAnimeIdResolver.resolveImdbSeason(imdb, selectedSeason) else null
+            mapped?.anilist?.let { anilist(it) }?.let { return it }
+            mapped?.mal?.let { animeMapped("mal", it) }?.let { return it }
+            // Never use a title-wide AniList ID as another season's cast.
+            return if (simklMapping?.segment == "anime" && !multiSeason &&
+                (selectedSeason == null || selectedSeason == 1))
                 simklMapping.anilist?.let { anilist(it) }
                     ?: simklMapping.mal?.let { animeMapped("mal", it) }
                 else null

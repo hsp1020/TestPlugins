@@ -1030,6 +1030,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         }.getOrNull()
         private var mediaIds = ElevateMediaIdentity.Ids()
         private var animePage = false
+        private var speculativeAnimeIds = false
         private var episodeBased = true
         private var rawSyncs: Map<String,String> = emptyMap()
         private var seasonEpisodeIds: Map<Int, Map<String, String>> = emptyMap()
@@ -1173,8 +1174,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private fun updateMetadata(page: ResultData) {
             val response = runCatching { responseField?.get(resultModel) as? LoadResponse }
                 .getOrNull()?.takeIf { it.url == page.url }
+            speculativeAnimeIds = ElevateMediaIdentity.ignoreNativeAnimeIds(response)
             mediaIds = ElevateMediaIdentity.collect(response,
-                extraSync = page.syncData, urls = listOf(page.url))
+                extraSync = page.syncData, urls = listOf(page.url),
+                preserveUnverifiedAnimeIds = speculativeAnimeIds)
             episodeBased = response?.type !in setOf(TvType.Movie, TvType.AnimeMovie) &&
                 !page.url.contains("/meta/movie/", ignoreCase = true)
             // Episode data is season-local. A page-level MAL/Kitsu ID is not
@@ -1202,10 +1205,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 seasonEpisodeIds.values.any { ids ->
                     ids.keys.any { it == "mal" || it == "anilist" || it == "kitsu" }
                 }
-            val safeSyncData = if (ElevateMediaIdentity.ignoreNativeAnimeIds(response)) {
-                page.syncData.filterKeys { it != "mal" && it != "anilist" && it != "kitsu" }
-            } else page.syncData
-            rawSyncs = LinkedHashMap(safeSyncData).apply {
+            // Keep source IDs for verification; never publish unverified anime IDs.
+            rawSyncs = LinkedHashMap(page.syncData).apply {
                 mediaIds.asMap().forEach { (key, value) ->
                     if (!containsKey(key)) {
                         put(key, if (key == "simkl") JSONObject().put("Simkl", value).toString()
@@ -1257,10 +1258,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val initialIds = mediaIds
             val initialSync = rawSyncs
             val initialAnime = animePage
+            val speculative = speculativeAnimeIds
             val multi = maxOf(seasonNumbers.size, responseSeasons.size) > 1
             // Explicit episode IDs or an independent single-season URL can
             // identify Kitsu/MAL/AniList even when IMDb is entirely absent.
-            val localIds = ElevateWatchHistoryRules.seasonIdsFor(
+            val originalLocalIds = ElevateWatchHistoryRules.seasonIdsFor(
                 sn, seasonEpisodeIds
             ).ifEmpty {
                 if (initialAnime && !multi)
@@ -1273,25 +1275,101 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             // Do not inflate the custom spinner during the result-page
             // transition. Create it only if a matched sync provider exists.
             fetchJob = scope.launch {
-                // A Simkl-only work may be anime even when the provider uses TvSeries.
-                // Resolve its segment and IDs through Elevate's shared identity cache.
-                val effectiveIds = if ((initialIds.simkl != null ||
-                        !initialAnime && (initialIds.imdb != null || initialIds.tmdb != null)) &&
-                    (!initialAnime || initialIds.imdb == null)) {
-                    try { withContext(Dispatchers.IO) {
-                        ElevateMediaIdentity.enrichSimkl(initialIds, movie)
-                    } } catch (e: CancellationException) { throw e }
-                      catch (_: Exception) { initialIds }
-                } else initialIds
+                // A speculative native anime ID must not preempt the shared Simkl
+                // classification even when the native page also has an IMDb ID.
+                val checkSimkl = speculative || initialIds.simkl != null &&
+                    (!initialAnime || initialIds.imdb == null) ||
+                    !initialAnime && (initialIds.imdb != null || initialIds.tmdb != null)
+                val simkl = if (checkSimkl) try { withContext(Dispatchers.IO) {
+                    ElevateMediaIdentity.simklMapping(initialIds, movie)
+                } } catch (e: CancellationException) { throw e }
+                  catch (_: Exception) { null } else null
                 if (!valid(gen, sn)) return@launch
-                val isAnime = initialAnime || effectiveIds.simklAnime
+                // Unknown Simkl: use the existing AIOStreams IMDb/season mapping or
+                // require independent IMDb/TMDB agreement for source-anime-ID lookups.
+                // TVDB/Simkl-only AIO mappings are not proof of anime.
+                val seasonMapping = if (speculative && simkl?.segment !in setOf("tv", "movies"))
+                    try { withContext(Dispatchers.IO) {
+                        val imdb = initialIds.imdb ?: simkl?.imdb ?:
+                            initialIds.tmdb?.let { ElevateIdResolver.imdbForTmdb(it, movie) }
+                        val tmdb = initialIds.tmdb ?: simkl?.tmdb
+                        fun ElevateAnimeIdResolver.Mapping.hasAnime() =
+                            mal != null || anilist != null || kitsu != null
+                        val direct = imdb?.let {
+                            ElevateAnimeIdResolver.resolveTrackingImdbSeason(it, sn)
+                                ?.takeIf { mapped -> mapped.hasAnime() && mapped.matchesSeason(sn) }
+                        }
+                        if (direct != null) direct else if (imdb == null && tmdb == null) null else {
+                            val candidates = listOf("mal", "anilist", "kitsu")
+                            var verified: ElevateAnimeIdResolver.Mapping? = null
+                            for (prefix in candidates) {
+                                val id = originalLocalIds[prefix] ?:
+                                    initialIds.asMap()[prefix] ?: continue
+                                val mapped = ElevateAnimeIdResolver.resolveTrackingSource(prefix, id)
+                                    ?: continue
+                                if (mapped.hasAnime() && ElevateWatchHistoryRules.matchingAnimeIdentity(
+                                    imdb, tmdb, mapped.imdb, mapped.tmdb, sn,
+                                    listOf(mapped.imdbSeason, mapped.tvdbSeason,
+                                        mapped.traktSeason, mapped.tmdbSeason))) {
+                                    verified = mapped
+                                    break
+                                }
+                            }
+                            verified
+                        }
+                    } } catch (e: CancellationException) { throw e }
+                      catch (_: Exception) { null } else null
+                if (!valid(gen, sn)) return@launch
+                val isAnime = ElevateWatchHistoryRules.verifiedAnime(
+                    initialAnime, speculative, simkl?.segment, seasonMapping != null)
+                val aioIds = buildMap<String, String> {
+                    seasonMapping?.mal?.let { put("mal", it) }
+                    seasonMapping?.anilist?.let { put("anilist", it) }
+                    seasonMapping?.kitsu?.let { put("kitsu", it) }
+                }
+                val simklIds = if (simkl?.segment == "anime") buildMap<String, String> {
+                    simkl.mal?.let { put("mal", it) }
+                    simkl.anilist?.let { put("anilist", it) }
+                    simkl.kitsu?.let { put("kitsu", it) }
+                } else emptyMap()
+                val trustedIds = if (speculative && isAnime)
+                    ElevateWatchHistoryRules.animeIdsForSeason(aioIds, simklIds, multi, sn)
+                    else emptyMap()
+                val effectiveIds = if (speculative) initialIds.copy(
+                    imdb = initialIds.imdb ?: simkl?.imdb,
+                    tmdb = initialIds.tmdb ?: simkl?.tmdb,
+                    mal = trustedIds["mal"], anilist = trustedIds["anilist"],
+                    kitsu = trustedIds["kitsu"], simklAnime = isAnime
+                ) else if (simkl != null) initialIds.merge(ElevateMediaIdentity.Ids(
+                    simkl.imdb, simkl.tmdb, simkl.mal, simkl.anilist, simkl.kitsu,
+                    simklAnime = simkl.segment == "anime"
+                )) else initialIds
+                // Prevent episode-level IDs from re-entering the wrong title or season.
+                val localIds = if (speculative)
+                    if (isAnime && seasonMapping != null) aioIds else emptyMap()
+                    else originalLocalIds
                 val seasonAwareAnime = isAnime && multi
-                val syncs = LinkedHashMap(initialSync).apply {
+                val syncs = LinkedHashMap(ElevateWatchHistoryRules.verifiedSyncIds(
+                    initialSync, trustedIds, speculative)).apply {
                     effectiveIds.asMap().forEach { (key, value) ->
                         if (!containsKey(key)) {
                             put(key, if (key == "simkl")
                                 JSONObject().put("Simkl", value).toString() else value)
                         }
+                    }
+                }
+                if (speculative) {
+                    // A native Simkl sync may indirectly contain a stale {"Mal":"..."}.
+                    // Rebind that value to verified MAL or drop it, never reuse the raw ID.
+                    val simklSource = syncs["simkl"]
+                        ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    if (simklSource != null &&
+                        listOf("Simkl", "Imdb", "Tmdb").none { simklSource.has(it) } &&
+                        listOf("Mal", "AniList", "Kitsu").any { simklSource.has(it) }) {
+                        val validatedMal = trustedIds["mal"]
+                        if (validatedMal != null)
+                            syncs["simkl"] = JSONObject().put("Mal", validatedMal).toString()
+                        else syncs.remove("simkl")
                     }
                 }
                 if (!isAnime && !syncs.containsKey("simkl")) {
@@ -1354,7 +1432,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     if (isSpecialSeason(sn)) emptyMap() else {
                         val imdb = effectiveIds.imdb ?: IMDb.find(url)?.value
                         val mapping = try { withContext(Dispatchers.IO) {
-                            val byImdb = imdb?.let {
+                            val byImdb = seasonMapping ?: imdb?.let {
                                 ElevateAnimeIdResolver.resolveTrackingImdbSeason(it, sn)
                                     ?.takeIf { mapping -> mapping.matchesSeason(sn) }
                             }
