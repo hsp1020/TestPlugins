@@ -74,7 +74,6 @@ internal object SyncRuntime {
                 }
             }.getOrDefault(false)
         } else false
-        if (verifiedWithoutUpdates && !onlineReady)
         onlineReady = coreOnlineReady || verifiedWithoutUpdates
         pluginsLoaded = localReady && onlineReady
         return pluginsLoaded
