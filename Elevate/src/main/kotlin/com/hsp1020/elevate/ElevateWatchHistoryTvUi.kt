@@ -60,6 +60,7 @@ internal class ElevateWatchHistoryTvUi(
     private var backCallback: OnBackPressedCallback? = null
     private var providerRow: LinearLayout? = null
     private var providerButtons = emptyMap<String, MaterialButton>()
+    private var providerChecks = emptyMap<String, ImageView>()
     private var selectionKeys = emptyList<String>()
     private var current: EditText? = null
     private var maximum: TextView? = null
@@ -266,6 +267,13 @@ internal class ElevateWatchHistoryTvUi(
             ?: providerButtons.values.firstOrNull()?.requestFocus()
     }
 
+    private fun updateProviderCheck(button: MaterialButton, check: ImageView) {
+        check.visibility = if (button.isSelected) View.VISIBLE else View.INVISIBLE
+        button.iconTint?.let { tint ->
+            check.setColorFilter(tint.getColorForState(button.drawableState, tint.defaultColor))
+        }
+    }
+
     /** Render the same draft tracked by the phone implementation; no TV-specific sync API. */
     fun render(state: State) {
         cached = state
@@ -276,26 +284,54 @@ internal class ElevateWatchHistoryTvUi(
                 selectionKeys = state.providers.map { it.first }
                 providerRow?.let { row ->
                     row.removeAllViews()
+                    val checks = mutableMapOf<String, ImageView>()
                     providerButtons = state.providers.associate { (id, label) ->
+                        val frame = FrameLayout(row.context).apply {
+                            layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                                marginStart = dp(2)
+                                marginEnd = dp(2)
+                            }
+                        }
                         val button = LayoutInflater.from(row.context)
-                            .inflate(R.layout.result_selection, row, false) as MaterialButton
+                            .inflate(R.layout.result_selection, frame, false) as MaterialButton
                         button.text = label
                         button.minWidth = 0
-                        button.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                            marginStart = dp(2)
-                            marginEnd = dp(2)
-                        }
-                        button.iconPadding = 0
+                        button.layoutParams = FrameLayout.LayoutParams(-1, -1)
+                        button.icon = null
+                        button.gravity = Gravity.CENTER
                         button.setPadding(dp(2), 0, dp(2), 0)
                         button.isFocusable = true
                         button.setOnClickListener { onProvider(id) }
-                        row.addView(button)
+                        val iconSize = dp(16)
+                        val check = ImageView(row.context).apply {
+                            setImageResource(R.drawable.ic_baseline_check_24_listview)
+                            layoutParams = FrameLayout.LayoutParams(
+                                iconSize, iconSize, Gravity.LEFT or Gravity.CENTER_VERTICAL
+                            )
+                            isClickable = false
+                            isFocusable = false
+                        }
+                        button.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                            val nameStart = (button.width -
+                                button.paint.measureText(button.text.toString())) / 2f
+                            check.translationX = (nameStart / 2f - iconSize / 2f)
+                                .coerceAtLeast(0f)
+                        }
+                        button.setOnFocusChangeListener { _, _ ->
+                            updateProviderCheck(button, check)
+                        }
+                        frame.addView(button)
+                        frame.addView(check)
+                        row.addView(frame)
+                        checks[id] = check
                         id to button
                     }
+                    providerChecks = checks
                 }
             }
             providerButtons.forEach { (id, button) ->
                 button.isSelected = id == state.selected
+                providerChecks[id]?.let { updateProviderCheck(button, it) }
             }
             val watched = state.watched ?: 0
             val total = state.maximum?.takeIf { it > 0 }
@@ -339,6 +375,7 @@ internal class ElevateWatchHistoryTvUi(
         backCallback = null
         providerRow = null
         providerButtons = emptyMap()
+        providerChecks = emptyMap()
         selectionKeys = emptyList()
         current = null
         maximum = null
