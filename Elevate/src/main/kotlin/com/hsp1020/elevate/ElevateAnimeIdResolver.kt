@@ -17,7 +17,10 @@ import org.json.JSONObject
 internal object ElevateAnimeIdResolver {
     internal data class Mapping(
         val kitsu: String?, val mal: String?, val anilist: String?,
-        val imdb: String?, val tmdb: String?, val fromEpisode: Int? = null
+        val imdb: String?, val tmdb: String?, val fromEpisode: Int? = null,
+        val simkl: String? = null, val tvdb: String? = null,
+        val tvdbSeason: Int? = null, val tmdbSeason: Int? = null,
+        val traktSeason: Int? = null
     )
     internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int)
 
@@ -48,7 +51,7 @@ internal object ElevateAnimeIdResolver {
 
     /** Resolve an IMDb title at the selected season, independently of StremioC. */
     suspend fun resolveImdbSeason(rawId: String, season: Int): Mapping? {
-        val id = rawId.takeIf { it.matches(Regex("tt[0-9]{5,10}")) } ?: return null
+        val id = rawId.takeIf { it.matches(Regex("tt[0-9]+")) } ?: return null
         if (season <= 0) return null
         return resolveByField("imdbId", id, season)
     }
@@ -128,7 +131,11 @@ internal object ElevateAnimeIdResolver {
                             kitsu, mal, anilist,
                             ids.optString("imdbId").takeIf { it.matches(Regex("tt[0-9]+")) },
                             positive("themoviedbId"),
-                            episodeInfo?.optInt("fromEpisode")?.takeIf { it > 0 }
+                            episodeInfo?.optInt("fromEpisode")?.takeIf { it > 0 },
+                            positive("simklId"), positive("thetvdbId"),
+                            data.optJSONObject("tvdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
+                            data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
+                            data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 }
                         )
                         break
                     }

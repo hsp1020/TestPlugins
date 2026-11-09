@@ -82,6 +82,7 @@ class ElevatePlugin : Plugin() {
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
     private var historyReporter: ElevateHistoryReporter? = null
+    private var watchHistoryHook: ElevateWatchHistoryHook? = null
     private var mdbRatings: ElevateMdbRatings? = null
     private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
     private var episodeProgress: EpisodeProgressHook? = null
@@ -209,6 +210,14 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
+        }
+        if (enabled(ElevateFeature.WATCH_HISTORY_SYNC)) {
+            if (watchHistoryHook == null) {
+                watchHistoryHook = ElevateWatchHistoryHook(application).also { it.start() }
+            }
+        } else {
+            watchHistoryHook?.stop()
+            watchHistoryHook = null
         }
         if (enabled(ElevateFeature.HISTORY_SYNC)) {
             if (historyReporter == null) {
@@ -481,6 +490,8 @@ class ElevatePlugin : Plugin() {
         downloadPickerPresentation = null
         externalQueueBridge?.stop()
         externalQueueBridge = null
+        watchHistoryHook?.stop()
+        watchHistoryHook = null
         historyReporter?.stop()
         historyReporter = null
         mdbRatings?.stop()

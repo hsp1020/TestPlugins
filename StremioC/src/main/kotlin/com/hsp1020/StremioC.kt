@@ -3385,27 +3385,6 @@ open class StremioC(
         val tmdbMediaType: String? = null
     )
 
-    internal suspend fun seasonTrackerIds(imdbId: String, season: Int): SeasonTrackerIds? {
-        if (!IMDB_ID_REGEX.matches(imdbId) || season <= 0) return null
-        val mapped = fetchAnimeSeasonMapping(LoadData(
-            id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
-        )) ?: return null
-        if (mapped.imdbId != imdbId) {
-            return null
-        }
-
-        if (season > 1 && mapped.imdbSeason != season &&
-            mapped.tvdbSeason != season && mapped.traktSeason != season &&
-            mapped.tmdbSeason != season) {
-            return null
-        }
-        return SeasonTrackerIds(mapped.malId, mapped.aniListId,
-            mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
-            mapped.tvdbSeason, mapped.tmdbSeason)
-            .takeIf { it.mal != null || it.aniList != null || it.kitsu != null ||
-                it.simkl != null }
-    }
-
     internal suspend fun playbackTrackerIds(loadData: LoadData): SeasonTrackerIds? {
         val mapped = fetchAnimeSeasonMapping(loadData) ?: return null
         return SeasonTrackerIds(mapped.malId, mapped.aniListId,

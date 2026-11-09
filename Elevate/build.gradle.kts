@@ -10,6 +10,7 @@ cloudstream {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     compileOnly("io.coil-kt.coil3:coil:3.3.0")
     compileOnly("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
     compileOnly("com.github.LagradOst:SafeFile:0.0.8")
