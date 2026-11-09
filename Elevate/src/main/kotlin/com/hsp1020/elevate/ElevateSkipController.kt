@@ -995,10 +995,8 @@ internal object ElevateSkipRepository {
         val ids = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
         val movie = response.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
-        val independent = ids.original?.substringBefore(':') in setOf("kitsu", "mal", "anilist")
         return Identity(ids.imdb, ids.tmdb, ids.mal, ids.anilist, ids.kitsu,
-            if (independent) episode.season ?: 1 else ids.imdbSeason ?: episode.season,
-            if (independent) episode.episode else ids.imdbEpisode ?: episode.episode,
+            episode.season ?: ids.imdbSeason, episode.episode,
             ElevateMediaIdentity.anime(response, episode, ids),
             movie, duration, episode.totalEpisodeIndex, ids.simkl, ids.original)
     }

@@ -11,15 +11,12 @@ internal object ElevateWatchHistoryRules {
         else -> MediaMode.SINGLE_ANIME
     }
 
-    /** Reject conflicting season claims, rather than accepting any one matching provider. */
-    fun consistentSeason(season: Int, claims: Collection<Int?>): Boolean {
-        val known = claims.filterNotNull().filter { it > 0 }
-        return season > 0 && known.isNotEmpty() && known.all { it == season }
-    }
+    /** StremioC selects the first valid IMDb, TVDB, Trakt or TMDB season. */
+    fun preferredSeason(claims: List<Int?>): Int? = claims.firstOrNull { it != null && it > 0 }
 
-    /** AIO and episode-local IDs must never be mixed when they disagree. */
-    fun compatibleIds(mapped: Map<String, String>, local: Map<String, String>): Boolean =
-        local.all { (key, value) -> mapped[key] == null || mapped[key] == value }
+    /** StremioC accepts season 1 or any matching provider claim for later seasons. */
+    fun consistentSeason(season: Int, claims: Collection<Int?>): Boolean =
+        season > 0 && (season == 1 || claims.any { it == season })
 
     /** A standalone MAL/Kitsu/AniList page is already a specific anime season. */
     fun originalSeasonId(original: String?, singleSeason: Boolean): Map<String, String> {
@@ -38,20 +35,16 @@ internal object ElevateWatchHistoryRules {
         return selected?.takeIf { it > 0 }
     }
 
-    /** Don't reuse a shared series ID as if it belonged to a single season. */
-    fun independentSeasonIds(season: Int, bySeason: Map<Int, Map<String, String>>)
-        : Map<String, String> = bySeason[season].orEmpty().filter { (key, value) ->
-        value.isNotBlank() && bySeason.none { (other, ids) ->
-            other != season && ids[key] == value
-        }
-    }
+    /** Keep IDs found in this season even when another season shares them. */
+    fun seasonIdsFor(season: Int, bySeason: Map<Int, Map<String, String>>)
+        : Map<String, String> = bySeason[season].orEmpty().filterValues { it.isNotBlank() }
 
     fun specialSeasonLabel(label: String): Boolean =
         label.trim().let { it.equals("S", ignoreCase = true) || it.endsWith(" S") }
 
     fun canRemoveWholeSeries(
         clearSelectedSeason: Boolean, otherSeasons: Map<Int, Set<Int>>
-    ): Boolean = clearSelectedSeason && otherSeasons.isEmpty()
+    ): Boolean = clearSelectedSeason && otherSeasons.values.all { it.isEmpty() }
 
     /** The returned delta consists exclusively of verified episode keys in the selected season. */
     fun episodeDelta(

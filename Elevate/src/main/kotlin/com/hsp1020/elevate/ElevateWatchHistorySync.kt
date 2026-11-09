@@ -1221,16 +1221,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 seasonNumbers, selectionIndex, episodeBased
             ) ?: if (seasonNumbers.isEmpty() && episodeBased)
                 responseSeasons.singleOrNull() else null
-            if (chosen == null || chosen <= 0) {
-                if (season != null) {
-                    generation++
-                    reset()
-                    teardownUi()
-                    season = null
-                    resolvedSeasonInputs = null
-                }
-                return
-            }
+            if (chosen == null || chosen <= 0) return
             val inputs = SeasonInput(chosen, seasonNumbers.toList(), rawSyncs.toMap(),
                 mediaIds, seasonEpisodeIds[chosen].orEmpty())
             if (inputs == resolvedSeasonInputs) return
@@ -1242,7 +1233,6 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
 
         private fun reset() {
             fetchJob?.cancel()
-            writeJobs.toList().forEach { it.cancel() }
             fetchJob = null
             statuses.clear()
             selected = null
@@ -1259,7 +1249,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val multi = maxOf(seasonNumbers.size, responseSeasons.size) > 1
             // Explicit episode IDs or an independent single-season URL can
             // identify Kitsu/MAL/AniList even when IMDb is entirely absent.
-            val localIds = ElevateWatchHistoryRules.independentSeasonIds(
+            val localIds = ElevateWatchHistoryRules.seasonIdsFor(
                 sn, seasonEpisodeIds
             ).ifEmpty {
                 if (initialAnime && !multi)
@@ -1332,16 +1322,14 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                         mapped?.kitsu?.let { put("kitsu", it) }
                         mapped?.simkl?.let { put("simkl", it) }
                     }
-                    val accepted = candidates.takeIf {
-                        ElevateWatchHistoryRules.compatibleIds(it, localIds)
-                    }.orEmpty()
+                    val accepted = candidates
                     linkedMapOf<String, String>().apply {
                         accepted.forEach { (key, value) ->
                             put(key, if (key == "simkl")
                                 JSONObject().put("Simkl", value).toString() else value)
                         }
                         localIds.forEach { (key, value) ->
-                            put(key, if (key == "simkl")
+                            putIfAbsent(key, if (key == "simkl")
                                 JSONObject().put("Simkl", value).toString() else value)
                         }
                         if (!containsKey("simkl")) {
@@ -1368,7 +1356,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                         ?: effectiveIds.asMap()[prefix]
                                         ?: continue
                                     val mapped = ElevateAnimeIdResolver.resolveTrackingSource(prefix, value)
-                                    if (mapped?.matchesSeason(sn) == true) {
+                                    if (mapped != null) {
                                         verified = mapped
                                         break
                                     }
@@ -1377,22 +1365,12 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                             }
                         } } catch (e: CancellationException) { throw e }
                           catch (_: Exception) { null }
-                        // Reject AIO data that conflicts with independently
-                        // identified season-local metadata, including its Simkl ID.
-                        val mappedLocal = linkedMapOf<String, String>().apply {
-                            mapping?.mal?.let { put("mal", it) }
-                            mapping?.anilist?.let { put("anilist", it) }
-                            mapping?.kitsu?.let { put("kitsu", it) }
-                            mapping?.simkl?.let { put("simkl", it) }
-                        }
-                        val verified = mapping?.takeIf {
-                            ElevateWatchHistoryRules.compatibleIds(mappedLocal, localIds)
-                        }
+                        val verified = mapping
                         mappedSeason = SeasonTrackerIds(
-                            localIds["mal"]?.toIntOrNull() ?: verified?.mal?.toIntOrNull(),
-                            localIds["anilist"]?.toIntOrNull() ?: verified?.anilist?.toIntOrNull(),
-                            localIds["kitsu"]?.toIntOrNull() ?: verified?.kitsu?.toIntOrNull(),
-                            localIds["simkl"]?.toIntOrNull() ?: verified?.simkl?.toIntOrNull(),
+                            verified?.mal?.toIntOrNull() ?: localIds["mal"]?.toIntOrNull(),
+                            verified?.anilist?.toIntOrNull() ?: localIds["anilist"]?.toIntOrNull(),
+                            verified?.kitsu?.toIntOrNull() ?: localIds["kitsu"]?.toIntOrNull(),
+                            verified?.simkl?.toIntOrNull() ?: localIds["simkl"]?.toIntOrNull(),
                             verified?.tvdb?.toIntOrNull(), verified?.tvdbSeason,
                             verified?.tmdbSeason,
                             localSimkl = localIds["simkl"] != null)
@@ -1404,8 +1382,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                             verified?.kitsu?.let { put("kitsu", it) }
                             localIds.forEach { (prefix, value) ->
                                 if (prefix == "simkl") {
-                                    put("simkl", JSONObject().put("Simkl", value).toString())
-                                } else if (prefix in allowed) put(prefix, value)
+                                    putIfAbsent("simkl", JSONObject().put("Simkl", value).toString())
+                                } else if (prefix in allowed) putIfAbsent(prefix, value)
                             }
                             if (verified?.simkl != null) {
                                 put("simkl", JSONObject().put("Simkl", verified.simkl).toString())

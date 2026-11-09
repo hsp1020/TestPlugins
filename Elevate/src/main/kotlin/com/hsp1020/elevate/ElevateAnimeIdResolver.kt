@@ -99,10 +99,9 @@ internal object ElevateAnimeIdResolver {
         else raw.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
         val mapped = resolveByField(field, id, if (field == "imdbId") season else null)
             ?: return null
-        // An already season-local episode must not become negative after absolute offset.
-        val local = if (field == "imdbId" && mapped.fromEpisode != null &&
-            episode >= mapped.fromEpisode) episode - mapped.fromEpisode + 1 else episode
-        if (local <= 0) return null
+        val local = if (field == "imdbId" && mapped.fromEpisode != null)
+            (episode - mapped.fromEpisode + 1).takeIf { it > 0 } ?: return null
+        else episode
         return EpisodeMapping(mapped.mal, mapped.anilist, local)
     }
 
@@ -140,12 +139,12 @@ internal object ElevateAnimeIdResolver {
                         // Match the exact IMDb identity and season validation in StremioC.
                         if (ids.optString(field) != id) continue
                         if (field == "imdbId" && season != null && season > 1) {
-                            // Keep the shared resolver's previous lookup semantics.
-                            // Watch History applies stricter write-time validation.
-                            val matched = listOf("imdb", "tvdb", "trakt", "tmdb").any { source ->
-                                data.optJSONObject(source)?.optInt("seasonNumber") == season
-                            }
-                            if (!matched) continue
+                            val mappedSeason = ElevateWatchHistoryRules.preferredSeason(
+                                listOf("imdb", "tvdb", "trakt", "tmdb").map { source ->
+                                    data.optJSONObject(source)?.optInt("seasonNumber")
+                                        ?.takeIf { it > 0 }
+                                })
+                            if (mappedSeason != season) continue
                         }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()

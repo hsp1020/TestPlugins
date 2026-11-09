@@ -28,9 +28,9 @@ class ElevateWatchHistoryRulesTest {
         }
     }
 
-    @Test fun allSeriesDeletionRequiresOtherSeasonsToBeEmpty() {
+    @Test fun allSeriesDeletionRequiresOtherSeasonsToHaveNoWatchedEpisodes() {
         assertTrue(ElevateWatchHistoryRules.canRemoveWholeSeries(true, emptyMap()))
-        assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
+        assertTrue(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
             mapOf(1 to emptySet(), 3 to emptySet())))
         assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(false, emptyMap()))
         assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
@@ -61,15 +61,15 @@ class ElevateWatchHistoryRulesTest {
             1 to mapOf("kitsu" to "47083", "mal" to "123", "anilist" to "55"),
             2 to mapOf("kitsu" to "50021", "mal" to "456", "anilist" to "55"),
             3 to mapOf("kitsu" to "50022", "mal" to "789"))
-        assertEquals(mapOf("kitsu" to "47083", "mal" to "123"),
-            ElevateWatchHistoryRules.independentSeasonIds(1, mapping))
-        assertEquals(mapOf("kitsu" to "50021", "mal" to "456"),
-            ElevateWatchHistoryRules.independentSeasonIds(2, mapping))
+        assertEquals(mapOf("kitsu" to "47083", "mal" to "123", "anilist" to "55"),
+            ElevateWatchHistoryRules.seasonIdsFor(1, mapping))
+        assertEquals(mapOf("kitsu" to "50021", "mal" to "456", "anilist" to "55"),
+            ElevateWatchHistoryRules.seasonIdsFor(2, mapping))
         assertEquals(mapOf("kitsu" to "50022", "mal" to "789"),
-            ElevateWatchHistoryRules.independentSeasonIds(3, mapping))
-        assertTrue(ElevateWatchHistoryRules.independentSeasonIds(4, mapping).isEmpty())
+            ElevateWatchHistoryRules.seasonIdsFor(3, mapping))
+        assertTrue(ElevateWatchHistoryRules.seasonIdsFor(4, mapping).isEmpty())
         assertEquals(mapOf("kitsu" to "50021"),
-            ElevateWatchHistoryRules.independentSeasonIds(1,
+            ElevateWatchHistoryRules.seasonIdsFor(1,
                 mapOf(1 to mapOf("kitsu" to "50021"))))
     }
 
@@ -89,19 +89,20 @@ class ElevateWatchHistoryRulesTest {
             rules.mode(movie = false, anime = true, seasons = 2))
     }
 
-    @Test fun mapMustNotMixDifferentSeasonsOrDifferentProviderIds() {
+    @Test fun seasonMappingPreservesOriginalSourcePriorityAndTrackerChecks() {
         val rules = ElevateWatchHistoryRules
-        for (season in 1..40) {
+        assertEquals(2, rules.preferredSeason(listOf(2, 3, 3, 3)))
+        assertEquals(3, rules.preferredSeason(listOf(null, 3, 2, 2)))
+        assertEquals(4, rules.preferredSeason(listOf(0, null, 4, 5)))
+        assertNull(rules.preferredSeason(listOf(null, 0, -1)))
+        assertTrue(rules.consistentSeason(1, listOf(null, null)))
+        assertTrue(rules.consistentSeason(1, listOf(2, 2)))
+        assertFalse(rules.consistentSeason(0, listOf(0)))
+        for (season in 2..40) {
             assertTrue(rules.consistentSeason(season, listOf(season, null, season)))
+            assertTrue(rules.consistentSeason(season, listOf(season + 1, season)))
             assertFalse(rules.consistentSeason(season, listOf(null, null)))
-            assertFalse(rules.consistentSeason(season, listOf(season, season + 1)))
             assertFalse(rules.consistentSeason(season, listOf(season + 1)))
-            assertTrue(rules.compatibleIds(
-                mapOf("mal" to "$season", "kitsu" to "${season + 1000}"),
-                mapOf("mal" to "$season")))
-            assertFalse(rules.compatibleIds(
-                mapOf("mal" to "$season", "kitsu" to "${season + 1000}"),
-                mapOf("mal" to "${season + 1}")))
         }
     }
 
