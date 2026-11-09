@@ -148,6 +148,15 @@ class ElevateWatchHistoryRulesTest {
         assertFalse(rules.completedReadbackMatches(null, true, 12))
     }
 
+    @Test fun removedKitsuAndAniListEntriesMustReadBackNoneWithZeroProgress() {
+        val rules = ElevateWatchHistoryRules
+        assertTrue(rules.removedLibraryEntryMatches(true, null))
+        assertTrue(rules.removedLibraryEntryMatches(true, 0))
+        assertFalse(rules.removedLibraryEntryMatches(true, 12))
+        assertFalse(rules.removedLibraryEntryMatches(false, 0))
+        assertFalse(rules.removedLibraryEntryMatches(false, null))
+    }
+
     @Test fun malformedRemoteEpisodeDataBlocksWrites() {
         assertNull(ElevateWatchHistoryRules.episodeDelta(emptyList(), emptySet(), 0))
         assertNull(ElevateWatchHistoryRules.episodeDelta(listOf(1, 1), setOf(1), 0))

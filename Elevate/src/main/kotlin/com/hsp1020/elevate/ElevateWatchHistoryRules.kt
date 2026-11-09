@@ -56,6 +56,9 @@ internal object ElevateWatchHistoryRules {
             }
         }
 
+    fun removedLibraryEntryMatches(none: Boolean, watched: Int?): Boolean =
+        none && (watched ?: 0) == 0
+
     fun completedReadbackMatches(total: Int?, completed: Boolean, watched: Int?): Boolean =
         total != null && total > 0 && completed && watched == total
 

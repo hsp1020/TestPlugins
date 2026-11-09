@@ -1053,6 +1053,16 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private var oldNames: TextView? = null
         private var syncModel: SyncViewModel? = null
         private val isTv = fragment.javaClass.name.endsWith("ResultFragmentTv")
+        // Native userData writes a new Editable to the shared field. While Elevate
+        // owns the panel, keep that display update from feeding back into SYNCVM.
+        private val nativeProgressFilter = android.text.InputFilter { source, start, end, dest, dstart, dend ->
+            val own = statuses[selected]?.draft?.watched?.toString()
+            if (combo != null && !applying && current?.hasFocus() != true &&
+                source is android.text.Editable && dest.isEmpty() &&
+                dstart == 0 && dend == 0 && own != null &&
+                source.subSequence(start, end).toString() != own) own
+            else null
+        }
         private val tvUi: ElevateWatchHistoryTvUi? by lazy {
             if (!isTv) null else ElevateWatchHistoryTvUi(
                 fragment, root,
@@ -1566,6 +1576,9 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             names.visibility = View.GONE
             combo = spinner
             comboContainer = container
+            current?.let { input ->
+                input.filters = input.filters + nativeProgressFilter
+            }
             spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -1657,6 +1670,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 return
             }
             edit.status = status
+            if ((tracker.prefix == "kitsu" || tracker.prefix == "anilist") &&
+                status == SyncWatchType.NONE) {
+                edit.watched = 0
+                edit.score = null
+            }
             val tv = tracker.simklSeason
             val anime = tracker.simklAnime
             if (anime != null && edit.status == SyncWatchType.COMPLETED)
@@ -1839,6 +1857,12 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val completedEpisodes = ElevateWatchHistoryRules.verifiedCompletionEpisodes(
                 prefix, tracker.total, tracker.totalSource)
             if ((prefix == "kitsu" || prefix == "anilist") &&
+                draft.status == SyncWatchType.NONE && draft.explicitNone) {
+                draft.watched = 0
+                draft.score = null
+                tracker.draft?.let { it.watched = 0; it.score = null }
+            }
+            if ((prefix == "kitsu" || prefix == "anilist") &&
                 draft.status == SyncWatchType.COMPLETED) {
                 if (completedEpisodes == null) {
                     if (before.status != SyncWatchType.COMPLETED) return
@@ -1936,6 +1960,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                         val issued = tracker.repo.updateStatus(id, remote)
                         val verifyCompletion = completedEpisodes != null &&
                             draft.status == SyncWatchType.COMPLETED
+                        val verifyRemoval = (prefix == "kitsu" || prefix == "anilist") &&
+                            draft.status == SyncWatchType.NONE && draft.explicitNone
                         var verified = false
                         val maxAttempts=if(prefix=="mal")7 else 5
                         for (attempt in 1..maxAttempts) {
@@ -1946,13 +1972,18 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                 })
                             val read = tracker.repo.status(id)
                             val got = read.getOrNull()
-                            verified = got != null &&
+                            verified = got != null && (if (verifyRemoval) {
+                                ElevateWatchHistoryRules.removedLibraryEntryMatches(
+                                    got.status == SyncWatchType.NONE, got.watchedEpisodes)
+                            } else {
                                 (draft.status == before.status || got.status == remote.status) &&
-                                (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
-                                (draft.score == before.score || got.score == remote.score) &&
-                                (!verifyCompletion || ElevateWatchHistoryRules.completedReadbackMatches(
-                                    completedEpisodes, got.status == SyncWatchType.COMPLETED,
-                                    got.watchedEpisodes))
+                                    (draft.watched == before.watched ||
+                                        (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
+                                    (draft.score == before.score || got.score == remote.score) &&
+                                    (!verifyCompletion || ElevateWatchHistoryRules.completedReadbackMatches(
+                                        completedEpisodes, got.status == SyncWatchType.COMPLETED,
+                                        got.watchedEpisodes))
+                            })
                             if (verified) break
                         }
                         if(!verified && prefix=="mal" && issued.getOrNull()==true) {
@@ -2024,8 +2055,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                 if(draft.status==SyncWatchType.NONE && draft.explicitNone)
                                     null else draft.score)
                             tracker.draft = tracker.baseline?.snapshot()
-                        } else if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
-                            draft.explicitNone) {
+                        } else if(prefix in setOf("mal", "kitsu", "anilist") &&
+                            draft.status==SyncWatchType.NONE && draft.explicitNone) {
                             tracker.baseline=Draft(SyncWatchType.NONE,0,null)
                             tracker.draft=tracker.baseline?.snapshot()
                         } else {
@@ -2145,6 +2176,9 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 return
             }
             val spinner = combo ?: return
+            current?.let { input ->
+                input.filters = input.filters.filterNot { it === nativeProgressFilter }.toTypedArray()
+            }
             (comboContainer?.parent as? android.view.ViewGroup)?.removeView(comboContainer)
             comboContainer = null
             combo = null
