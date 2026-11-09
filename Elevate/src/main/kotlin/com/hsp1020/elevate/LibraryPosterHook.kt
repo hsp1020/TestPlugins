@@ -913,10 +913,12 @@ internal object LibraryPosterPrefs {
 
     fun get(context: Context): PosterConfig {
         val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        val service = PosterService.entries.firstOrNull {
+            it.name == prefs.getString("service", null)
+        } ?: PosterService.RPDB
         return PosterConfig(
-            PosterService.entries.firstOrNull { it.name == prefs.getString("service", null) }
-                ?: PosterService.RPDB,
-            prefs.getString("key", "").orEmpty().trim(),
+            service,
+            prefs.getString("key_${service.name}", "").orEmpty().trim(),
             prefs.getString("xrdb_profile", "").orEmpty(),
             prefs.getString("xrdb_base", DEFAULT_XRDB_BASE) ?: DEFAULT_XRDB_BASE,
             prefs.getString("xrdb_render_key", "").orEmpty(),
@@ -926,6 +928,10 @@ internal object LibraryPosterPrefs {
 
     fun controls(context: Context, content: LinearLayout, dp: (Int) -> Int): () -> Unit {
         val saved = get(context)
+        val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        val draftKeys = PosterService.entries.filter { it != PosterService.XRDB }
+            .associateWith { prefs.getString("key_${it.name}", "").orEmpty() }.toMutableMap()
+        var activeService = saved.service
         fun title(parent: LinearLayout, label: String, smaller: Boolean = false) {
             parent.addView(TextView(context).apply {
                 text = label
@@ -1033,26 +1039,41 @@ internal object LibraryPosterPrefs {
         service.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?, view: View?, position: Int, id: Long
-            ) = updateFields()
+            ) {
+                val next = PosterService.entries[position]
+                if (next != activeService) {
+                    if (activeService != PosterService.XRDB)
+                        draftKeys[activeService] = key.text.toString()
+                    key.setText(draftKeys[next].orEmpty())
+                    activeService = next
+                }
+                updateFields()
+            }
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
         base.doAfterTextChanged { updateFields() }
         updateFields()
 
         return {
+            if (activeService != PosterService.XRDB)
+                draftKeys[activeService] = key.text.toString()
             val isPublic = runCatching {
                 Uri.parse(base.text.toString().trim()).host?.lowercase() in
                     setOf("xrdb.elfhosted.com", "extendedratings.com", "www.extendedratings.com")
             }.getOrDefault(false)
-            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            val editor = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .edit()
                 .putString("service", PosterService.entries[service.selectedItemPosition].name)
-                .putString("key", key.text.toString().trim())
                 .putString("xrdb_profile", profile.text.toString().trim())
                 .putString("xrdb_base", base.text.toString().trim())
                 .putString("xrdb_version", version.text.toString().trim())
                 .putString("xrdb_render_key", if (isPublic) "" else renderKey.text.toString().trim())
+                .remove("key")
                 .remove("template")
-                .apply()
+            draftKeys.forEach { (provider, value) ->
+                editor.putString("key_${provider.name}", value.trim())
+            }
+            editor.apply()
         }
     }
 }
