@@ -2,6 +2,36 @@ package com.hsp1020.elevate
 
 /** Pure, deterministic safety rules shared by the season-history UI and JVM regression tests. */
 internal object ElevateWatchHistoryRules {
+    internal enum class MediaMode { MOVIE, GENERAL_SERIES, SINGLE_ANIME, SEASONAL_ANIME }
+
+    fun mode(movie: Boolean, anime: Boolean, seasons: Int): MediaMode = when {
+        movie -> MediaMode.MOVIE
+        !anime -> MediaMode.GENERAL_SERIES
+        seasons > 1 -> MediaMode.SEASONAL_ANIME
+        else -> MediaMode.SINGLE_ANIME
+    }
+
+    /** Reject conflicting season claims, rather than accepting any one matching provider. */
+    fun consistentSeason(season: Int, claims: Collection<Int?>): Boolean {
+        val known = claims.filterNotNull().filter { it > 0 }
+        return season > 0 && known.isNotEmpty() && known.all { it == season }
+    }
+
+    /** AIO and episode-local IDs must never be mixed when they disagree. */
+    fun compatibleIds(mapped: Map<String, String>, local: Map<String, String>): Boolean =
+        local.all { (key, value) -> mapped[key] == null || mapped[key] == value }
+
+    /** A standalone MAL/Kitsu/AniList page is already a specific anime season. */
+    fun originalSeasonId(original: String?, singleSeason: Boolean): Map<String, String> {
+        if (!singleSeason) return emptyMap()
+        val found = original?.let {
+            Regex("^(mal|anilist|kitsu):([0-9]+)$").matchEntire(it)
+        } ?: return emptyMap()
+        val id = found.groupValues[2].toLongOrNull()?.takeIf { it > 0L }
+            ?: return emptyMap()
+        return mapOf(found.groupValues[1] to id.toString())
+    }
+
     fun selectedSeason(seasons: List<Int>, index: Int?, episodeBased: Boolean): Int? {
         val selected = if (seasons.isNotEmpty()) index?.let { seasons.getOrNull(it) }
             else if (!episodeBased) 1 else null
@@ -21,7 +51,7 @@ internal object ElevateWatchHistoryRules {
 
     fun canRemoveWholeSeries(
         clearSelectedSeason: Boolean, otherSeasons: Map<Int, Set<Int>>
-    ): Boolean = clearSelectedSeason && otherSeasons.values.all { it.isEmpty() }
+    ): Boolean = clearSelectedSeason && otherSeasons.isEmpty()
 
     /** The returned delta consists exclusively of verified episode keys in the selected season. */
     fun episodeDelta(

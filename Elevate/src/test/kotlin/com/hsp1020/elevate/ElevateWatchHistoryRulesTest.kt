@@ -30,7 +30,7 @@ class ElevateWatchHistoryRulesTest {
 
     @Test fun allSeriesDeletionRequiresOtherSeasonsToBeEmpty() {
         assertTrue(ElevateWatchHistoryRules.canRemoveWholeSeries(true, emptyMap()))
-        assertTrue(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
+        assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
             mapOf(1 to emptySet(), 3 to emptySet())))
         assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(false, emptyMap()))
         assertFalse(ElevateWatchHistoryRules.canRemoveWholeSeries(true,
@@ -71,6 +71,52 @@ class ElevateWatchHistoryRulesTest {
         assertEquals(mapOf("kitsu" to "50021"),
             ElevateWatchHistoryRules.independentSeasonIds(1,
                 mapOf(1 to mapOf("kitsu" to "50021"))))
+    }
+
+    @Test fun allProviderModesIncludeMoviesAndSingleSeasonSeries() {
+        val rules = ElevateWatchHistoryRules
+        assertEquals(ElevateWatchHistoryRules.MediaMode.MOVIE,
+            rules.mode(movie = true, anime = false, seasons = 0))
+        assertEquals(ElevateWatchHistoryRules.MediaMode.MOVIE,
+            rules.mode(movie = true, anime = true, seasons = 1))
+        assertEquals(ElevateWatchHistoryRules.MediaMode.GENERAL_SERIES,
+            rules.mode(movie = false, anime = false, seasons = 1))
+        assertEquals(ElevateWatchHistoryRules.MediaMode.GENERAL_SERIES,
+            rules.mode(movie = false, anime = false, seasons = 12))
+        assertEquals(ElevateWatchHistoryRules.MediaMode.SINGLE_ANIME,
+            rules.mode(movie = false, anime = true, seasons = 1))
+        assertEquals(ElevateWatchHistoryRules.MediaMode.SEASONAL_ANIME,
+            rules.mode(movie = false, anime = true, seasons = 2))
+    }
+
+    @Test fun mapMustNotMixDifferentSeasonsOrDifferentProviderIds() {
+        val rules = ElevateWatchHistoryRules
+        for (season in 1..40) {
+            assertTrue(rules.consistentSeason(season, listOf(season, null, season)))
+            assertFalse(rules.consistentSeason(season, listOf(null, null)))
+            assertFalse(rules.consistentSeason(season, listOf(season, season + 1)))
+            assertFalse(rules.consistentSeason(season, listOf(season + 1)))
+            assertTrue(rules.compatibleIds(
+                mapOf("mal" to "$season", "kitsu" to "${season + 1000}"),
+                mapOf("mal" to "$season")))
+            assertFalse(rules.compatibleIds(
+                mapOf("mal" to "$season", "kitsu" to "${season + 1000}"),
+                mapOf("mal" to "${season + 1}")))
+        }
+    }
+
+    @Test fun standaloneKitsuAndMalSeasonIdsAreNotReassignedToSeasonOne() {
+        val rules = ElevateWatchHistoryRules
+        assertEquals(mapOf("kitsu" to "50021"),
+            rules.originalSeasonId("kitsu:50021", singleSeason = true))
+        assertEquals(mapOf("mal" to "76543"),
+            rules.originalSeasonId("mal:76543", singleSeason = true))
+        assertEquals(mapOf("anilist" to "12345"),
+            rules.originalSeasonId("anilist:12345", singleSeason = true))
+        assertTrue(rules.originalSeasonId("kitsu:50021", singleSeason = false).isEmpty())
+        assertTrue(rules.originalSeasonId("kitsu:0", singleSeason = true).isEmpty())
+        assertTrue(rules.originalSeasonId("tt123456", singleSeason = true).isEmpty())
+        assertTrue(rules.originalSeasonId("kitsu:invalid", singleSeason = true).isEmpty())
     }
 
     @Test fun malformedRemoteEpisodeDataBlocksWrites() {

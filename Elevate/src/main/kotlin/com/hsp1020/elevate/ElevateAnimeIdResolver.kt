@@ -24,8 +24,8 @@ internal object ElevateAnimeIdResolver {
         val imdbSeason: Int? = null
     ) {
         fun matchesSeason(season: Int): Boolean =
-            season > 0 && listOfNotNull(imdbSeason, tvdbSeason,
-                tmdbSeason, traktSeason).contains(season)
+            ElevateWatchHistoryRules.consistentSeason(season,
+                listOf(imdbSeason, tvdbSeason, tmdbSeason, traktSeason))
     }
     internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int)
 
@@ -52,6 +52,26 @@ internal object ElevateAnimeIdResolver {
         val id = rawId.removePrefix(source + ":").substringBefore(':')
             .toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
         return resolveByField(field, id, null)
+    }
+
+    /** Season watch-history lookups may use verified TVDB/Simkl-only mappings.
+     * The existing resolver methods keep their original anime-ID contract. */
+    suspend fun resolveTrackingSource(source: String, rawId: String): Mapping? {
+        val field = when (source) {
+            "kitsu" -> "kitsuId"
+            "mal" -> "malId"
+            "anilist" -> "anilistId"
+            else -> return null
+        }
+        val id = rawId.removePrefix(source + ":").substringBefore(':')
+            .toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
+        return resolveByField(field, id, null, allowTrackerOnly = true)
+    }
+
+    suspend fun resolveTrackingImdbSeason(rawId: String, season: Int): Mapping? {
+        val id = rawId.takeIf { it.matches(Regex("tt[0-9]+")) } ?: return null
+        if (season <= 0) return null
+        return resolveByField("imdbId", id, season, allowTrackerOnly = true)
     }
 
     /** Resolve an IMDb title at the selected season, independently of StremioC. */
@@ -86,8 +106,11 @@ internal object ElevateAnimeIdResolver {
         return EpisodeMapping(mapped.mal, mapped.anilist, local)
     }
 
-    private suspend fun resolveByField(field: String, id: String, season: Int?): Mapping? {
-        val key = field + ":" + id + (season?.let { ":$it" } ?: "")
+    private suspend fun resolveByField(
+        field: String, id: String, season: Int?, allowTrackerOnly: Boolean = false
+    ): Mapping? {
+        val key = field + ":" + id + (season?.let { ":$it" } ?: "") +
+            (if (allowTrackerOnly) ":watch-history" else "")
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.takeIf {
@@ -117,17 +140,23 @@ internal object ElevateAnimeIdResolver {
                         // Match the exact IMDb identity and season validation in StremioC.
                         if (ids.optString(field) != id) continue
                         if (field == "imdbId" && season != null && season > 1) {
-                            val matches = listOf("imdb", "tvdb", "trakt", "tmdb").any { source ->
+                            // Keep the shared resolver's previous lookup semantics.
+                            // Watch History applies stricter write-time validation.
+                            val matched = listOf("imdb", "tvdb", "trakt", "tmdb").any { source ->
                                 data.optJSONObject(source)?.optInt("seasonNumber") == season
                             }
-                            if (!matches) continue
+                            if (!matched) continue
                         }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()
                         val kitsu = positive("kitsuId")
                         val mal = positive("malId")
                         val anilist = positive("anilistId")
-                        if (kitsu == null && mal == null && anilist == null) continue
+                        val hasAnimeIds = kitsu != null || mal != null || anilist != null
+                        val hasTrackingIds = positive("simklId") != null ||
+                            positive("thetvdbId") != null
+                        if (!hasAnimeIds && !(allowTrackerOnly && hasTrackingIds))
+                            continue
                         val episodeInfo = listOf("imdb", "tvdb", "trakt", "tmdb")
                             .mapNotNull(data::optJSONObject).firstOrNull {
                                 season == null || it.optInt("seasonNumber") == season
