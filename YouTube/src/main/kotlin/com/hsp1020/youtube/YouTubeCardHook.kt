@@ -477,6 +477,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         expandedReturnDialog = null
         popupAwaitingPlayer = false
         if (popup.window?.decorView?.isAttachedToWindow == true) {
+            screens.keys.firstOrNull {
+                it.isResumed && it.javaClass.name in SEARCH_ORIGINS
+            }?.let(::suppressReturnedSearchIme)
             popup.window?.setWindowAnimations(0)
             popup.show()
         }
@@ -1171,7 +1174,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             dialogs.remove(window)?.close()
         }
         active.forEach { window ->
-            if (!dialogs.containsKey(window)) dialogs[window] = Screen(window, true)
+            if (!dialogs.containsKey(window)) {
+                screens.keys.firstOrNull {
+                    it.isResumed && it.javaClass.name in SEARCH_ORIGINS
+                }?.let(::suppressReturnedSearchIme)
+                dialogs[window] = Screen(window, true)
+            }
         }
         // Native expanded descriptions are separate AlertDialog text views.
         windows.forEach { window ->
