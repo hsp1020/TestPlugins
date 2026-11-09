@@ -20,8 +20,13 @@ internal object ElevateAnimeIdResolver {
         val imdb: String?, val tmdb: String?, val fromEpisode: Int? = null,
         val simkl: String? = null, val tvdb: String? = null,
         val tvdbSeason: Int? = null, val tmdbSeason: Int? = null,
-        val traktSeason: Int? = null
-    )
+        val traktSeason: Int? = null,
+        val imdbSeason: Int? = null
+    ) {
+        fun matchesSeason(season: Int): Boolean =
+            season > 0 && listOfNotNull(imdbSeason, tvdbSeason,
+                tmdbSeason, traktSeason).contains(season)
+    }
     internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int)
 
     private val hosts = listOf(
@@ -135,7 +140,8 @@ internal object ElevateAnimeIdResolver {
                             positive("simklId"), positive("thetvdbId"),
                             data.optJSONObject("tvdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
-                            data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 }
+                            data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 },
+                            data.optJSONObject("imdb")?.optInt("seasonNumber")?.takeIf { it > 0 }
                         )
                         break
                     }

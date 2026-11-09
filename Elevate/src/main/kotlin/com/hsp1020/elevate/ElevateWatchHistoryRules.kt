@@ -8,6 +8,14 @@ internal object ElevateWatchHistoryRules {
         return selected?.takeIf { it > 0 }
     }
 
+    /** Don't reuse a shared series ID as if it belonged to a single season. */
+    fun independentSeasonIds(season: Int, bySeason: Map<Int, Map<String, String>>)
+        : Map<String, String> = bySeason[season].orEmpty().filter { (key, value) ->
+        value.isNotBlank() && bySeason.none { (other, ids) ->
+            other != season && ids[key] == value
+        }
+    }
+
     fun specialSeasonLabel(label: String): Boolean =
         label.trim().let { it.equals("S", ignoreCase = true) || it.endsWith(" S") }
 

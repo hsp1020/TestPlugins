@@ -65,8 +65,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
     }
 
     private fun attach(fragment: Fragment, root: View) {
-        if (!isDetail(fragment) || probes.containsKey(fragment) ||
-            root.findViewById<View>(R.id.result_sync_names) == null) return
+        if (!isDetail(fragment) || probes.containsKey(fragment)) return
+        val tv = fragment.javaClass.name.endsWith("ResultFragmentTv")
+        if (tv && root.findViewById<View>(R.id.result_play_parent) == null) return
+        if (!tv && root.findViewById<View>(R.id.result_sync_names) == null) return
         probes[fragment] = SeasonSyncProbe(fragment, root).also { it.start() }
     }
 
@@ -949,6 +951,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
         private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        private val writeJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
         private val observers = mutableListOf<() -> Unit>()
         private var active = false
         private var generation = 0L
@@ -962,10 +965,15 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private var animePage = false
         private var episodeBased = true
         private var rawSyncs: Map<String,String> = emptyMap()
+        private var seasonEpisodeIds: Map<Int, Map<String, String>> = emptyMap()
         private var seasonNumbers: List<Int> = emptyList()
         private var selectionIndex: Int? = null
         private var season: Int? = null
-        private var resolvedSeasonInputs: Triple<Int, List<Int>, Map<String, String>>? = null
+        private data class SeasonInput(
+            val season: Int, val options: List<Int>, val sync: Map<String, String>,
+            val identity: ElevateMediaIdentity.Ids, val episodeIds: Map<String, String>
+        )
+        private var resolvedSeasonInputs: SeasonInput? = null
         private var startedFor: String? = null
         private var selected: String? = null
         private var preferred: String? = null
@@ -977,6 +985,23 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         private var comboArrow: TextView? = null
         private var oldNames: TextView? = null
         private var syncModel: SyncViewModel? = null
+        private val isTv = fragment.javaClass.name.endsWith("ResultFragmentTv")
+        private val tvUi: ElevateWatchHistoryTvUi? by lazy {
+            if (!isTv) null else ElevateWatchHistoryTvUi(
+                fragment, root,
+                onProvider = { key ->
+                    if (key in statuses && selected != key) {
+                        selected = key
+                        preferred = key
+                        render()
+                    }
+                },
+                onStatus = { status -> changeStatus(status) },
+                onEpisodes = { delta -> adjust(delta) },
+                onScore = { delta -> adjustScore(delta) },
+                onSave = { save() }
+            )
+        }
         private val saveButton by lazy { root.findViewById<View>(R.id.result_sync_set_score) }
         private val minus by lazy { root.findViewById<View>(R.id.result_sync_sub_episode) }
         private val plus by lazy { root.findViewById<View>(R.id.result_sync_add_episode) }
@@ -1075,9 +1100,30 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 .getOrNull()?.takeIf { it.url == page.url }
             mediaIds = ElevateMediaIdentity.collect(response,
                 extraSync = page.syncData, urls = listOf(page.url))
-            animePage = page.type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
-                ElevateMediaIdentity.anime(response, null, mediaIds)
-            episodeBased = page.type !in setOf(TvType.Movie, TvType.AnimeMovie)
+            episodeBased = response?.type !in setOf(TvType.Movie, TvType.AnimeMovie) &&
+                !page.url.contains("/meta/movie/", ignoreCase = true)
+            // Episode data is season-local. A page-level MAL/Kitsu ID is not
+            // automatically valid for every season in a multi-season title.
+            val found = linkedMapOf<Int, MutableMap<String, MutableSet<String>>>()
+            (response as? TvSeriesLoadResponse)?.episodes?.forEach { episode ->
+                val seasonNumber = episode.season ?: 1
+                if (seasonNumber <= 0) return@forEach
+                val ids = ElevateMediaIdentity.collect(episodeData = episode.data,
+                    urls = listOf(episode.data))
+                val matches = found.getOrPut(seasonNumber) { linkedMapOf() }
+                ids.asMap().filterKeys { it in allowed }.forEach { (key, value) ->
+                    matches.getOrPut(key) { linkedSetOf() }.add(value)
+                }
+            }
+            seasonEpisodeIds = found.mapValues { (_, values) ->
+                values.mapNotNull { (key, ids) ->
+                    ids.singleOrNull()?.let { key to it }
+                }.toMap()
+            }
+            animePage = ElevateMediaIdentity.anime(response, null, mediaIds) ||
+                seasonEpisodeIds.values.any { ids ->
+                    ids.keys.any { it == "mal" || it == "anilist" || it == "kitsu" }
+                }
             rawSyncs = LinkedHashMap(page.syncData).apply {
                 mediaIds.asMap().forEach { (key, value) ->
                     if (!containsKey(key)) {
@@ -1104,8 +1150,18 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val chosen = ElevateWatchHistoryRules.selectedSeason(
                 seasonNumbers, selectionIndex, episodeBased
             )
-            if (chosen == null || chosen <= 0) return
-            val inputs = Triple(chosen, seasonNumbers.toList(), rawSyncs.toMap())
+            if (chosen == null || chosen <= 0) {
+                if (season != null) {
+                    generation++
+                    reset()
+                    teardownUi()
+                    season = null
+                    resolvedSeasonInputs = null
+                }
+                return
+            }
+            val inputs = SeasonInput(chosen, seasonNumbers.toList(), rawSyncs.toMap(),
+                mediaIds, seasonEpisodeIds[chosen].orEmpty())
             if (inputs == resolvedSeasonInputs) return
             resolvedSeasonInputs = inputs
             season = chosen
@@ -1115,6 +1171,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
 
         private fun reset() {
             fetchJob?.cancel()
+            writeJobs.toList().forEach { it.cancel() }
             fetchJob = null
             statuses.clear()
             selected = null
@@ -1127,6 +1184,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val initialIds = mediaIds
             val initialSync = rawSyncs
             val initialAnime = animePage
+            // Only explicit season-local episode IDs may bypass an IMDb mapping.
+            val localIds = ElevateWatchHistoryRules.independentSeasonIds(
+                sn, seasonEpisodeIds
+            )
             val multi = seasonNumbers.size > 1
             val movie = !episodeBased
             reset()
@@ -1162,42 +1223,63 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 var mappedSeason: SeasonTrackerIds? = null
                 val ids = if (!multi && !seasonAwareAnime) syncs.filterKeys { it in allowed }
                     else if (generalSimkl) syncs.filterKeys { it == "simkl" } else {
-                    val imdb = effectiveIds.imdb ?: IMDb.find(url)?.value
-                    if (imdb == null || isSpecialSeason(sn)) {
-                        emptyMap()
-                    } else {
+                    if (isSpecialSeason(sn)) emptyMap() else {
+                        val imdb = effectiveIds.imdb ?: IMDb.find(url)?.value
                         val mapping = try { withContext(Dispatchers.IO) {
-                            ElevateAnimeIdResolver.resolveImdbSeason(imdb, sn)?.let { resolved ->
-                                SeasonTrackerIds(resolved.mal?.toIntOrNull(),
-                                    resolved.anilist?.toIntOrNull(),
-                                    resolved.kitsu?.toIntOrNull(), resolved.simkl?.toIntOrNull(),
-                                    resolved.tvdb?.toIntOrNull(), resolved.tvdbSeason,
-                                    resolved.tmdbSeason)
+                            val byImdb = imdb?.let {
+                                ElevateAnimeIdResolver.resolveImdbSeason(it, sn)
+                            }
+                            if (byImdb != null) byImdb else {
+                                // A single source ID can be mapped only when the AIO
+                                // response explicitly identifies the selected season.
+                                val candidates = listOf("mal", "anilist", "kitsu")
+                                var verified: ElevateAnimeIdResolver.Mapping? = null
+                                for (prefix in candidates) {
+                                    val value = localIds[prefix]
+                                        ?: effectiveIds.asMap()[prefix]
+                                        ?: continue
+                                    val mapped = ElevateAnimeIdResolver.resolve(prefix, value)
+                                    if (mapped?.matchesSeason(sn) == true) {
+                                        verified = mapped
+                                        break
+                                    }
+                                }
+                                verified
                             }
                         } } catch (e: CancellationException) { throw e }
-                          catch (e: Exception) {
-                            null
+                          catch (_: Exception) { null }
+                        mappedSeason = mapping?.let { resolved ->
+                            SeasonTrackerIds(resolved.mal?.toIntOrNull(),
+                                resolved.anilist?.toIntOrNull(),
+                                resolved.kitsu?.toIntOrNull(), resolved.simkl?.toIntOrNull(),
+                                resolved.tvdb?.toIntOrNull(), resolved.tvdbSeason,
+                                resolved.tmdbSeason)
                         }
-                        mappedSeason = mapping
-                        linkedMapOf<String,String>().apply {
-                            mapping?.mal?.let { put("mal", it.toString()) }
-                            mapping?.aniList?.let { put("anilist", it.toString()) }
-                            mapping?.kitsu?.let { put("kitsu", it.toString()) }
-
+                        linkedMapOf<String, String>().apply {
+                            // Explicit episode IDs can identify independent seasons
+                            // even if AIOStreams is temporarily unavailable.
+                            mapping?.mal?.let { put("mal", it) }
+                            mapping?.anilist?.let { put("anilist", it) }
+                            mapping?.kitsu?.let { put("kitsu", it) }
+                            localIds.forEach { (prefix, value) ->
+                                if (prefix == "simkl") {
+                                    put("simkl", JSONObject().put("Simkl", value).toString())
+                                } else if (prefix in allowed) put(prefix, value)
+                            }
                             if (mapping?.simkl != null) {
-                                put("simkl", JSONObject().put("Simkl",mapping.simkl.toString()).toString())
+                                put("simkl", JSONObject().put("Simkl", mapping.simkl).toString())
                             } else mapping?.mal?.let { mal ->
-                                put("simkl", JSONObject().put("Mal",mal.toString()).toString())
+                                put("simkl", JSONObject().put("Mal", mal).toString())
                             }
                         }
                     }
                 }
                 if (!valid(gen, sn)) return@launch
-                val matched = if (syncModel != null && seasonNumbers.isNotEmpty())
+                val matched = if (seasonNumbers.isNotEmpty() || !episodeBased)
                     AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
                         .filter { it.authUser() != null }
                 else emptyList()
-                if (syncModel == null || seasonNumbers.isEmpty()) {
+                if (seasonNumbers.isEmpty() && episodeBased) {
                     teardownUi()
                     return@launch
                 }
@@ -1340,6 +1422,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         }
 
         private fun ensureUi() {
+            if (isTv) {
+                tvUi?.available(statuses.isNotEmpty())
+                return
+            }
             if (combo != null) return
             val names = root.findViewById<TextView>(R.id.result_sync_names) ?: return
             val parent = names.parent as? android.widget.LinearLayout ?: return
@@ -1388,28 +1474,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             minus?.setOnClickListener { adjust(-1) }
             saveButton?.setOnClickListener { save() }
             checks?.setOnItemClickListener { _, _, pos, _ ->
-                val tracker = statuses[selected] ?: return@setOnItemClickListener
-                if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
-                    render()
-                    return@setOnItemClickListener
-                }
-                val edit = tracker.draft ?: return@setOnItemClickListener
-                edit.status = SyncWatchType.fromInternalId(pos - 1)
-                val tv = tracker.simklSeason
-                val anime = tracker.simklAnime
-                if (anime != null && edit.status == SyncWatchType.COMPLETED)
-                    edit.watched = anime.mapped.size
-                if (tv != null) {
-                    if (edit.status == SyncWatchType.COMPLETED)
-                        edit.watched = tv.available.size
-                    else if (edit.status == SyncWatchType.NONE) edit.watched = 0
-                } else if (tracker.prefix == "mal" &&
-                    edit.status == SyncWatchType.COMPLETED &&
-                    tracker.totalSource == "mal-lightweight") {
-                    tracker.total?.takeIf { it > 0 }?.let { edit.watched = it }
-                }
-                edit.explicitNone = edit.status == SyncWatchType.NONE
-                render()
+                changeStatus(SyncWatchType.fromInternalId(pos - 1))
             }
             slider?.clearOnChangeListeners()
             slider?.addOnChangeListener { _, value, fromUser ->
@@ -1445,6 +1510,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
 
         private fun updateOptions() {
             if (!active || !fragment.isAdded) return
+            if (isTv) {
+                ensureUi()
+                render()
+                return
+            }
             if (combo == null) ensureUi()
             val spinner = combo ?: return
             applying = true
@@ -1463,6 +1533,41 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 if (names.isNotEmpty() && spinner.selectedItemPosition != position)
                     spinner.setSelection(position, false)
             } finally { applying = false }
+        }
+
+        private fun changeStatus(status: SyncWatchType) {
+            val tracker = statuses[selected] ?: return
+            if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
+                render()
+                return
+            }
+            val edit = tracker.draft ?: return
+            edit.status = status
+            val tv = tracker.simklSeason
+            val anime = tracker.simklAnime
+            if (anime != null && edit.status == SyncWatchType.COMPLETED)
+                edit.watched = anime.mapped.size
+            if (tv != null) {
+                if (edit.status == SyncWatchType.COMPLETED)
+                    edit.watched = tv.available.size
+                else if (edit.status == SyncWatchType.NONE) edit.watched = 0
+            } else if (tracker.prefix == "mal" &&
+                edit.status == SyncWatchType.COMPLETED &&
+                tracker.totalSource == "mal-lightweight") {
+                tracker.total?.takeIf { it > 0 }?.let { edit.watched = it }
+            }
+            edit.explicitNone = edit.status == SyncWatchType.NONE
+            render()
+        }
+
+        private fun adjustScore(delta: Int) {
+            val tracker = statuses[selected] ?: return
+            if (isWriteInFlight(tracker) || tracker.writeBlocked != null ||
+                (tracker.simklAnime != null && !tracker.ratingLoaded)) return
+            val draft = tracker.draft ?: return
+            val score = ((draft.score?.toInt(10) ?: 0) + delta).coerceIn(0, 10)
+            draft.score = Score.from(score.toFloat(), 10)
+            render()
         }
 
         private fun reconcileManualProgress(tracker: Tracker, edit: Draft) {
@@ -1487,8 +1592,28 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         }
 
         private fun render() {
-            if (!active || combo == null) return
+            if (!active) return
             val target = statuses[selected]
+            if (isTv) {
+                val data = target?.draft
+                tvUi?.render(ElevateWatchHistoryTvUi.State(
+                    season = season,
+                    providers = statuses.keys.map { key -> key to (titles[key] ?: key) },
+                    selected = selected,
+                    status = data?.status,
+                    watched = data?.watched,
+                    maximum = target?.total,
+                    score = data?.score?.toInt(10),
+                    enabled = target != null && !target.loading && data != null &&
+                        target.writeBlocked == null && !isWriteInFlight(target),
+                    statusEnabled = target?.simklAnime?.statusEditable != false &&
+                        (target?.simklSeason?.listStatus != null || target?.simklSeason == null),
+                    scoreEnabled = target?.simklAnime == null || target?.ratingLoaded == true,
+                    error = target?.error ?: target?.writeBlocked
+                ))
+                return
+            }
+            if (combo == null) return
             if (target == null || target.loading || target.draft == null) {
 
                 applying = true
@@ -1641,7 +1766,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             tracker.saving = true
             render()
 
-            saveScope.launch {
+            val task = saveScope.launch(start = CoroutineStart.LAZY) {
                 val result = try { withContext(Dispatchers.IO) {
                     if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
                         draft.explicitNone) {
@@ -1781,6 +1906,12 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     }
                 }
             }
+            writeJobs.add(task)
+            task.invokeOnCompletion {
+                pendingWrites.remove(operationKey)
+                writeJobs.remove(task)
+            }
+            task.start()
         }
 
         private suspend fun malRemoveFromLibrary(
@@ -1870,6 +2001,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
         }
 
         private fun teardownUi() {
+            if (isTv) {
+                tvUi?.available(false)
+                return
+            }
             val spinner = combo ?: return
             (comboContainer?.parent as? android.view.ViewGroup)?.removeView(comboContainer)
             comboContainer = null
@@ -1897,11 +2032,13 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             active = false
             generation++
             fetchJob?.cancel()
-
+            writeJobs.toList().forEach { it.cancel() }
+            saveScope.cancel()
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
             teardownUi()
+            tvUi?.release()
             syncModel = null
         }
     }

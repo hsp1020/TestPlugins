@@ -56,6 +56,23 @@ class ElevateWatchHistoryRulesTest {
         }
     }
 
+    @Test fun seasonIdsDoNotLeakAcrossEpisodesOrSeasons() {
+        val mapping = mapOf(
+            1 to mapOf("kitsu" to "47083", "mal" to "123", "anilist" to "55"),
+            2 to mapOf("kitsu" to "50021", "mal" to "456", "anilist" to "55"),
+            3 to mapOf("kitsu" to "50022", "mal" to "789"))
+        assertEquals(mapOf("kitsu" to "47083", "mal" to "123"),
+            ElevateWatchHistoryRules.independentSeasonIds(1, mapping))
+        assertEquals(mapOf("kitsu" to "50021", "mal" to "456"),
+            ElevateWatchHistoryRules.independentSeasonIds(2, mapping))
+        assertEquals(mapOf("kitsu" to "50022", "mal" to "789"),
+            ElevateWatchHistoryRules.independentSeasonIds(3, mapping))
+        assertTrue(ElevateWatchHistoryRules.independentSeasonIds(4, mapping).isEmpty())
+        assertEquals(mapOf("kitsu" to "50021"),
+            ElevateWatchHistoryRules.independentSeasonIds(1,
+                mapOf(1 to mapOf("kitsu" to "50021"))))
+    }
+
     @Test fun malformedRemoteEpisodeDataBlocksWrites() {
         assertNull(ElevateWatchHistoryRules.episodeDelta(emptyList(), emptySet(), 0))
         assertNull(ElevateWatchHistoryRules.episodeDelta(listOf(1, 1), setOf(1), 0))
