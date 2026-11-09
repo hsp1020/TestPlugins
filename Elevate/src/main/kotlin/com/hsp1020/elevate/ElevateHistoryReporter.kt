@@ -7,13 +7,6 @@ import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.lagradost.cloudstream3.CommonActivity
-import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
-import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
-import com.lagradost.cloudstream3.SimklSyncServices
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.function.Consumer
@@ -87,24 +80,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         val duration: Long, val target: String, val played: Boolean? = null
     )
 
-    private fun readEpisodeIds(data: String?, ids: MutableMap<String, String>): Pair<Int?, Int?>? {
-        val json = data?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
-        sequenceOf("imdbId", "imdb_id").map { json.optString(it) }
-            .firstOrNull { it.matches(Regex("tt[0-9]+")) }
-            ?.let { ids.putIfAbsent("imdb", it) }
-        for ((type, field) in listOf(
-            "tmdb" to "tmdbId", "kitsu" to "kitsuId", "mal" to "malId",
-            "anilist" to "anilistId", "simkl" to "simklId"
-        )) {
-            val value = json.optString(field).trim().removePrefix("$type:")
-            if (value.toLongOrNull()?.let { it > 0L } == true)
-                ids.putIfAbsent(type, value)
-        }
-        val season = json.optInt("imdbSeason").takeIf { it > 0 }
-        val episode = json.optInt("imdbEpisode").takeIf { it > 0 }
-        return if (season != null || episode != null) season to episode else null
-    }
-
     private fun originalPlaybackId(url: String, ids: Map<String, String>): String? {
         val json = runCatching { JSONObject(url) }.getOrNull()
         val raw = json?.optString("id")?.takeIf { it.isNotBlank() }
@@ -146,22 +121,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
                 null, null, emptyMap(), null, null, null, file)
         }
         val episode = state.meta as? ResultEpisode ?: run { return null }
-        val ids = linkedMapOf<String, String>()
-        val saved = readIdFromString(response.syncData["simkl"])
-        saved[SimklSyncServices.Imdb]?.let { ids["imdb"] = it }
-        saved[SimklSyncServices.Tmdb]?.let { ids["tmdb"] = it }
-        saved[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
-        saved[SimklSyncServices.Mal]?.let { ids["mal"] = it }
-        saved[SimklSyncServices.AniList]?.let { ids["anilist"] = it }
-        response.getImdbId()?.let { ids["imdb"] = it }
-        response.getTMDbId()?.let { ids["tmdb"] = it }
-        response.getKitsuId()?.let { ids["kitsu"] = it }
-        response.getMalId()?.let { ids["mal"] = it }
-        response.getAniListId()?.let { ids["anilist"] = it }
-        for (key in listOf("imdb", "tmdb", "kitsu", "mal", "anilist")) {
-            response.syncData[key]?.takeIf { it.isNotBlank() }?.let { ids.putIfAbsent(key, it) }
-        }
-        response.syncData["simkl"]?.takeIf { it.all(Char::isDigit) }?.let { ids["simkl"] = it }
+        val collected = ElevateMediaIdentity.collect(response, episode.data)
+        val ids = collected.asMap().toMutableMap()
         val stremio = APIHolder.allProviders.firstOrNull {
             it.name.equals(response.apiName, true) &&
                 it.javaClass.name == "com.hsp1020.StremioC"
@@ -170,14 +131,15 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             return null
         }
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
-        val imdbNumbers = readEpisodeIds(episode.data, ids)
+        val imdbNumbers = if (collected.imdbSeason != null || collected.imdbEpisode != null)
+            collected.imdbSeason to collected.imdbEpisode else null
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
         val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
             ?: episode.runTime else episode.runTime
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
-            episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
+            ElevateMediaIdentity.anime(response, episode, collected),
             stremio, if (stremio != null) episode.data else null, ids, imdbNumbers, urlId,
             expectedMinutes?.takeIf { it in 1 until 1_440 }?.toLong()?.times(60_000L))
     }
@@ -602,13 +564,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         return result
     }
 
-    private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> {
-        val mapped = ElevateIdResolver.simkl(id, movie) ?: return emptyMap()
-        return buildMap {
-            mapped.imdb?.let { put("imdb", it) }
-            mapped.tmdb?.let { put("tmdb", it) }
-        }
-    }
+    private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> =
+        ElevateMediaIdentity.enrichSimkl(
+            ElevateMediaIdentity.Ids(simkl = id), movie
+        ).asMap()
 
 
     /**
@@ -689,24 +648,12 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             return null // Never bypass StremioC's per-catalog History Sync toggle.
         }
 
-        val ids = linkedMapOf<String, String>()
-        header.url.substringBefore(':').takeIf { it.matches(Regex("tt[0-9]+")) }
-            ?.let { ids["imdb"] = it }
-        detail?.getImdbId()?.let { ids["imdb"] = it }
-        detail?.getTMDbId()?.let { ids["tmdb"] = it }
-        detail?.getKitsuId()?.let { ids["kitsu"] = it }
-        detail?.getMalId()?.let { ids["mal"] = it }
-        detail?.getAniListId()?.let { ids["anilist"] = it }
-        detail?.syncData?.get("simkl")?.let { saved ->
-            val parsed = readIdFromString(saved)
-            parsed[SimklSyncServices.Imdb]?.let { ids.putIfAbsent("imdb", it) }
-            parsed[SimklSyncServices.Tmdb]?.let { ids.putIfAbsent("tmdb", it) }
-            parsed[SimklSyncServices.Simkl]?.let { ids["simkl"] = it }
-            parsed[SimklSyncServices.Mal]?.let { ids["mal"] = it }
-            parsed[SimklSyncServices.AniList]?.let { ids["anilist"] = it }
-            saved.takeIf { it.all(Char::isDigit) }?.let { ids["simkl"] = it }
-        }
-        val imdbNumbers = readEpisodeIds(episodeData, ids)
+        val collected = ElevateMediaIdentity.collect(
+            detail, episodeData, urls = listOf(header.url), episodeFirst = true
+        )
+        val ids = collected.asMap().toMutableMap()
+        val imdbNumbers = if (collected.imdbSeason != null || collected.imdbEpisode != null)
+            collected.imdbSeason to collected.imdbEpisode else null
         if (detail == null || ids.isEmpty()) {
             ElevateSkipRepository.identityDownloaded(header, file, 0L)?.let { mapped ->
                 mapped.imdb?.let { ids.putIfAbsent("imdb", it) }

@@ -29,14 +29,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.Observer
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
 import com.lagradost.cloudstream3.MainActivity
-import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.Resource
@@ -57,7 +50,6 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import org.json.JSONArray
 import java.util.Locale
 import kotlin.math.round
 import kotlin.math.roundToInt
@@ -272,39 +264,13 @@ internal class ElevateMdbRatings(
     private fun otherIds(page: ResultData, model: ResultViewModel2): List<Pair<String, String>> {
         val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
             ?.takeIf { it.url == page.url }
-        val saved = readIdFromString(page.syncData["simkl"])
-        val ids = linkedMapOf<String, String>()
-        fun add(source: String, value: String?) {
-            val number = value?.removePrefix(source + ":")?.toLongOrNull()
-            if (number != null && number > 0L) ids.putIfAbsent(source, number.toString())
-        }
-        add("mal", response?.getMalId())
-        add("kitsu", response?.getKitsuId())
-        add("anilist", response?.getAniListId())
-        add("mal", saved[SimklSyncServices.Mal])
-        add("anilist", saved[SimklSyncServices.AniList])
-        for (source in listOf("mal", "kitsu", "anilist")) {
-            add(source, response?.syncData?.get(source))
-            add(source, page.syncData[source])
-        }
-        val animeId = Regex("^(mal|kitsu|anilist):([0-9]+)(?::.*)?$")
-        for (candidate in listOf(page.url, response?.url.orEmpty())) {
-            val meta = metaId.find(candidate)?.groupValues?.getOrNull(1)
-                ?.let(android.net.Uri::decode)
-            for (raw in listOfNotNull(meta, candidate)) animeId.matchEntire(raw)?.let {
-                add(it.groupValues[1], it.groupValues[2])
-            }
-            val json = runCatching { JSONObject(candidate) }.getOrNull()
-            for ((source, names) in mapOf(
-                "mal" to listOf("malId", "mal_id"),
-                "kitsu" to listOf("kitsuId", "kitsu_id"),
-                "anilist" to listOf("anilistId", "anilist_id", "aniListId")
-            )) for (name in names) add(source, json?.optString(name))
-        }
-        add("simkl", saved[SimklSyncServices.Simkl])
-        add("simkl", page.syncData["simkl"])
-        add("simkl", response?.syncData?.get("simkl"))
-        return ids.map { it.key to it.value }
+        val found = ElevateMediaIdentity.collect(
+            response, extraSync = page.syncData, urls = listOf(page.url)
+        )
+        return listOfNotNull(
+            found.mal?.let { "mal" to it }, found.kitsu?.let { "kitsu" to it },
+            found.anilist?.let { "anilist" to it }, found.simkl?.let { "simkl" to it }
+        )
     }
 
     private suspend fun resolveOther(
@@ -324,46 +290,14 @@ internal class ElevateMdbRatings(
         if (apiKey.isBlank()) return null to null
         val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
             ?.takeIf { it.url == page.url }
-        val saved = readIdFromString(page.syncData["simkl"])
-        var imdb = response?.getImdbId()
-            ?: saved[SimklSyncServices.Imdb]
-            ?: page.syncData["imdb"]
-        var tmdb = response?.getTMDbId()
-            ?: saved[SimklSyncServices.Tmdb]
-            ?: page.syncData["tmdb"]
-        val candidates = listOf(page.url, response?.url.orEmpty())
-        for (candidate in candidates) {
-            if (imdbPattern.matches(candidate.substringBefore(':'))) {
-                imdb = candidate.substringBefore(':')
-            }
-            val meta = metaId.find(candidate)?.groupValues?.getOrNull(1)?.let(android.net.Uri::decode)
-            if (imdb == null && meta != null && imdbPattern.matches(meta)) imdb = meta
-            if (tmdb == null && meta?.startsWith("tmdb:") == true)
-                tmdb = meta.removePrefix("tmdb:")
-            val extra = runCatching { JSONObject(candidate) }.getOrNull()
-            if (imdb == null) imdb = listOf("imdbId", "imdb_id").firstNotNullOfOrNull {
-                extra?.optString(it)?.takeIf { value -> imdbPattern.matches(value) }
-            }
-            if (tmdb == null) tmdb = listOf("tmdbId", "tmdb_id", "_tmdbId", "moviedb_id")
-                .firstNotNullOfOrNull {
-                    extra?.optString(it)?.removePrefix("tmdb:")?.takeIf { value ->
-                        value.toLongOrNull()?.let { n -> n > 0 } == true
-                    }
-                }
-        }
+        val found = ElevateMediaIdentity.collect(
+            response, extraSync = page.syncData, urls = listOf(page.url)
+        )
         val movie = response?.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (response == null && page.url.contains("/meta/movie/"))
-        val numericTmdb = tmdb?.let {
-            when {
-                it.toLongOrNull() != null -> it
-                it.startsWith("tmdb:") -> it.substringAfterLast(':')
-                else -> null
-            }
-        }
         val key = when {
-            imdb?.let(imdbPattern::matches) == true -> Key("imdb", imdb, movie, apiKey.hashCode())
-            numericTmdb?.toLongOrNull()?.let { it > 0 } == true ->
-                Key("tmdb", numericTmdb, movie, apiKey.hashCode())
+            found.imdb != null -> Key("imdb", found.imdb, movie, apiKey.hashCode())
+            found.tmdb != null -> Key("tmdb", found.tmdb, movie, apiKey.hashCode())
             else -> null
         }
         return key to apiKey
@@ -525,47 +459,18 @@ internal class ElevateMdbRatings(
 
     /** Resolve the selected home hero using the same MDB key and anime/Simkl mapping. */
     private fun heroIds(item: LoadResponse, hash: Int): Pair<Key?, List<Pair<String, String>>> {
-        val saved = readIdFromString(item.syncData["simkl"])
-        val extra = runCatching { JSONObject(item.url) }.getOrNull()
-        val meta = metaId.find(item.url)?.groupValues?.getOrNull(1)
-            ?.let(android.net.Uri::decode)
+        val found = ElevateMediaIdentity.collect(item)
         val movie = heroMovie(item)
-        val imdb = listOf(item.getImdbId(), saved[SimklSyncServices.Imdb],
-            item.syncData["imdb"], extra?.optString("imdbId"), extra?.optString("imdb_id"),
-            meta, item.url.substringBefore(':')).firstOrNull {
-                it != null && imdbPattern.matches(it)
-            }
-        val tmdb = listOf(item.getTMDbId(), saved[SimklSyncServices.Tmdb],
-            item.syncData["tmdb"], extra?.optString("tmdbId"), extra?.optString("tmdb_id"),
-            extra?.optString("moviedb_id"), meta?.takeIf { it.startsWith("tmdb:") },
-            item.url.takeIf { it.startsWith("tmdb:") }).firstNotNullOfOrNull { raw ->
-                raw?.substringAfterLast(':')?.toLongOrNull()?.takeIf { it > 0 }?.toString()
-            }
         val direct = when {
-            imdb != null -> Key("imdb", imdb, movie, hash)
-            tmdb != null -> Key("tmdb", tmdb, movie, hash)
+            found.imdb != null -> Key("imdb", found.imdb, movie, hash)
+            found.tmdb != null -> Key("tmdb", found.tmdb, movie, hash)
             else -> null
         }
         if (direct != null) return direct to emptyList()
-        val alternatives = linkedMapOf<String, String>()
-        fun add(source: String, raw: String?) {
-            val id = raw?.removePrefix("$source:")?.substringBefore(':')
-                ?.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return
-            alternatives.putIfAbsent(source, id)
-        }
-        add("mal", item.getMalId())
-        add("kitsu", item.getKitsuId())
-        add("anilist", item.getAniListId())
-        add("mal", saved[SimklSyncServices.Mal])
-        add("anilist", saved[SimklSyncServices.AniList])
-        for (source in listOf("mal", "kitsu", "anilist", "simkl")) {
-            add(source, item.syncData[source])
-            add(source, extra?.optString(source))
-            add(source, meta?.takeIf { it.startsWith("$source:") })
-            add(source, item.url.takeIf { it.startsWith("$source:") })
-        }
-        add("simkl", saved[SimklSyncServices.Simkl])
-        return null to alternatives.map { it.key to it.value }
+        return null to listOfNotNull(
+            found.mal?.let { "mal" to it }, found.kitsu?.let { "kitsu" to it },
+            found.anilist?.let { "anilist" to it }, found.simkl?.let { "simkl" to it }
+        )
     }
 
     /** UI-only home binding: no changes to native LoadResponses or StremioC. */

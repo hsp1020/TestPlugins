@@ -27,9 +27,18 @@ import org.json.JSONObject
 internal object ElevateOfflineMedia {
     private const val PREFS = "elevate_offline_playback"
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private fun key(i: ElevateSkipRepository.Identity) = listOf(
-        i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu, i.movie, i.season, i.episode
-    ).joinToString("|")
+    private fun key(i: ElevateSkipRepository.Identity): String {
+        val base = listOf(i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu,
+            i.movie, i.season, i.episode)
+        // Preserve old cache keys unless the original anime work or Simkl-only ID
+        // changes the episode identity; never share stamps between different works.
+        val independent = i.original?.substringBefore(':') in setOf("kitsu", "mal", "anilist")
+        val withoutIds = listOf(i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu).all { it == null }
+        return (base + listOfNotNull(
+            i.original.takeIf { independent },
+            i.simkl.takeIf { withoutIds }
+        )).joinToString("|")
+    }
     private fun JSONObject.string(name: String) =
         optString(name).takeUnless { it.isBlank() || it == "null" }
 
@@ -51,7 +60,7 @@ internal object ElevateOfflineMedia {
                 j.string("anilist"), j.string("kitsu"),
                 j.optInt("season").takeIf { j.has("season") && !j.isNull("season") && it >= 0 },
                 j.optInt("episode"), j.optBoolean("anime"), j.optBoolean("movie"),
-                0L, null
+                0L, null, j.string("simkl"), j.string("original")
             )
         }.getOrNull()
     }
@@ -59,6 +68,7 @@ internal object ElevateOfflineMedia {
         val j = JSONObject().apply {
             put("imdb", i.imdb); put("tmdb", i.tmdb); put("mal", i.mal)
             put("anilist", i.anilist); put("kitsu", i.kitsu)
+            put("simkl", i.simkl); put("original", i.original)
             put("season", i.season); put("episode", i.episode)
             put("anime", i.anime); put("movie", i.movie)
         }

@@ -23,15 +23,8 @@ import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
-import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.app
@@ -88,22 +81,11 @@ internal class ElevateActorHook(private val appContext: Application) :
         raw?.substringBefore(':')?.toLongOrNull()?.takeIf { it > 0 }?.toString()
 
     private fun ids(page: ResultData, response: LoadResponse?): Ids {
-        val saved = LoadResponse.readIdFromString(page.syncData["simkl"])
-        fun direct(key: String): String? = response?.syncData?.get(key)
-            ?: page.syncData[key]
-        fun number(key: String) = positive(direct(key)?.removePrefix("$key:"))
-        return Ids(
-            anilist = positive(response?.getAniListId()) ?:
-                positive(saved[SimklSyncServices.AniList]) ?: number("anilist"),
-            mal = positive(response?.getMalId()) ?:
-                positive(saved[SimklSyncServices.Mal]) ?: number("mal"),
-            kitsu = positive(response?.getKitsuId()) ?: number("kitsu"),
-            tmdb = positive(response?.getTMDbId()) ?:
-                positive(saved[SimklSyncServices.Tmdb]) ?: number("tmdb"),
-            imdb = (response?.getImdbId() ?: saved[SimklSyncServices.Imdb] ?: direct("imdb"))
-                ?.takeIf { it.matches(Regex("tt[0-9]{5,10}")) },
-            simkl = positive(saved[SimklSyncServices.Simkl]) ?: number("simkl")
+        val found = ElevateMediaIdentity.collect(
+            response, extraSync = page.syncData, urls = listOf(page.url)
         )
+        return Ids(found.anilist, found.mal, found.kitsu,
+            found.tmdb, found.imdb, found.simkl)
     }
 
     private suspend fun anilist(id: String): CastResult? {
@@ -236,8 +218,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         val movie = type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             (type == null || type == TvType.Others) && kind == "movie"
         val anime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
-            (type in setOf(TvType.Others, TvType.Cartoon) &&
-                (ids.anilist != null || ids.mal != null))
+            ids.anilist != null || ids.mal != null || ids.kitsu != null
         trace("RESOLVE_START", "url=${page.url.take(140)} type=$type ids=$ids season=$selectedSeason multi=$multiSeason anime=$anime")
         val options = if (anime) {
             if (multiSeason) emptyList() else listOf("anilist", "mal")

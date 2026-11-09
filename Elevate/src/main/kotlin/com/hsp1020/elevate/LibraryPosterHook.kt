@@ -592,10 +592,11 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
         val syncData = DataStoreHelper.getBookmarkedData(item.id)
             ?.takeIf { it.url == item.url }?.syncData
-        val saved = ids(
-            syncData?.get("imdb"), syncData?.get("tmdb"),
-            syncData?.get("mal"), syncData?.get("anilist"), syncData?.get("kitsu")
+        val collected = ElevateMediaIdentity.collect(
+            extraSync = syncData, urls = listOf(item.url, item.syncId.orEmpty())
         )
+        val saved = ids(collected.imdb, collected.tmdb,
+            collected.mal, collected.anilist, collected.kitsu)
         if (usable(saved) && (canonical(saved) || !forXrdb)) return saved
 
         val source = "${item.url} ${item.syncId}"

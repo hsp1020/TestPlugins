@@ -17,8 +17,9 @@ import org.json.JSONObject
 internal object ElevateAnimeIdResolver {
     internal data class Mapping(
         val kitsu: String?, val mal: String?, val anilist: String?,
-        val imdb: String?, val tmdb: String?
+        val imdb: String?, val tmdb: String?, val fromEpisode: Int? = null
     )
+    internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int)
 
     private val hosts = listOf(
         "aiostreams.elfhosted.com", "aiostreams.fortheweak.cloud",
@@ -52,6 +53,31 @@ internal object ElevateAnimeIdResolver {
         return resolveByField("imdbId", id, season)
     }
 
+    /** Same AIOStreams flight/cache as title and season mapping, with episode offset retained. */
+    suspend fun resolveEpisode(
+        imdb: String?, mal: String?, anilist: String?, kitsu: String?,
+        season: Int?, episode: Int
+    ): EpisodeMapping? {
+        if (episode <= 0) return null
+        val (field, raw) = when {
+            imdb != null -> "imdbId" to imdb
+            mal != null -> "malId" to mal
+            anilist != null -> "anilistId" to anilist
+            kitsu != null -> "kitsuId" to kitsu
+            else -> return null
+        }
+        val id = if (field == "imdbId")
+            raw.takeIf { it.matches(Regex("tt[0-9]+")) } ?: return null
+        else raw.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
+        val mapped = resolveByField(field, id, if (field == "imdbId") season else null)
+            ?: return null
+        // An already season-local episode must not become negative after absolute offset.
+        val local = if (field == "imdbId" && mapped.fromEpisode != null &&
+            episode >= mapped.fromEpisode) episode - mapped.fromEpisode + 1 else episode
+        if (local <= 0) return null
+        return EpisodeMapping(mapped.mal, mapped.anilist, local)
+    }
+
     private suspend fun resolveByField(field: String, id: String, season: Int?): Mapping? {
         val key = field + ":" + id + (season?.let { ":$it" } ?: "")
         val now = System.currentTimeMillis()
@@ -83,12 +109,10 @@ internal object ElevateAnimeIdResolver {
                         // Match the exact IMDb identity and season validation in StremioC.
                         if (ids.optString(field) != id) continue
                         if (field == "imdbId" && season != null && season > 1) {
-                            val mappedSeason = listOf("imdb", "tvdb", "trakt", "tmdb")
-                                .firstNotNullOfOrNull { source ->
-                                    data.optJSONObject(source)?.optInt("seasonNumber")
-                                        ?.takeIf { it > 0 }
-                                }
-                            if (mappedSeason != season) continue
+                            val matches = listOf("imdb", "tvdb", "trakt", "tmdb").any { source ->
+                                data.optJSONObject(source)?.optInt("seasonNumber") == season
+                            }
+                            if (!matches) continue
                         }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()
@@ -96,10 +120,15 @@ internal object ElevateAnimeIdResolver {
                         val mal = positive("malId")
                         val anilist = positive("anilistId")
                         if (kitsu == null && mal == null && anilist == null) continue
+                        val episodeInfo = listOf("imdb", "tvdb", "trakt", "tmdb")
+                            .mapNotNull(data::optJSONObject).firstOrNull {
+                                season == null || it.optInt("seasonNumber") == season
+                            }
                         result = Mapping(
                             kitsu, mal, anilist,
                             ids.optString("imdbId").takeIf { it.matches(Regex("tt[0-9]+")) },
-                            positive("themoviedbId")
+                            positive("themoviedbId"),
+                            episodeInfo?.optInt("fromEpisode")?.takeIf { it > 0 }
                         )
                         break
                     }

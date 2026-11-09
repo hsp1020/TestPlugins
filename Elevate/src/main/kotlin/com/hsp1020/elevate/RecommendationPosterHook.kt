@@ -21,13 +21,6 @@ import coil3.request.crossfade
 import coil3.request.placeholder
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
-import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
-import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
-import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
@@ -53,7 +46,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
-import org.json.JSONArray
 
 /** Apply the existing Elevate poster configuration to native recommendation cards. */
 internal class RecommendationPosterHook(private val application: Application) :
@@ -497,30 +489,12 @@ internal class RecommendationPosterHook(private val application: Application) :
 
                                     return@withTimeout null
                                 }
-                                val saved = readIdFromString(response.syncData["simkl"])
-                                fun valid(value: String?): String? = value?.substringAfterLast(':')
-                                    ?.toLongOrNull()?.takeIf { it > 0 }?.toString()
-                                fun firstId(vararg candidates: String?): String? =
-                                    candidates.firstNotNullOfOrNull { valid(it) }
+                                val shared = ElevateMediaIdentity.collect(response)
                                 val result = PosterIds(
-                                    imdb = listOf(response.getImdbId(), response.syncData["imdb"],
-                                        saved[SimklSyncServices.Imdb], IMDB.find(response.url)?.value)
-                                        .firstNotNullOfOrNull { it?.takeIf(IMDB_EXACT::matches) },
-                                    tmdb = firstId(response.getTMDbId(), response.syncData["tmdb"],
-                                        saved[SimklSyncServices.Tmdb],
-                                        TMDB.find(response.url)?.groupValues?.get(1)),
-                                    mal = firstId(response.getMalId(), response.syncData["mal"],
-                                        saved[SimklSyncServices.Mal],
-                                        MAL.find(response.url)?.groupValues?.get(1)),
-                                    anilist = firstId(response.getAniListId(),
-                                        response.syncData["anilist"], saved[SimklSyncServices.AniList],
-                                        ANILIST.find(response.url)?.groupValues?.get(1)),
-                                    kitsu = firstId(response.getKitsuId(), response.syncData["kitsu"],
-                                        KITSU.find(response.url)?.groupValues?.get(1))
+                                    shared.imdb?.takeIf(IMDB_EXACT::matches), shared.tmdb,
+                                    shared.mal, shared.anilist, shared.kitsu
                                 )
-                                val simkl = firstId(saved[SimklSyncServices.Simkl],
-                                    response.syncData["simkl"],
-                                    SIMKL.find(response.url)?.groupValues?.get(1))
+                                val simkl = shared.simkl
                                 if (!result.available && simkl == null) null else {
 
                                     DetailIds(result, simkl, when (response.type) {
@@ -578,84 +552,16 @@ internal class RecommendationPosterHook(private val application: Application) :
     }
 
     private fun directIds(card: SearchResponse): Pair<PosterIds, String?> {
-        var imdb: String? = null
-        var tmdb: String? = null
-        var mal: String? = null
-        var anilist: String? = null
-        var kitsu: String? = null
-        var simkl: String? = null
-        fun positive(raw: String?): String? = raw?.removePrefix("tmdb:")
-            ?.toLongOrNull()?.takeIf { it > 0 }?.toString()
-        fun read(text: String?) {
-            if (text.isNullOrBlank()) return
-            val value = Uri.decode(text)
-            if (imdb == null) imdb = IMDB.find(value)?.value
-            if (tmdb == null) tmdb = TMDB.find(value)?.groupValues?.get(1)
-            if (mal == null) mal = MAL.find(value)?.groupValues?.get(1)
-            if (anilist == null) anilist = ANILIST.find(value)?.groupValues?.get(1)
-            if (kitsu == null) kitsu = KITSU.find(value)?.groupValues?.get(1)
-            if (simkl == null) simkl = SIMKL.find(value)?.groupValues?.get(1)
-            val json = if (value.trimStart().startsWith("{"))
-                runCatching { JSONObject(value) }.getOrNull() else null
-            if (json != null) {
-                val nested = json.optJSONObject("ids")
-                fun field(vararg keys: String): String? =
-                    keys.firstNotNullOfOrNull { key ->
-                        listOfNotNull(json.optString(key).takeIf(String::isNotBlank),
-                            nested?.optString(key)?.takeIf(String::isNotBlank)).firstOrNull()
-                    }
-                if (imdb == null) imdb = field("imdb", "imdbId", "imdb_id")
-                    ?.takeIf(IMDB_EXACT::matches)
-                if (tmdb == null) tmdb = positive(field("tmdb", "tmdbId", "tmdb_id",
-                    "_tmdbId", "moviedb_id"))
-                if (mal == null) mal = positive(field("mal", "malId", "mal_id"))
-                if (anilist == null) anilist = positive(field("anilist", "aniListId", "anilistId"))
-                if (kitsu == null) kitsu = positive(field("kitsu", "kitsuId", "kitsu_id"))
-                if (simkl == null) simkl = positive(field("simkl", "simklId"))
-            }
-            val uri = runCatching { Uri.parse(value) }.getOrNull()
-            if (uri?.scheme in listOf("http", "https")) {
-                fun query(vararg keys: String): String? =
-                    keys.firstNotNullOfOrNull { runCatching { uri?.getQueryParameter(it) }.getOrNull() }
-                if (imdb == null) imdb = query("imdb", "imdb_id", "imdbId")
-                    ?.takeIf(IMDB_EXACT::matches)
-                if (tmdb == null) tmdb = positive(query("tmdb", "tmdb_id", "tmdbId"))
-                if (mal == null) mal = positive(query("mal", "malId"))
-                if (anilist == null) anilist = positive(query("anilist", "anilistId"))
-                if (kitsu == null) kitsu = positive(query("kitsu", "kitsuId"))
-                if (simkl == null) simkl = positive(query("simkl", "simklId"))
-                val host = uri?.host?.removePrefix("www.")
-                val parts = uri?.pathSegments.orEmpty()
-                if (anilist == null && host == "anilist.co" &&
-                    parts.size >= 2 && parts[0] == "anime")
-                    anilist = positive(parts[1])
-                if (mal == null && host == "myanimelist.net" &&
-                    parts.size >= 2 && parts[0] == "anime")
-                    mal = positive(parts[1])
-                if (kitsu == null && host == "kitsu.app" &&
-                    parts.size >= 2 && parts[0] == "anime")
-                    kitsu = positive(parts[1])
-                if (simkl == null && host == "simkl.com") {
-                    if (parts.size >= 2 && parts[0] in listOf("movie", "movies", "show", "shows", "tv", "anime"))
-                        simkl = positive(parts[1])
-                }
-                if (tmdb == null && host == "themoviedb.org") {
-                    if (parts.size >= 2 && parts[0] in listOf("movie", "tv"))
-                        tmdb = positive(parts[1])
-                }
-            }
-        }
-        read(card.url)
-        read(card.posterUrl)
-        // A numeric JSON "id" is only a TMDB ID when the provider itself
-        // declares a TMDB origin. Never guess numeric IDs on scraper sites.
+        val shared = ElevateMediaIdentity.collect(
+            urls = listOfNotNull(card.url, card.posterUrl)
+        )
+        var tmdb = shared.tmdb
         if (tmdb == null) {
+            // Numeric JSON IDs are TMDB only for verified TMDB-backed providers.
             val json = runCatching { JSONObject(card.url) }.getOrNull()
             val candidate = if (json?.optString("type") in setOf("movie", "tv", "series"))
-                positive(json?.optString("id")) else null
+                json?.optString("id")?.toLongOrNull()?.takeIf { it > 0 }?.toString() else null
             if (candidate != null) {
-                // These providers use TMDB JSON IDs but need not expose a TMDB mainUrl.
-                // Never interpret arbitrary scraper JSON ids as TMDB identifiers.
                 if (card.apiName in setOf("StreamPlay", "CineTmdb")) {
                     tmdb = candidate
                 } else {
@@ -665,7 +571,8 @@ internal class RecommendationPosterHook(private val application: Application) :
                 }
             }
         }
-        return PosterIds(imdb, tmdb, mal, anilist, kitsu) to simkl
+        return PosterIds(shared.imdb?.takeIf(IMDB_EXACT::matches), tmdb,
+            shared.mal, shared.anilist, shared.kitsu) to shared.simkl
     }
 
     override fun onActivityResumed(activity: Activity) {

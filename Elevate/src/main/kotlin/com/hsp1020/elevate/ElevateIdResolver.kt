@@ -186,7 +186,8 @@ internal object ElevateIdResolver {
                             if (resolvedSegment == "anime") numeric("kitsu") else null,
                             actualMovie, resolvedSegment
                         ).takeIf { it.imdb != null || it.tmdb != null ||
-                            it.mal != null || it.anilist != null || it.kitsu != null }
+                            it.mal != null || it.anilist != null || it.kitsu != null ||
+                            it.segment == "anime" }
                     }
                     }
                 } catch (cancelled: CancellationException) {

@@ -26,11 +26,6 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
@@ -972,63 +967,40 @@ internal object ElevateSkipRepository {
     private const val DAY = 86_400_000L
     private const val MISS = 900_000L
     private val imdbPattern = Regex("^tt[0-9]+$")
-    private val hosts = listOf(
-        "aiostreams.elfhosted.com", "aiostreams.fortheweak.cloud",
-        "aiostreamsfortheweebsstable.midnightignite.me",
-        "aio.atbphosting.com", "aiostreams.stremio.ru", "aiostreams.viren070.me"
-    )
-
     internal data class Identity(
         val imdb: String?, val tmdb: String?, val mal: String?, val anilist: String?,
         val kitsu: String?, val season: Int?, val episode: Int, val anime: Boolean,
-        val movie: Boolean, val duration: Long, val absoluteEpisode: Int?
+        val movie: Boolean, val duration: Long, val absoluteEpisode: Int?,
+        val simkl: String? = null, val original: String? = null
     ) {
         val key: String
-            get() = listOf(imdb, tmdb, mal, anilist, kitsu, season, episode, anime, movie, duration)
-                .joinToString("|")
+            get() = listOf(imdb, tmdb, mal, anilist, kitsu, simkl, original,
+                season, episode, anime, movie, duration).joinToString("|")
     }
     private data class OfflineIds(
         val imdb: String?, val tmdb: String?, val mal: String?,
-        val anilist: String?, val kitsu: String?, val anime: Boolean, val movie: Boolean
+        val anilist: String?, val kitsu: String?, val simkl: String?,
+        val original: String?, val anime: Boolean, val movie: Boolean
     )
     // Bounded cache stores identifiers only, never full provider responses.
     private val offlineIds = LinkedHashMap<String, Timed<OfflineIds?>>(24)
-    private data class Mapping(val mal: String?, val anilist: String?, val episode: Int)
     private data class Timed<T>(val data: T, val until: Long)
-    private val mappingCache = ConcurrentHashMap<String, Timed<Mapping?>>()
     private val resultCache = ConcurrentHashMap<String, Timed<List<VideoSkipStamp>>>()
 
     private fun JSONObject.nonEmpty(key: String): String? =
         optString(key).trim().takeUnless { it.isEmpty() || it == "null" }
-    private fun JSONObject.positive(key: String): Int? =
-        optInt(key).takeIf { it > 0 }
     private fun JSONObject.node(key: String): JSONObject? = optJSONObject(key)
-    private fun id(value: String?): String? = value?.takeIf { it.isNotBlank() && it != "null" }
 
     fun identity(response: LoadResponse, episode: ResultEpisode, duration: Long): Identity {
-        val extra = runCatching { JSONObject(episode.data) }.getOrNull()
-        val imdb = id(response.getImdbId()) ?: id(extra?.nonEmpty("imdbId"))
-            ?: response.url.substringBefore(':').takeIf { imdbPattern.matches(it) }
-        val tmdb = id(response.getTMDbId()) ?: id(extra?.nonEmpty("tmdbId"))
-        val original = extra?.nonEmpty("originalAnimeId")
-        val mal = id(extra?.positive("malId")?.toString()) ?: response.getMalId()
-            ?: original?.takeIf { it.startsWith("mal:") }?.substringAfter(':')?.substringBefore(':')
-        val anilist = id(extra?.positive("anilistId")?.toString()) ?: response.getAniListId()
-            ?: original?.takeIf { it.startsWith("anilist:") }?.substringAfter(':')?.substringBefore(':')
-        val kitsu = id(extra?.nonEmpty("kitsuId")) ?: response.getKitsuId()
-            ?: original?.takeIf { it.startsWith("kitsu:") }?.substringAfter(':')?.substringBefore(':')
-        val tags = response.tags.orEmpty().map { it.lowercase() }
-        val anime = response.type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
-            episode.tvType in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
-            extra?.optBoolean("isAnime") == true ||
-            tags.any { it == "anime" } ||
-            (tags.any { it == "animation" } && tags.any { it == "japanese" }) ||
-            mal != null || anilist != null || kitsu != null
+        val ids = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
         val movie = response.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
-        return Identity(imdb, tmdb, mal, anilist, kitsu,
-            episode.season ?: extra?.positive("imdbSeason"), episode.episode,
-            anime, movie, duration, episode.totalEpisodeIndex)
+        val independent = ids.original?.substringBefore(':') in setOf("kitsu", "mal", "anilist")
+        return Identity(ids.imdb, ids.tmdb, ids.mal, ids.anilist, ids.kitsu,
+            if (independent) episode.season ?: 1 else ids.imdbSeason ?: episode.season,
+            if (independent) episode.episode else ids.imdbEpisode ?: episode.episode,
+            ElevateMediaIdentity.anime(response, episode, ids),
+            movie, duration, episode.totalEpisodeIndex, ids.simkl, ids.original)
     }
 
     suspend fun identityDownloaded(
@@ -1062,17 +1034,16 @@ internal object ElevateSkipRepository {
                     null
                 }
             }
-            val imdb = directImdb ?: response?.getImdbId()
-            val tmdb = response?.getTMDbId()
-            val mal = response?.getMalId()
-            val anilist = response?.getAniListId()
-            val kitsu = response?.getKitsuId()
-            val found = if (listOf(imdb, tmdb, mal, anilist, kitsu).all { it.isNullOrBlank() })
-                null else OfflineIds(imdb, tmdb, mal, anilist, kitsu,
-                    type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
-                        response?.type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
-                        mal != null || anilist != null || kitsu != null,
-                    type in setOf(TvType.Movie, TvType.AnimeMovie))
+            val collected = ElevateMediaIdentity.collect(response, urls = listOf(header.url))
+                .merge(ElevateMediaIdentity.Ids(imdb = directImdb))
+            val movie = type in setOf(TvType.Movie, TvType.AnimeMovie)
+            val ids = if (collected.simkl != null &&
+                (!collected.animeIds || collected.imdb == null && collected.tmdb == null))
+                ElevateMediaIdentity.enrichSimkl(collected, movie) else collected
+            val found = if (ids.asMap().isEmpty()) null else OfflineIds(
+                ids.imdb, ids.tmdb, ids.mal, ids.anilist, ids.kitsu, ids.simkl, ids.original,
+                type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
+                    ElevateMediaIdentity.anime(response, null, ids), movie)
             synchronized(offlineIds) {
                 offlineIds[key] = Timed(found, now + if (found != null) DAY else MISS)
                 if (offlineIds.size > 24) offlineIds.remove(offlineIds.keys.first())
@@ -1080,7 +1051,8 @@ internal object ElevateSkipRepository {
             found
         } ?: return null
         return Identity(info.imdb, info.tmdb, info.mal, info.anilist, info.kitsu,
-            file.season, file.episode ?: 0, info.anime, info.movie, duration, null).also { resolved ->
+            file.season, file.episode ?: 0, info.anime, info.movie, duration, null,
+            info.simkl, info.original).also { resolved ->
             CloudStreamApp.context?.let { ctx ->
                 ElevateOfflineMedia.putIdentity(ctx, header.id, resolved)
                 if (resolved.anime) ElevateOfflineMedia.putAnime(ctx, header.id, true)
@@ -1111,51 +1083,18 @@ internal object ElevateSkipRepository {
         catch (ex: CancellationException) { throw ex }
         catch (_: Exception) { null }
 
-    private suspend fun mapped(i: Identity): Mapping? {
+    private suspend fun mapped(i: Identity): ElevateAnimeIdResolver.EpisodeMapping? {
         if (!i.anime) return null
-        val (kind, value) = when {
-            i.imdb != null -> "imdbId" to i.imdb
-            i.mal != null -> "malId" to i.mal
-            i.anilist != null -> "anilistId" to i.anilist
-            i.kitsu != null -> "kitsuId" to i.kitsu
-            else -> return null
+        return when (i.original?.substringBefore(':')) {
+            "kitsu" -> ElevateAnimeIdResolver.resolveEpisode(
+                null, null, null, i.kitsu, i.season, i.episode)
+            "mal" -> ElevateAnimeIdResolver.resolveEpisode(
+                null, i.mal, null, null, i.season, i.episode)
+            "anilist" -> ElevateAnimeIdResolver.resolveEpisode(
+                null, null, i.anilist, null, i.season, i.episode)
+            else -> ElevateAnimeIdResolver.resolveEpisode(
+                i.imdb, i.mal, i.anilist, i.kitsu, i.season, i.episode)
         }
-        val query = "idType=" + kind + "&idValue=" + value +
-            (if (kind == "imdbId" && i.season != null) "&season=" + i.season else "") +
-            (if (kind == "imdbId") "&episode=" + i.episode else "")
-        val now = System.currentTimeMillis()
-        mappingCache[query]?.takeIf { it.until > now }?.let { return it.data }
-        var result: Mapping? = null
-        for (host in hosts) {
-            val root = request("https://" + host + "/api/v1/anime?" + query) ?: continue
-            if (!root.optBoolean("success")) continue
-            val data = root.node("data") ?: break
-            val ids = data.node("mappings") ?: continue
-            if (ids.nonEmpty(kind) != value) continue
-            val season = i.season
-            if (kind == "imdbId" && season != null && season > 1) {
-                val matches = listOf("imdb", "tvdb", "trakt", "tmdb").any {
-                    data.node(it)?.positive("seasonNumber") == season
-                }
-                if (!matches) continue
-            }
-            val episodeMap = listOf("imdb", "tvdb", "trakt", "tmdb")
-                .mapNotNull { data.node(it) }
-                .firstOrNull { candidate ->
-                    i.season == null || candidate.positive("seasonNumber") == i.season
-                }
-            val fromEpisode = episodeMap?.positive("fromEpisode")
-            val local = if (kind == "imdbId" && fromEpisode != null) {
-                (i.episode - fromEpisode + 1).takeIf { it > 0 }
-            } else i.episode
-            if (local == null) continue
-            result = Mapping(ids.positive("malId")?.toString(),
-                ids.positive("anilistId")?.toString(), local)
-            if (result.mal != null || result.anilist != null) break
-        }
-        if (mappingCache.size >= 600) mappingCache.clear()
-        mappingCache[query] = Timed(result, now + if (result == null) MISS else DAY)
-        return result
     }
 
     private fun category(type: SkipType): String = when (type) {
@@ -1357,19 +1296,31 @@ internal object ElevateSkipRepository {
         resultCache[i.key]?.takeIf { it.until > now }?.let {
             return@withContext it.data
         }
-        val result = withTimeoutOrNull(19_000L) {
+        val needsSimkl = i.simkl != null && (!i.anime || i.imdb == null && i.tmdb == null)
+        val result = withTimeoutOrNull(if (needsSimkl) 25_000L else 19_000L) {
+            val target = if (needsSimkl) {
+                val ids = ElevateMediaIdentity.enrichSimkl(
+                    ElevateMediaIdentity.Ids(i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu, i.simkl),
+                    i.movie
+                )
+                i.copy(
+                    imdb = ids.imdb, tmdb = ids.tmdb, mal = ids.mal,
+                    anilist = ids.anilist, kitsu = ids.kitsu,
+                    anime = i.anime || ids.animeIds || ids.simklAnime
+                )
+            } else i
             coroutineScope {
                 val mapping = async {
-                    try { withTimeoutOrNull(8_000L) { mapped(i) } }
+                    try { withTimeoutOrNull(8_000L) { mapped(target) } }
                     catch (ex: CancellationException) { throw ex }
                     catch (ex: Exception) {
                         null
                     }
                 }
-                val intro = async { provider { introDb(i) } }
-                val theIntro = async { provider { theIntroDB(i) } }
-                val ani = async { provider { aniSkip(i, mapping.await()) } }
-                val anime = async { provider { animeSkip(i, mapping.await()) } }
+                val intro = async { provider { introDb(target) } }
+                val theIntro = async { provider { theIntroDB(target) } }
+                val ani = async { provider { aniSkip(target, mapping.await()) } }
+                val anime = async { provider { animeSkip(target, mapping.await()) } }
                 val groups = listOf(intro.await(), anime.await(), ani.await(), theIntro.await())
                 choose(*groups.toTypedArray())
             }
