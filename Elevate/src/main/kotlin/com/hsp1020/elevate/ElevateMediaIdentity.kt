@@ -4,9 +4,6 @@ import android.net.Uri
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.getKitsuId
 import com.lagradost.cloudstream3.LoadResponse.Companion.readIdFromString
 import com.lagradost.cloudstream3.SimklSyncServices
 import com.lagradost.cloudstream3.TvType
@@ -87,6 +84,9 @@ internal object ElevateMediaIdentity {
             number(values["simkl"], "simkl") ?: number(saved[SimklSyncServices.Simkl], "simkl")
         )
     }
+    // CloudStream syncData can include unverified title-search tracker IDs.
+    private fun parseUntrustedSync(values: Map<String, String>?): Ids =
+        parseSync(values).copy(mal = null, anilist = null, kitsu = null)
     private fun parseUrl(value: String?): Ids {
         if (value.isNullOrBlank()) return Ids()
         val raw = runCatching { Uri.decode(value) }.getOrDefault(value)
@@ -132,9 +132,7 @@ internal object ElevateMediaIdentity {
         episodeFirst: Boolean = false
     ): Ids {
         val native = if (response == null) Ids() else Ids(
-            imdb(response.getImdbId()), number(response.getTMDbId(), "tmdb"),
-            number(response.getMalId(), "mal"), number(response.getAniListId(), "anilist"),
-            number(response.getKitsuId(), "kitsu")
+            imdb(response.getImdbId()), number(response.getTMDbId(), "tmdb")
         )
         val episodeIds = parseJson(episodeData)
         val preferred = native.merge(episodeIds)
@@ -142,7 +140,8 @@ internal object ElevateMediaIdentity {
             mal = episodeIds.mal ?: native.mal,
             anilist = episodeIds.anilist ?: native.anilist,
             kitsu = episodeIds.kitsu ?: native.kitsu
-        ) else preferred).merge(parseSync(response?.syncData)).merge(parseSync(extraSync))
+        ) else preferred).merge(parseUntrustedSync(response?.syncData))
+            .merge(parseUntrustedSync(extraSync))
         val fromUrls = (listOfNotNull(response?.url) + urls).fold(Ids()) { ids, url ->
             ids.merge(parseUrl(url))
         }
