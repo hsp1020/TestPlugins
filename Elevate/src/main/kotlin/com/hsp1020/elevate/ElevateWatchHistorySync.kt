@@ -1648,6 +1648,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     spinner.useElevateSettingsDropdown(activity, names)
                     lastProviderOptions = names
                 }
+                // Keep the label and spacing, but hide the dropdown arrow for a single provider.
+                spinner.background?.mutate()?.alpha = if (statuses.size > 1) 255 else 0
                 spinner.isEnabled = statuses.size > 1
                 spinner.isClickable = statuses.size > 1
                 spinner.isFocusable = statuses.size > 1
