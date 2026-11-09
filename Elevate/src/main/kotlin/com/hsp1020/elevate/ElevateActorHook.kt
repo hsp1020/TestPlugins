@@ -265,7 +265,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             bindings[fragment]?.render()
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
-            bindings.remove(fragment)?.stop()
+            bindings.remove(fragment)?.stop(retainForNavigation = true)
         }
     }
 
@@ -293,7 +293,7 @@ internal class ElevateActorHook(private val appContext: Application) :
         private val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
         private val castText: TextView? =
             fragment.view?.findViewById(R.id.result_cast_text)
-        private val controller = ElevateActorInformation.Controller(fragment)
+        private val controller = ElevateActorInformation.controllerFor(fragment)
         private val cards = WeakHashMap<View, Pair<ActorData, ElevateActorPersonRef>>()
         private val press = DecelerateInterpolator()
         private var longPressed = false
@@ -608,7 +608,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 }
             }
         }
-        fun stop() {
+        fun stop(retainForNavigation: Boolean = false, clearSavedState: Boolean = false) {
             active = false
             restoringCast = false
             trace("BIND_STOP", "fragment=${fragment.javaClass.name} page=${pageUrl?.take(100)}")
@@ -624,7 +624,7 @@ internal class ElevateActorHook(private val appContext: Application) :
             observedAdapter?.unregisterAdapterDataObserver(dataObserver)
             observedAdapter = null
             cards.clear()
-            controller.stop()
+            controller.stop(retainForNavigation, clearSavedState)
             (list.adapter as? ActorAdaptor)?.let { adapter ->
                 val page = (model.page.value as? Resource.Success<ResultData>)?.value
                 adapter.submitList(page?.actors.orEmpty())
@@ -661,9 +661,12 @@ internal class ElevateActorHook(private val appContext: Application) :
 
     private fun detach() {
         trace("HOST_DETACH", "bindings=${bindings.size}")
-        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
-        bindings.values.toList().forEach { it.stop() }
+        val previousHost = host
+        val clearState = !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)
+        previousHost?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        bindings.values.toList().forEach { it.stop(clearSavedState = clearState) }
         bindings.clear()
+        previousHost?.let { ElevateActorInformation.releaseRetained(it, clearState) }
         host = null
     }
 

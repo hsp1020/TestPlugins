@@ -26,6 +26,9 @@ import android.widget.TextView
 import androidx.core.view.doOnPreDraw
 import androidx.appcompat.app.AppCompatDialog
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -74,6 +77,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.WeakHashMap
 
 internal data class ElevateActorPersonRef(
     val id: Int?,
@@ -83,6 +87,44 @@ internal data class ElevateActorPersonRef(
 )
 
 internal object ElevateActorInformation {
+    // Keep only active detail handoffs, isolated by Activity and original back-stack entry.
+    private val retained = WeakHashMap<FragmentActivity, MutableMap<String, Controller>>()
+
+    internal fun controllerFor(fragment: Fragment): Controller {
+        val activity = fragment.activity as? FragmentActivity
+        val entry = runCatching { fragment.findNavController().currentBackStackEntry?.id }.getOrNull()
+        val previous = if (activity != null && entry != null) synchronized(retained) {
+            val entries = retained[activity]
+            val found = entries?.remove(entry)
+            if (entries?.isEmpty() == true) retained.remove(activity)
+            found
+        } else null
+        return (previous?.takeIf { it.canReuse() } ?: Controller(fragment)).also {
+            it.rebind(fragment)
+        }
+    }
+
+    private fun retainController(activity: FragmentActivity, entry: String, controller: Controller) {
+        val replaced = synchronized(retained) {
+            retained.getOrPut(activity) { mutableMapOf() }.put(entry, controller)
+        }
+        if (replaced !== controller) replaced?.stop()
+    }
+
+    private fun forgetController(activity: FragmentActivity, entry: String?, controller: Controller) {
+        if (entry == null) return
+        synchronized(retained) {
+            val entries = retained[activity] ?: return@synchronized
+            if (entries[entry] === controller) entries.remove(entry)
+            if (entries.isEmpty()) retained.remove(activity)
+        }
+    }
+
+    internal fun releaseRetained(activity: FragmentActivity, clearSavedState: Boolean = false) {
+        val sessions = synchronized(retained) { retained.remove(activity)?.values?.toList().orEmpty() }
+        sessions.forEach { it.stop(clearSavedState = clearSavedState) }
+    }
+
     private data class CacheEntry(val bytes: ByteArray, val time: Long)
     private val cache = LinkedHashMap<String, CacheEntry>(50, 0.75f, true)
     private var cacheBytes = 0L
@@ -218,8 +260,23 @@ internal object ElevateActorInformation {
         return name ?: fallback
     }
 
-    internal class Controller(private val fragment: Fragment) {
-        private val model by lazy { ViewModelProvider(fragment)[ResultViewModel2::class.java] }
+    internal class Controller(initialFragment: Fragment) {
+        private var fragment = initialFragment
+        private var model = ViewModelProvider(initialFragment)[ResultViewModel2::class.java]
+        private var observing = false
+        private var originEntryId: String? = null
+
+        internal fun canReuse(): Boolean = !closed && dialog != null
+
+        internal fun rebind(owner: Fragment) {
+            if (fragment === owner) return
+            fragment = owner
+            model = ViewModelProvider(owner)[ResultViewModel2::class.java]
+            originActorFocus = null // The previous result item view is no longer valid.
+            originState = runCatching {
+                owner.findNavController().currentBackStackEntry?.savedStateHandle
+            }.getOrNull() ?: originState
+        }
         private val stateKey = "elevate_actor_info_return"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main +
             CoroutineExceptionHandler { _, error ->
@@ -227,6 +284,7 @@ internal object ElevateActorInformation {
             })
         private var dialog: AppCompatDialog? = null
         private var originActorFocus: View? = null
+        private var originActorPosition: Int? = null
         private var focusedCreditKey: String? = null
         private var detailHandoff: ElevateActorHandoff? = null
         private var creditClickInFlight = false
@@ -246,15 +304,28 @@ internal object ElevateActorInformation {
         private val pageObserver = Observer<Resource<ResultData>?> { maybeRestore() }
 
         fun start() {
+            if (closed || observing) return
+            observing = true
             Log.d("ElevateActorTrace", "DIALOG_CONTROLLER_START fragment=${fragment.javaClass.name}")
             fragment.viewLifecycleOwner.lifecycle.addObserver(resumeObserver)
             model.page.observe(fragment.viewLifecycleOwner, pageObserver)
+        }
+
+        private fun detachObservers() {
+            if (!observing) return
+            observing = false
+            runCatching { fragment.viewLifecycleOwner.lifecycle.removeObserver(resumeObserver) }
+            model.page.removeObserver(pageObserver)
         }
 
         fun click(person: ElevateActorPersonRef, originCard: View? = null) {
             Log.d("ElevateActorTrace", "DIALOG_CLICK id=${person.id} name=${person.name} fragment=${fragment.javaClass.name} added=${fragment.isAdded}")
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
             originActorFocus = if (isLayout(TV)) originCard else null
+            originActorPosition = if (isLayout(TV)) originCard?.let { card ->
+                fragment.view?.findViewById<androidx.recyclerview.widget.RecyclerView>(
+                    R.id.result_cast_items)?.getChildAdapterPosition(card)?.takeIf { it >= 0 }
+            } else null
             focusedCreditKey = null
             bioExpanded = false
             creditScroll.clear()
@@ -330,9 +401,11 @@ internal object ElevateActorInformation {
             Log.d("ElevateActorTrace", "DIALOG_SHOW_ATTEMPT id=${actor.id} added=${fragment.isAdded} closed=$closed existing=${dialog?.isShowing}")
             if (!fragment.isAdded || closed) return
             if (dialog?.isShowing == true && currentPerson == actor && currentSource == originProvider) return
-            originState = runCatching {
-                fragment.findNavController().currentBackStackEntry?.savedStateHandle
+            val originEntry = runCatching {
+                fragment.findNavController().currentBackStackEntry
             }.getOrNull()
+            originState = originEntry?.savedStateHandle
+            originEntryId = originEntry?.id
             requestJob?.cancel()
             detailHandoff?.close()
             detailHandoff = null
@@ -437,13 +510,17 @@ internal object ElevateActorInformation {
                         windowDialog.dismiss()
                     }
                 },
+                onReturnStart = {
+                    // hide() does not necessarily reset isShowing; always call show() to unhide.
+                    if (!closed && dialog === windowDialog) windowDialog.show()
+                },
                 onReturn = {
                     if (closed) {
                         preserve = true
                         windowDialog.dismiss()
                     } else {
                         windowDialog.show()
-            Log.d("ElevateActorTrace", "DIALOG_SHOWN id=${actor.id} showing=${windowDialog.isShowing}")
+                        Log.d("ElevateActorTrace", "DIALOG_SHOWN id=${actor.id} showing=${windowDialog.isShowing}")
                         focusedCreditView?.takeIf { it.isAttachedToWindow }?.let { focus ->
                             focus.post {
                                 if (dialog === windowDialog && windowDialog.isShowing &&
@@ -621,7 +698,11 @@ internal object ElevateActorInformation {
                 if (dialog !== windowDialog) return@doOnPreDraw
                 val rootScreen = IntArray(2).also { root.getLocationOnScreen(it) }
                 val left = backScreen?.get(0)?.minus(rootScreen[0])?.coerceAtLeast(0) ?: dp(15)
-                val top = backScreen?.get(1)?.minus(rootScreen[1])?.coerceAtLeast(0) ?: dp(8)
+                val statusTop = ViewCompat.getRootWindowInsets(root)
+                    ?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+                val safeTop = (statusTop - rootScreen[1]).coerceAtLeast(0)
+                val top = (backScreen?.get(1)?.minus(rootScreen[1])
+                    ?: safeTop + dp(8)).coerceAtLeast(safeTop)
                 (back.layoutParams as FrameLayout.LayoutParams).apply {
                     leftMargin = left
                     topMargin = top
@@ -636,6 +717,7 @@ internal object ElevateActorInformation {
             windowDialog.setContentView(root)
             windowDialog.window?.setLayout(-1, -1)
             windowDialog.setOnDismissListener {
+                forgetController(activity, originEntryId, this@Controller)
                     scrollListeners.forEach { (view, listener) ->
     
                     view.viewTreeObserver.takeIf { it.isAlive }?.removeOnScrollChangedListener(listener)
@@ -651,7 +733,13 @@ internal object ElevateActorInformation {
                 scroll = null
                 if (!preserve && !closed) {
                     clearState()
-                    originActorFocus?.takeIf { it.isAttachedToWindow }?.let { focus ->
+                    val focusTarget = originActorFocus?.takeIf { it.isAttachedToWindow }
+                        ?: originActorPosition?.let { position ->
+                            fragment.view?.findViewById<androidx.recyclerview.widget.RecyclerView>(
+                                R.id.result_cast_items)
+                                ?.findViewHolderForAdapterPosition(position)?.itemView
+                        }
+                    focusTarget?.let { focus ->
                         focus.post {
                             if (fragment.isResumed && dialog == null &&
                                 navigation?.currentDestination?.id == R.id.navigation_results_tv &&
@@ -660,6 +748,7 @@ internal object ElevateActorInformation {
                         }
                     }
                     originActorFocus = null
+                    originActorPosition = null
                 }
             }
             dialog = windowDialog
@@ -1042,22 +1131,31 @@ internal object ElevateActorInformation {
             }
         }
 
-        fun stop() {
-            Log.d("ElevateActorTrace", "DIALOG_CONTROLLER_STOP fragment=${fragment.javaClass.name}")
+        fun stop(retainForNavigation: Boolean = false, clearSavedState: Boolean = false) {
+            Log.d("ElevateActorTrace", "DIALOG_CONTROLLER_STOP fragment=${fragment.javaClass.name} retain=$retainForNavigation")
             if (closed) return
+            detachObservers()
+            val activity = fragment.activity as? FragmentActivity
+            val entry = originEntryId
+            if (retainForNavigation && detailHandoff?.isActive == true &&
+                dialog != null && activity != null && entry != null &&
+                !activity.isFinishing && !activity.isDestroyed) {
+                retainController(activity, entry, this)
+                return
+            }
             closed = true
             preserve = true
             originActorFocus = null
+            originActorPosition = null
             focusedCreditKey = null
+            if (clearSavedState) clearState()
             requestJob?.cancel()
-
-            if (detailHandoff?.isActive != true) {
+            // Preserve the old cover if the outgoing source cannot be retained.
+            if (!retainForNavigation || detailHandoff?.isActive != true) {
                 detailHandoff?.close()
                 dialog?.dismiss()
             }
             scope.cancel()
-            runCatching { fragment.viewLifecycleOwner.lifecycle.removeObserver(resumeObserver) }
-            model.page.removeObserver(pageObserver)
         }
     }
 }
