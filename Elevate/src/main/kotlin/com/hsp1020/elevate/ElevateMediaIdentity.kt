@@ -1,6 +1,7 @@
 package com.hsp1020.elevate
 
 import android.net.Uri
+import com.lagradost.cloudstream3.AnimeLoadResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
@@ -126,23 +127,34 @@ internal object ElevateMediaIdentity {
             original = direct
         ))
     }
+    // CSX uses AnimeLoadResponse even for non-anime TV series, triggering native title-search IDs.
+    fun ignoreNativeAnimeIds(response: LoadResponse?): Boolean =
+        response is AnimeLoadResponse && response.type == TvType.TvSeries &&
+            response.apiName in setOf("CineStream", "CineTmdb", "CineSimkl")
     fun collect(
         response: LoadResponse? = null, episodeData: String? = null,
         extraSync: Map<String, String>? = null, urls: List<String> = emptyList(),
         episodeFirst: Boolean = false
     ): Ids {
+        val ignoreNativeAnimeIds = ignoreNativeAnimeIds(response)
         val native = if (response == null) Ids() else Ids(
             imdb(response.getImdbId()), number(response.getTMDbId(), "tmdb"),
-            number(response.getMalId(), "mal"), number(response.getAniListId(), "anilist"),
-            number(response.getKitsuId(), "kitsu")
+            if (ignoreNativeAnimeIds) null else number(response.getMalId(), "mal"),
+            if (ignoreNativeAnimeIds) null else number(response.getAniListId(), "anilist"),
+            if (ignoreNativeAnimeIds) null else number(response.getKitsuId(), "kitsu")
         )
         val episodeIds = parseJson(episodeData)
         val preferred = native.merge(episodeIds)
+        val nativeSync = parseSync(response?.syncData)
+        val additionalSync = parseSync(extraSync)
         val input = (if (episodeFirst) preferred.copy(
             mal = episodeIds.mal ?: native.mal,
             anilist = episodeIds.anilist ?: native.anilist,
             kitsu = episodeIds.kitsu ?: native.kitsu
-        ) else preferred).merge(parseSync(response?.syncData)).merge(parseSync(extraSync))
+        ) else preferred).merge(if (ignoreNativeAnimeIds) nativeSync.copy(
+            mal = null, anilist = null, kitsu = null) else nativeSync)
+            .merge(if (ignoreNativeAnimeIds) additionalSync.copy(
+                mal = null, anilist = null, kitsu = null) else additionalSync)
         val fromUrls = (listOfNotNull(response?.url) + urls).fold(Ids()) { ids, url ->
             ids.merge(parseUrl(url))
         }

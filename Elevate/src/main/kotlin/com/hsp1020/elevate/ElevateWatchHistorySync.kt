@@ -1202,7 +1202,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 seasonEpisodeIds.values.any { ids ->
                     ids.keys.any { it == "mal" || it == "anilist" || it == "kitsu" }
                 }
-            rawSyncs = LinkedHashMap(page.syncData).apply {
+            val safeSyncData = if (ElevateMediaIdentity.ignoreNativeAnimeIds(response)) {
+                page.syncData.filterKeys { it != "mal" && it != "anilist" && it != "kitsu" }
+            } else page.syncData
+            rawSyncs = LinkedHashMap(safeSyncData).apply {
                 mediaIds.asMap().forEach { (key, value) ->
                     if (!containsKey(key)) {
                         put(key, if (key == "simkl") JSONObject().put("Simkl", value).toString()
