@@ -127,10 +127,10 @@ internal object ElevateMediaIdentity {
             original = direct
         ))
     }
-    // CSX uses AnimeLoadResponse even for non-anime TV series, triggering native title-search IDs.
+    // TvSeries wrapped in AnimeLoadResponse may carry speculative native anime IDs.
+    // Exclude unverified native/sync IDs; verified Simkl mapping supplies anime IDs later.
     fun ignoreNativeAnimeIds(response: LoadResponse?): Boolean =
-        response is AnimeLoadResponse && response.type == TvType.TvSeries &&
-            response.apiName in setOf("CineStream", "CineTmdb", "CineSimkl")
+        response is AnimeLoadResponse && response.type == TvType.TvSeries
     fun collect(
         response: LoadResponse? = null, episodeData: String? = null,
         extraSync: Map<String, String>? = null, urls: List<String> = emptyList(),
@@ -172,19 +172,19 @@ internal object ElevateMediaIdentity {
     }
     /** Reuse Elevate's exact Simkl mapping, even when only IMDb or TMDB is available. */
     suspend fun simklMapping(ids: Ids, movie: Boolean): ElevateIdResolver.Mapping? {
-        ids.simkl?.let { ElevateIdResolver.simkl(it, movie)?.let { found -> return found } }
-        val tmdb = ids.tmdb ?: ids.imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
-        val (simklId, segment) = tmdb?.toIntOrNull()
-            ?.let { ElevateIdResolver.simklForTmdb(it, movie) } ?: return null
-        val found = ElevateIdResolver.simkl(simklId, movie, segment) ?: return null
+        val found = ids.simkl?.let { ElevateIdResolver.simkl(it, movie) } ?: run {
+            val tmdb = ids.tmdb ?: ids.imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
+            val (simklId, segment) = tmdb?.toIntOrNull()
+                ?.let { ElevateIdResolver.simklForTmdb(it, movie) } ?: return null
+            ElevateIdResolver.simkl(simklId, movie, segment)
+        } ?: return null
         if (ids.imdb != null && found.imdb != null && ids.imdb != found.imdb) return null
         if (ids.tmdb != null && found.tmdb != null && ids.tmdb != found.tmdb) return null
         return found
     }
 
     suspend fun enrichSimkl(ids: Ids, movie: Boolean): Ids {
-        val raw = ids.simkl ?: return ids
-        val mapped = ElevateIdResolver.simkl(raw, movie) ?: return ids
+        val mapped = simklMapping(ids, movie) ?: return ids
         return ids.merge(Ids(mapped.imdb, mapped.tmdb, mapped.mal,
             mapped.anilist, mapped.kitsu, simklAnime = mapped.segment == "anime"))
     }

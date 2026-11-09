@@ -1275,7 +1275,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             fetchJob = scope.launch {
                 // A Simkl-only work may be anime even when the provider uses TvSeries.
                 // Resolve its segment and IDs through Elevate's shared identity cache.
-                val effectiveIds = if (initialIds.simkl != null &&
+                val effectiveIds = if ((initialIds.simkl != null ||
+                        !initialAnime && (initialIds.imdb != null || initialIds.tmdb != null)) &&
                     (!initialAnime || initialIds.imdb == null)) {
                     try { withContext(Dispatchers.IO) {
                         ElevateMediaIdentity.enrichSimkl(initialIds, movie)
@@ -1764,7 +1765,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     minus?.isEnabled = false
                     if (maximum?.text?.toString() != "/ ?") maximum?.text = "/ ?"
                     if (bar?.progress != 0) bar?.progress = 0
-                    if (!current?.text.isNullOrEmpty()) current?.setText("")
+                    // Keep native progress text: clearing it triggers the core TextWatcher
+                    // to publish the same userData and re-enter this render indefinitely.
                     if (checks?.checkedItemCount != 0) checks?.clearChoices()
                     if (scoreLabel?.text?.toString() != "?") scoreLabel?.text = "?"
                 } finally { applying = false }

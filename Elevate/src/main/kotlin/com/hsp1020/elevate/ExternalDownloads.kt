@@ -655,13 +655,11 @@ internal object ExternalDownloads {
             val children = runCatching { folder.listFiles() }
                 .onFailure { android.util.Log.w("ElevateExternal", "SCAN_LIST_FAILED scan=$scan relative=$relative", it) }
                 .getOrNull()
-            trace("SCAN_FOLDER", "scan=$scan relative=$relative depth=$depth count=${children?.size ?: -1}")
             for (child in children.orEmpty()) {
                 if (++inspected > 1500) break
                 val name = child.name() ?: continue
                 val isDirectory = runCatching { child.isDirectory() == true }.getOrDefault(false)
                 if (isDirectory) {
-                    trace("SCAN_SUBFOLDER", "scan=$scan relative=$relative name=$name depth=$depth")
                     if (depth < 3 && !name.startsWith(".")) {
                         queue.add(Triple(child, if (relative.isEmpty()) name else "$relative/$name", depth + 1))
                     }
@@ -807,7 +805,6 @@ internal object ExternalDownloads {
                 val byName = HashMap<String, Pending>()
                 val byId = requests.associateBy { it.id }
                 for (p in requests) {
-                    trace("SCAN_PENDING", "scan=$scan id=${p.id} parent=${p.parentId} expected=${p.expectedFile} ageMs=${System.currentTimeMillis() - p.created}")
                     if (p.expectedFile.isNotBlank()) byName[p.expectedFile.lowercase(java.util.Locale.ROOT)] = p
                 }
                 val markerGroups = files.filter { isVideo(it.name) }
@@ -827,11 +824,9 @@ internal object ExternalDownloads {
                             exact
                         }
                         !isVideo(name) -> {
-                            trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index relative=${found.relativePath} name=$name reason=notVideo")
                             continue
                         }
                         markerId == null -> {
-                            trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index relative=${found.relativePath} name=$name reason=noCsId")
                             continue
                         }
                         markerGroups[markerId]?.size != 1 -> {
@@ -843,7 +838,6 @@ internal object ExternalDownloads {
                             val current = byId[markerId]
                             if (current == null) {
                                 withoutPending++
-                                trace("SCAN_FILE_UNMATCHED", "scan=$scan index=$index id=$markerId name=$name reason=noPending")
                                 continue
                             }
                             renamed++
@@ -852,23 +846,18 @@ internal object ExternalDownloads {
                         }
                     }
                     if (!isVideo(name)) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=unsupportedExtension")
                         continue
                     }
                     val size = found.file.length()
                     if (size == null || size <= 1024L) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan index=$index id=${pending.id} reason=invalidSize size=$size")
                         unstableFile = true
                         continue
                     }
                     val modified = found.file.lastModified()
-                    trace("SCAN_FILE_STAT", "scan=$scan id=${pending.id} relative=${found.relativePath} size=$size modified=$modified created=${pending.created}")
                     if (modified != null && (modified < pending.created - 2000L || modified > now - 1500L)) {
-                        trace("SCAN_FILE_SKIP", "scan=$scan id=${pending.id} reason=${if (modified < pending.created - 2000L) "olderThanPending" else "recentWrite"}")
                         if (modified >= pending.created - 2000L) unstableFile = true
                         continue
                     }
-                    trace("SCAN_CANDIDATE", "scan=$scan id=${pending.id} name=$name relative=${found.relativePath} size=$size")
                     candidates.add(Candidate(pending, found, size))
                 }
                 trace("SCAN_MATCH_SUMMARY", "scan=$scan pending=${requests.size} files=${files.size} exact=$exactMatches renamed=$renamed withoutPending=$withoutPending ambiguous=$ambiguous candidates=${candidates.size}")
@@ -878,15 +867,12 @@ internal object ExternalDownloads {
                 for ((p, found, size) in candidates) {
                     val currentSize = found.file.length()
                     val modified = found.file.lastModified()
-                    trace("SCAN_STABILITY", "scan=$scan id=${p.id} initial=$size current=$currentSize modified=$modified elapsedMs=${stableAt - now}")
                     if (currentSize != size || size <= 1024L ||
                         modified != null && modified > stableAt - 1500L) {
                         unstableFile = true
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${p.id} reason=sizeOrTimeChanged")
                         continue
                     }
                     if (found.file.name() != found.name) {
-                        trace("SCAN_STABILITY_SKIP", "scan=$scan id=${p.id} reason=filenameChanged")
                         continue
                     }
                     val result = runCatching {
