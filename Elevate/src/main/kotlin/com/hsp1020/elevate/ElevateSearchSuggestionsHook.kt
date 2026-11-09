@@ -12,6 +12,7 @@ import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
@@ -80,6 +81,14 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             fm: FragmentManager, fragment: Fragment, view: android.view.View, saved: Bundle?
         ) {
             if (fragment.javaClass.name == SEARCH_CLASS) attachSearch(fragment, view)
+        }
+
+        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            if (search?.fragment === fragment) search?.resume()
+        }
+
+        override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
+            if (search?.fragment === fragment) search?.pause()
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
@@ -179,14 +188,27 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         private var pending: Runnable? = null
         private var request: Job? = null
         private var originalAnimator: RecyclerView.ItemAnimator? = null
+        private var resumed = fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        private var editedSinceResume = false
+        private var submittedQuery: String? = null
 
         private val replacement = object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
                 cancelPending()
+                submittedQuery = query
+                editedSinceResume = false
                 return native.onQueryTextSubmit(query)
             }
 
             override fun onQueryTextChange(query: String): Boolean {
+                // A restored submitted query is not a new edit; preserve native layout updates.
+                if (!resumed || (!editedSinceResume && query.isNotBlank() &&
+                        (query == submittedQuery || query == model.lastQuery))) {
+                    val handled = native.onQueryTextChange(query)
+                    dismissSuggestions()
+                    return handled
+                }
+                editedSinceResume = true
                 // Native fetchSuggestions() posts an empty list for a one-character query.
                 // Keep the existing suggestions visible while the new result is loading.
                 if (query.length == 1 && query.isNotBlank()) {
@@ -222,6 +244,24 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             originalAnimator = suggestionList.itemAnimator
             suggestionList.itemAnimator = null
             view.setOnQueryTextListener(replacement)
+            if (resumed) resume()
+        }
+
+        fun pause() {
+            resumed = false
+            dismissSuggestions()
+        }
+
+        fun resume() {
+            resumed = true
+            editedSinceResume = false
+            dismissSuggestions()
+        }
+
+        private fun dismissSuggestions() {
+            cancelPending()
+            model.clearSuggestions()
+            suggestionList.visibility = View.GONE
         }
 
         private fun cancelPending() {
@@ -243,6 +283,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                     val result = fetchSuggestions(query, language)
                     main.post {
                         if (started && search === this@SearchBinding && serial == generation &&
+                            resumed && fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             fragment.view === root && view.query.toString() == query) {
                             suggestions.value = result
                         }
