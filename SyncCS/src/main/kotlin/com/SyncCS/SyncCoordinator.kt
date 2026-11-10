@@ -802,20 +802,6 @@ internal object SyncCoordinator {
             }
             var uiRefreshFailed = false
             val libraryChanged = retiredLibraryData || nativeApply.keys.any(::isLocalLibraryKey)
-            if (retiredLibraryData || nativeApply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
-
-                try {
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        MainActivity.bookmarksUpdatedEvent.invoke(true)
-                    }
-
-                } catch (error: Exception) {
-                    uiRefreshFailed = true
-
-                }
-            } else {
-
-            }
             if (libraryChanged) {
                 try {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {

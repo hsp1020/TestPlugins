@@ -54,6 +54,7 @@ class StremioCPlugin : Plugin() {
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
     private val registeredProviders = mutableListOf<StremioC>()
+    private var lastHomeProviderSignature: List<Triple<String, String, List<Pair<String, String>>>>? = null
     private fun dismissProviderPicker(host: AppCompatActivity) {
 
         runCatching {
@@ -257,6 +258,7 @@ class StremioCPlugin : Plugin() {
 
     override fun beforeUnload() {
         isUnloaded = true
+        lastHomeProviderSignature = null
         reloadGeneration++
         reloadScope.cancel()
         pluginIoScope.cancel()
@@ -401,8 +403,13 @@ class StremioCPlugin : Plugin() {
                     }
                 }
                 currentCoroutineContext().ensureActive()
+                val homeSignature = registeredProviders.filter { it.hasMainPage }.map { provider ->
+                    Triple(provider.name, provider.mainUrl, provider.mainPage.map { it.name to it.data })
+                }
+                val homeChanged = (lastHomeProviderSignature ?: emptyList()) != homeSignature
+                lastHomeProviderSignature = homeSignature
                 try {
-                    MainActivity.afterPluginsLoadedEvent.invoke(true)
+                    MainActivity.afterPluginsLoadedEvent.invoke(homeChanged)
                 } catch (e: Throwable) {
                 }
                 } catch (e: CancellationException) {
