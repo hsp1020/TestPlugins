@@ -7,7 +7,7 @@ import org.json.JSONObject
  * logging; never remove it when cleaning temporary trace output.
  */
 internal object SyncApplyVerification {
-    private fun equivalent(left: String?, right: String?): Boolean {
+    internal fun equivalent(left: String?, right: String?): Boolean {
         if (left == right) return true
         if (left == null || right == null) return false
         return runCatching {

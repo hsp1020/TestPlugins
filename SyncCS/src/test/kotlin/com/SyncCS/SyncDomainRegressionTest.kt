@@ -36,6 +36,19 @@ class SyncDomainRegressionTest {
 
 
 
+    @Test fun rollbackSettingsVerificationAcceptsReorderedSetsOnly() {
+        val expected = JSONObject().put("type", "set")
+            .put("value", JSONArray(listOf("ko", "en"))).toString()
+        val reordered = JSONObject().put("type", "set")
+            .put("value", JSONArray(listOf("en", "ko"))).toString()
+        val different = JSONObject().put("type", "set")
+            .put("value", JSONArray(listOf("ko", "ja"))).toString()
+        assertTrue(SyncApplyVerification.equivalent(expected, reordered))
+        assertFalse(SyncApplyVerification.equivalent(expected, different))
+        assertFalse(SyncApplyVerification.equivalent(expected,
+            JSONObject().put("type", "string").put("value", "ko").toString()))
+    }
+
     @Test fun changedOnlyReadDoesNotLoseUnrelatedBaselineKeys() {
         val profiles = ProfileSync.decode(roster(profile(0, "Main")))
         val changedKey = "p/StremioC/theme"

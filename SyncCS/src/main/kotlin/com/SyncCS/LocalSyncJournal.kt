@@ -259,7 +259,7 @@ internal object LocalSyncJournal {
         val now = SyncData.snapshot(context)
         val restore = linkedMapOf<String, String?>()
         for ((key, value) in backup) {
-            if (key !in postJournalEdits && now[key] != value) restore[key] = value
+            if (key !in postJournalEdits && !SyncApplyVerification.equivalent(now[key], value)) restore[key] = value
         }
         for (key in now.keys - backup.keys) {
             if (key !in postJournalEdits) restore[key] = null
@@ -301,9 +301,18 @@ internal object LocalSyncJournal {
             recentNativeBackups ?: metadata.getJSONObject("nativeAddonBackups"))
         }
         val restored = SyncData.snapshot(context)
-        check(restored.keys == expected.keys &&
-            expected.all { (key, value) -> restored[key] == value }) {
-            "Local settings verification failed after rollback: missing or extra keys."
+        val missing = expected.keys - restored.keys
+        val extra = restored.keys - expected.keys
+        val changed = (expected.keys intersect restored.keys).filterNot {
+            SyncApplyVerification.equivalent(expected[it], restored[it])
+        }
+        if (missing.isNotEmpty() || extra.isNotEmpty() || changed.isNotEmpty()) {
+            for ((kind, keys) in listOf("missing" to missing, "extra" to extra, "changed" to changed)) {
+                keys.take(12).forEach { path ->
+                    android.util.Log.w("SyncCS", "ROLLBACK_SETTING_MISMATCH kind=$kind keyHash=${SyncBackend.digest(path).take(16)}")
+                }
+            }
+            error("Local settings verification failed after rollback: missing=${missing.size}, extra=${extra.size}, changed=${changed.size}.")
         }
         if (!preserveCurrentPlugins) {
             check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
