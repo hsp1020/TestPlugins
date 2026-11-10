@@ -911,7 +911,8 @@ class SettingsBottomFragment(
 
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
-        owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null
+        owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
+        returnFocus: View? = null
     ) {
         val parents = generateSequence(owner) { dialogOwners[it] }.toList()
         val origin = owner.currentFocus
@@ -994,9 +995,15 @@ class SettingsBottomFragment(
                 val parent = parents.firstOrNull { it.isShowing }
                 if (parent != null) parent.window?.decorView?.post {
                     if (alive(parent) && topDialog() === parent) {
-                        focusPlans.remove(parent)?.invoke()
-                            ?: if (usable(origin)) origin?.requestFocus() else parent.window?.decorView
-                                ?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }?.requestFocus()
+                        val target = returnFocus?.takeIf { usable(it) }
+                        if (target != null) {
+                            focusPlans.remove(parent)
+                            target.requestFocus()
+                        } else {
+                            focusPlans.remove(parent)?.invoke()
+                                ?: if (usable(origin)) origin?.requestFocus() else parent.window?.decorView
+                                    ?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }?.requestFocus()
+                        }
                         refreshSummaries?.invoke()
                     }
                 }
@@ -1807,7 +1814,7 @@ class SettingsBottomFragment(
                 }
             },
             onEdit = { item, position -> edit(item, position) },
-            onCatalogs = { item -> if (alive(dialog) && topDialog() === dialog) showCatalogConfigDialog(item) },
+            onCatalogs = { item, button -> if (alive(dialog) && topDialog() === dialog) showCatalogConfigDialog(item, button) },
             onConfigure = { item -> showAddonSettings(dialog, { adapter.linkFor(item.id) ?: "" }) },
             onToggle = { item, enabled ->
                 if (alive(dialog) && topDialog() === dialog) {
@@ -1957,7 +1964,7 @@ class SettingsBottomFragment(
         if (urlError != null) url.error = urlError
     }
 
-    private fun showCatalogConfigDialog(item: LinkItem) {
+    private fun showCatalogConfigDialog(item: LinkItem, returnFocus: View) {
         val context = hostContext
         val owner = topDialog()
         migrateStremioCatalogSettings(sharedPref, item.link)
@@ -2057,11 +2064,11 @@ class SettingsBottomFragment(
                 showSavedPopup(context, "Error", "No catalogs found in manifest.")
                 return@launch 
             }
-            displayCatalogListDialog(item.name, flatTabs, item.link)
+            displayCatalogListDialog(item.name, flatTabs, item.link, returnFocus)
         }
     }
 
-    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
+    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String, returnFocus: View) {
         val context = hostContext
         val prefs = sharedPref
         var activeDialog: AlertDialog? = null
@@ -2205,7 +2212,6 @@ class SettingsBottomFragment(
                     ellipsize = android.text.TextUtils.TruncateAt.END
                     gravity = Gravity.CENTER_VERTICAL
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    setOnClickListener { checkbox.performClick() }
                 }
                 layout.addView(dragHandle)
                 layout.addView(inputSlot(etOrder).apply {
@@ -2428,7 +2434,7 @@ class SettingsBottomFragment(
         val dialog = AlertDialog.Builder(context).setView(dialogContainer).create()
         activeDialog = dialog
         setupCustomDialog(dialog, dialogContainer, rv, 800,
-            initialFocus = { rv })
+            initialFocus = { rv }, returnFocus = returnFocus)
 
         saveBtn.setOnClickListener {
             if (!saveBtn.isEnabled) return@setOnClickListener
@@ -2500,7 +2506,7 @@ class SettingsBottomFragment(
         private val showCatalogs: Boolean,
         private val onDelete: (LinkItem) -> Unit,
         private val onEdit: (LinkItem, Int) -> Unit,
-        private val onCatalogs: (LinkItem) -> Unit,
+        private val onCatalogs: (LinkItem, View) -> Unit,
         private val onConfigure: (LinkItem) -> Unit,
         private val onToggle: (LinkItem, Boolean) -> Unit,
         private val onReorder: (List<LinkItem>) -> Unit,
@@ -2659,7 +2665,12 @@ class SettingsBottomFragment(
                 items.getOrNull(index)?.let { onEdit(it, index) }
             }
             if (showCatalogs)
-                holder.catalogs.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onCatalogs) }
+                holder.catalogs.setOnClickListener {
+                    items.getOrNull(holder.adapterPosition)?.let {
+                        holder.catalogs.requestFocus()
+                        onCatalogs(it, holder.catalogs)
+                    }
+                }
             holder.gear.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
             holder.trash.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
             if (isLayout(TV)) {

@@ -874,6 +874,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
             setFadingEdgeLength(120)
         }
 
+        lateinit var touchHelper: ItemTouchHelper
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
             var visibleTabs = mutableListOf<CatalogData>()
 
@@ -889,7 +890,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
             }
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CVH {
                 val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 8, 10, 8); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 5, 0, 5) } }
-                val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0) }
+                val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0); isClickable = true; isFocusable = false }
                 val cb = CheckBox(ctx).apply { setPadding(0, 0, 5, 0) }
                 
                 val etOrder = EditText(ctx).apply {
@@ -922,7 +923,13 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                     }
                 }
                 row.addView(dragHandle); row.addView(cb); row.addView(etOrder); row.addView(tvSource); row.addView(etRename)
-                return CVH(row, dragHandle, cb, etOrder, tvSource, etRename)
+                return CVH(row, dragHandle, cb, etOrder, tvSource, etRename).also { holder ->
+                    holder.dragHandle.setOnTouchListener { _, event ->
+                        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
+                            holder.adapterPosition != RecyclerView.NO_POSITION) touchHelper.startDrag(holder)
+                        false
+                    }
+                }
             }
             override fun onBindViewHolder(holder: CVH, position: Int) {
                 val data = visibleTabs[position]
@@ -1155,7 +1162,9 @@ class UltimaEvoSettingsDialog : DialogFragment() {
         applyNativeRipple(headerRow)
         mainContainer.addView(providerSettingsCard)
 
-        val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+        touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+            override fun isLongPressDragEnabled() = false
+
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val from = viewHolder.adapterPosition
                 val to = target.adapterPosition
