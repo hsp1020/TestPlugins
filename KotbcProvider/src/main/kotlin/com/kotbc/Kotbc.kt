@@ -601,6 +601,20 @@ class Kotbc : MainAPI() {
 
         val tags = parseInfoTags(doc)
 
+        val thumbnail = comic?.optString("thumbnail")?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "null" }
+            ?: doc.select("img[src]").firstOrNull { it.attr("alt").trim() == title }
+                ?.attr("src")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: doc.selectFirst("main img[src*='/storage/']")?.attr("src")
+        val poster = thumbnail?.let {
+            val path = if (it.startsWith("http") || it.startsWith("//") || it.startsWith("/")) {
+                it
+            } else {
+                "/storage/${it.removePrefix("storage/")}"
+            }
+            resolveUrl(path)
+        }
+
         val parsedEpisodes = parseInertiaEpisodes(doc)
             .ifEmpty { parseDomEpisodes(doc) }
 
@@ -625,6 +639,7 @@ class Kotbc : MainAPI() {
                 TvType.Movie,
                 playData
             ) {
+                posterUrl = poster
                 plot = description
                 this.tags = tags
                 this.year = year
@@ -642,6 +657,7 @@ class Kotbc : MainAPI() {
                 TvType.TvSeries,
                 sorted
             ) {
+                posterUrl = poster
                 plot = description
                 this.tags = tags
                 this.year = year
