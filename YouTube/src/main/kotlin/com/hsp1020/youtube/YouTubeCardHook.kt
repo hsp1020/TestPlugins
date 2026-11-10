@@ -281,6 +281,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }.onFailure {
                         Log.w("YouTubeTimestamp", "event=seek_prime_failed", it)
                     }
+                }
                 // Media3 listener defaults differ between plugin compile and app runtime.
                 // A runtime proxy handles all callbacks without missing abstract methods.
                 val listener = java.lang.reflect.Proxy.newProxyInstance(
@@ -1152,7 +1153,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
                 pageUrl.contains("/c/") || pageUrl.contains("/user/"))
         private var channelLoading = false
-        private var channelInitialExpansionStarted = false
+        private val channelInitialExpansionStarted = mutableSetOf<String>()
+        private val channelRangesBySeason = mutableMapOf<Int, Int>()
+        private var channelSelectedSeason: Int? = null
+        private var channelPendingRangeRestore: Int? = null
         private var channelSortButton: TextView? = null
         private var channelSortWatcher: TextWatcher? = null
 
@@ -1331,18 +1335,64 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
 
-        /** YouTube-only channel ordering uses YouTube's full tab order, not the selected 20-item range. */
+        private fun selectedChannelSeason(model: ResultViewModel2): Int? {
+            val selected = model.selectedSeasonIndex.value ?: return null
+            return model.seasonSelections.value.orEmpty().getOrNull(selected)?.second
+        }
+
+        private fun selectedChannelTab(model: ResultViewModel2): String? {
+            val season = selectedChannelSeason(model) ?: return null
+            if (season == 2) return "shorts"
+            // A Shorts-only channel is exposed as native season 1.
+            val first = activeChannelResponse(model)?.episodes?.firstOrNull()?.data.orEmpty()
+            return if (first.contains("/shorts/")) "shorts" else "videos"
+        }
+
+        private fun restoreChannelRange(model: ResultViewModel2) {
+            val season = channelPendingRangeRestore ?: return
+            if (selectedChannelSeason(model) != season) return
+            val ranges = model.rangeSelections.value.orEmpty()
+            if (ranges.isEmpty()) return
+            val index = (channelRangesBySeason[season] ?: 0).coerceIn(0, ranges.lastIndex)
+            channelPendingRangeRestore = null
+            channelRangesBySeason[season] = index
+            if (model.selectedRangeIndex.value != index) {
+                model.changeRange(ranges[index].second)
+            } else {
+                loadMoreChannelIfNeeded(model)
+            }
+        }
+
+        /** Preserve each channel tab's native range independently. */
         private fun observeChannelEpisodes() {
             if (!channelPage) return
             val owner = fragment ?: return
             val model = ViewModelProvider(owner)[ResultViewModel2::class.java]
             model.sortSelections.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
             model.selectedSorting.observe(owner.viewLifecycleOwner) { root.post { bindChannelSort(model) } }
-            model.selectedRangeIndex.observe(owner.viewLifecycleOwner) { selected ->
-                root.post { loadMoreChannelIfNeeded(model) }
+            model.selectedSeasonIndex.observe(owner.viewLifecycleOwner) {
+                val season = selectedChannelSeason(model) ?: return@observe
+                if (channelSelectedSeason != null && channelSelectedSeason != season) {
+                    channelPendingRangeRestore = season
+                }
+                channelSelectedSeason = season
             }
-            model.rangeSelections.observe(owner.viewLifecycleOwner) { ranges ->
-                root.post { loadMoreChannelIfNeeded(model) }
+            model.selectedRangeIndex.observe(owner.viewLifecycleOwner) { selected ->
+                if (channelPendingRangeRestore != null) {
+                    // CloudStream posts the new range after the season changes.
+                    root.post { restoreChannelRange(model) }
+                } else {
+                    val season = selectedChannelSeason(model)
+                    if (season != null && selected != null && selected >= 0) {
+                        channelRangesBySeason[season] = selected
+                    }
+                    root.post { loadMoreChannelIfNeeded(model) }
+                }
+            }
+            model.rangeSelections.observe(owner.viewLifecycleOwner) {
+                root.post {
+                    if (channelPendingRangeRestore == null) loadMoreChannelIfNeeded(model)
+                }
             }
         }
 
@@ -1405,11 +1455,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                     YoutubeProvider.setChannelSortMode(pageUrl, next)
                                     // Each sort has its own paginated cache. Do not inherit
                                     // the page depth from the previously selected sort.
-                                    val cachedPages = provider.channelLoadedPages(pageUrl)
+                                    val cachedPages = provider.channelLoadedPages(pageUrl, "videos")
                                     val targetPages = cachedPages.coerceAtLeast(2)
                                         .coerceAtMost(provider.channelPageLimit())
                                     val response = withContext(Dispatchers.IO) {
-                                        provider.loadChannelPages(pageUrl, targetPages)
+                                        provider.loadChannelPages(pageUrl, targetPages, "videos")
                                     }
                                     val afterVideos = response?.episodes?.count { it.season == 1 } ?: 0
                                     if (response == null || afterVideos < minOf(beforeVideos, 30)) {
@@ -1422,7 +1472,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                         YoutubeProvider.setChannelSortMode(pageUrl, previous)
                                     } else {
                                         if (deliverChannelEpisodes(model, provider, response, "sort")) {
-                                            channelInitialExpansionStarted = false
+                                            channelInitialExpansionStarted.clear()
                                         } else {
                                             YoutubeProvider.setChannelSortMode(pageUrl, previous)
                                         }
@@ -1553,23 +1603,25 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 !root.isAttachedToWindow) return
             val ranges = model.rangeSelections.value.orEmpty()
             if (ranges.isEmpty()) return
+            if (channelPendingRangeRestore != null) return
+            val tab = selectedChannelTab(model) ?: return
             val provider = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
-            if (!provider.channelHasMorePages(pageUrl)) return
-            val initialExpansion = !channelInitialExpansionStarted &&
-                provider.channelLoadedPages(pageUrl) == 2 &&
+            if (!provider.channelHasMorePages(pageUrl, tab)) return
+            val loadedPages = provider.channelLoadedPages(pageUrl, tab)
+            val initialExpansion = tab !in channelInitialExpansionStarted &&
+                loadedPages == 2 &&
                 model.selectedRangeIndex.value != null &&
                 model.selectedRangeIndex.value!! >= 0
             if (!initialExpansion && model.selectedRangeIndex.value != ranges.lastIndex) return
-            if (initialExpansion) channelInitialExpansionStarted = true
-            val nextPages = (provider.channelLoadedPages(pageUrl) + 5)
-                .coerceAtMost(provider.channelPageLimit())
-            if (nextPages <= provider.channelLoadedPages(pageUrl)) return
+            if (initialExpansion) channelInitialExpansionStarted.add(tab)
+            val nextPages = (loadedPages + 5).coerceAtMost(provider.channelPageLimit())
+            if (nextPages <= loadedPages) return
             val requestedMode = YoutubeProvider.channelSortMode(pageUrl)
             channelLoading = true
             owner.viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val response = withContext(Dispatchers.IO) {
-                        provider.loadChannelPages(pageUrl, nextPages)
+                        provider.loadChannelPages(pageUrl, nextPages, tab)
                     }
                     if (response == null) {
                         Log.w("YouTubeChannel", "event=CHANNEL_UI_EXPAND_SKIPPED reason=null_response")
