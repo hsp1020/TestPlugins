@@ -197,6 +197,7 @@ internal object LocalSyncJournal {
     suspend fun recover(context: Context, activity: Activity?, storage: SyncStorage) {
         val dir = live(context)
         if (!dir.exists()) return
+        android.util.Log.i("SyncCS", "JOURNAL_RECOVERY_START")
         val metadata = manifest(dir)
         check(metadata.getInt("format") == 1)
         val created = metadata.getLong("created")
@@ -326,6 +327,7 @@ internal object LocalSyncJournal {
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
         finish(context)
+        android.util.Log.i("SyncCS", "JOURNAL_RECOVERY_SUCCESS")
 
     }
 
