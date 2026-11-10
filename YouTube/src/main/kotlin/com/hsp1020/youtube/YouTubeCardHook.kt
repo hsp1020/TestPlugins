@@ -77,7 +77,6 @@ import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
-import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
@@ -2357,14 +2356,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             externalPlayerHost?.supportFragmentManager
                 ?.unregisterFragmentLifecycleCallbacks(fragments)
             externalPlayerHost = null
-        }
-        if (refreshHome) {
-            val mainActivity = host?.takeUnless { it.isFinishing || it.isDestroyed }
-            val nav = (mainActivity?.supportFragmentManager
-                ?.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
-            if (mainActivity != null && nav?.currentDestination?.id == R.id.navigation_home) {
-                ViewModelProvider(mainActivity)[HomeViewModel::class.java].reloadStored()
-            }
         }
         if (host === activity) {
             release()
