@@ -142,6 +142,21 @@ class SyncSettingsFragment : DialogFragment() {
         }
     }
 
+    private fun displayBackupTime(timestamp: String): String {
+        val pattern = if (timestamp.endsWith(" UTC"))
+            "yyyy-MM-dd HH:mm:ss 'UTC'" else "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        val date = runCatching {
+            java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+                isLenient = false
+            }.parse(timestamp)
+        }.getOrNull() ?: return timestamp
+        return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z",
+            java.util.Locale.getDefault()).apply {
+            timeZone = java.util.TimeZone.getDefault()
+        }.format(date)
+    }
+
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density + 0.5f).toInt()
 
@@ -493,7 +508,7 @@ class SyncSettingsFragment : DialogFragment() {
                         }
                         progress.dialog.dismiss()
                         AlertDialog.Builder(host).setTitle("GitHub user backup saved")
-                            .setMessage("Restore point: " + checkpoint.timestamp +
+                            .setMessage("Restore point: " + displayBackupTime(checkpoint.timestamp) +
                                 "\nRevision: " + checkpoint.id.take(12) +
                                 "\nNo existing backup was replaced.")
                             .setPositiveButton("View backups") { _, _ -> showBackupHistory() }
@@ -578,7 +593,7 @@ class SyncSettingsFragment : DialogFragment() {
                     body.addView(secondary(host, "No original backup on this device."))
                 } else {
                     val formatter = java.text.SimpleDateFormat(
-                        "yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                        "yyyy-MM-dd HH:mm:ss z", java.util.Locale.getDefault())
                     local.forEach { entry ->
                         val date = formatter.format(java.util.Date(entry.created))
                         body.addView(settingRow(host,
@@ -601,7 +616,7 @@ class SyncSettingsFragment : DialogFragment() {
                         "No user backups saved yet. Use Create GitHub user backup."))
                     else -> manual.forEach { revision ->
                         body.addView(settingRow(host,
-                            "User backup · " + revision.timestamp,
+                            "User backup · " + displayBackupTime(revision.timestamp),
                             "Restore point · " + revision.id.take(12)
                         ) {
                             picker.dismiss()
@@ -619,7 +634,7 @@ class SyncSettingsFragment : DialogFragment() {
                         "No earlier SyncCS revisions in the latest 30 commits."))
                     else -> remote.forEach { revision ->
                         body.addView(settingRow(host,
-                            "GitHub revision · " + revision.timestamp,
+                            "GitHub revision · " + displayBackupTime(revision.timestamp),
                             revision.summary.take(100)
                         ) {
                             picker.dismiss()
