@@ -109,8 +109,6 @@ internal object SyncCoordinator {
 
                 LocalSyncJournal.recover(context, activity, LocalOriginalBackup.offlineRecoverySource())
             } catch (recovery: Exception) {
-                android.util.Log.e("SyncCS",
-                    "JOURNAL_RECOVERY_FAILED type=" + recovery.javaClass.simpleName)
                 return@withLock pause("journal-recovery-incomplete",
                     "Sync blocked: local rollback incomplete: " +
                         (recovery.message ?: recovery.javaClass.simpleName).take(170))

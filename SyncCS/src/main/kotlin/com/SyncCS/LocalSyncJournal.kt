@@ -197,7 +197,6 @@ internal object LocalSyncJournal {
     suspend fun recover(context: Context, activity: Activity?, storage: SyncStorage) {
         val dir = live(context)
         if (!dir.exists()) return
-        android.util.Log.i("SyncCS", "JOURNAL_RECOVERY_START")
         val metadata = manifest(dir)
         check(metadata.getInt("format") == 1)
         val created = metadata.getLong("created")
@@ -308,11 +307,6 @@ internal object LocalSyncJournal {
             SyncApplyVerification.equivalent(expected[it], restored[it])
         }
         if (missing.isNotEmpty() || extra.isNotEmpty() || changed.isNotEmpty()) {
-            for ((kind, keys) in listOf("missing" to missing, "extra" to extra, "changed" to changed)) {
-                keys.take(12).forEach { path ->
-                    android.util.Log.w("SyncCS", "ROLLBACK_SETTING_MISMATCH kind=$kind keyHash=${SyncBackend.digest(path).take(16)}")
-                }
-            }
             error("Local settings verification failed after rollback: missing=${missing.size}, extra=${extra.size}, changed=${changed.size}.")
         }
         if (!preserveCurrentPlugins) {
@@ -327,7 +321,6 @@ internal object LocalSyncJournal {
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
         finish(context)
-        android.util.Log.i("SyncCS", "JOURNAL_RECOVERY_SUCCESS")
 
     }
 
