@@ -78,14 +78,16 @@ class BunnyPoorCdn : ExtractorApi() {
             referer.replace(Regex("[\\r\\n\\s]"), "").trim()
         }
         
-        if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && !cleanUrl.contains("v/d/")) {
+        if (!cleanUrl.contains("/v/")) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
-                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                
-                if (iframeMatch != null) {
-                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
+                val iframeUrl = refRes.document.selectFirst("iframe#view_iframe")?.attr("src")
+                    ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                if (iframeUrl != null) cleanUrl = iframeUrl
+                else {
+                    val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                        ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                    if (iframeMatch != null) cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
                 }
             } catch (e: Exception) { }
         }
@@ -100,10 +102,13 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (capturedUrl != null) {
             val cookie = CookieManager.getInstance().getCookie(capturedUrl)
+            val playerOrigin = try {
+                URI(cleanUrl).let { "${it.scheme}://${it.authority}" }
+            } catch (e: Exception) { mainUrl }
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
-                "Origin" to "https://player.bunny-frame.online"
+                "Referer" to "$playerOrigin/",
+                "Origin" to playerOrigin
             )
             if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
 
@@ -113,11 +118,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 var content = response.text.trim()
 
                 if (!content.startsWith("#EXTM3U")) {
-                    Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(content)?.let {
-                        requestUrl = it.groupValues[1]
+                    Regex("""https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?""").find(content)?.let {
+                        requestUrl = it.value
                         content = app.get(requestUrl, headers = headers).text.trim()
                     }
                 }
+                if (!content.startsWith("#EXTM3U")) return false
 
                 if (content.contains("#EXT-X-STREAM-INF")) {
                     val subUrlLine = content.lines().lastOrNull { it.isNotBlank() && !it.startsWith("#") }
@@ -185,12 +191,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     val finalUrl = "http://127.0.0.1:${newProxy.port}/$videoId/playlist.m3u8"
                     
                     callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                        this.referer = "https://player.bunny-frame.online/"; this.headers = headers
+                        this.referer = "$playerOrigin/"; this.headers = headers
                     })
                     return true
                 } else {
                     callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
-                        this.referer = "https://player.bunny-frame.online/"; this.headers = headers
+                        this.referer = "$playerOrigin/"; this.headers = headers
                     })
                     return true
                 }

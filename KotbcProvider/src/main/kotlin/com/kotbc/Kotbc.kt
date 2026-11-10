@@ -251,12 +251,21 @@ class Kotbc : MainAPI() {
 
                     val url = "$mainUrl/${encodePathSegment(slug)}"
                     val type = typeMap[slug] ?: TvType.TvSeries
+                    val thumbnail = item.optString("thumbnail").trim()
+                    val poster = thumbnail.takeIf { it.isNotEmpty() && it != "null" }?.let {
+                        val path = if (it.startsWith("http") || it.startsWith("//") || it.startsWith("/")) {
+                            it
+                        } else {
+                            "/storage/${it.removePrefix("storage/")}"
+                        }
+                        resolveUrl(path)
+                    }
 
                     add(
                         if (type == TvType.Movie) {
-                            newMovieSearchResponse(title, url, TvType.Movie)
+                            newMovieSearchResponse(title, url, TvType.Movie) { posterUrl = poster }
                         } else {
-                            newTvSeriesSearchResponse(title, url, TvType.TvSeries)
+                            newTvSeriesSearchResponse(title, url, TvType.TvSeries) { posterUrl = poster }
                         }
                     )
                 }
@@ -333,11 +342,14 @@ class Kotbc : MainAPI() {
             ?: return null
 
         val url = resolveUrl(href)
+        val poster = selectFirst("img[src]")?.attr("src")?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { resolveUrl(it) }
 
         return if (type == TvType.Movie) {
-            newMovieSearchResponse(title, url, TvType.Movie)
+            newMovieSearchResponse(title, url, TvType.Movie) { posterUrl = poster }
         } else {
-            newTvSeriesSearchResponse(title, url, TvType.TvSeries)
+            newTvSeriesSearchResponse(title, url, TvType.TvSeries) { posterUrl = poster }
         }
     }
 

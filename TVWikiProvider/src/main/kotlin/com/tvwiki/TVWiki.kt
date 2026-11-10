@@ -377,21 +377,21 @@ class TVWiki : MainAPI() {
         val iframe = doc.selectFirst("iframe#view_iframe")
         if (iframe != null) {
             val playerUrl = iframe.attr("src")
-            if (playerUrl.contains("player.bunny-frame.online")) {
+            if (playerUrl.startsWith("https://") || playerUrl.startsWith("http://")) {
                  val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)
                  if(extracted) return true
             }
         }
 
         try {
-            val webViewInterceptor = WebViewResolver(Regex("bunny-frame|googleapis"), timeout = 15000L)
+            val webViewInterceptor = WebViewResolver(Regex("bunny-frame|bunny-video|poorcdn|googleapis"), timeout = 15000L)
             val response = app.get(targetData, headers = commonHeaders, interceptor = webViewInterceptor)
             val webViewDoc = response.document
             
             val wbIframe = webViewDoc.selectFirst("iframe#view_iframe") ?: webViewDoc.selectFirst("iframe[src*='bunny-frame']")
             if (wbIframe != null) {
                 val playerUrl = wbIframe.attr("src")
-                if (playerUrl.contains("player.bunny-frame.online")) {
+                if (playerUrl.startsWith("https://") || playerUrl.startsWith("http://")) {
                      val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)
                      if(extracted) return true
                 }
@@ -432,7 +432,7 @@ class TVWiki : MainAPI() {
 
             if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
                 val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
-                if (fullUrl.contains("player.bunny-frame.online")) {
+                if (fullUrl.startsWith("https://") || fullUrl.startsWith("http://")) {
                     return BunnyPoorCdn().extract(fullUrl, refererUrl, subtitleCallback, callback, null)
                 }
             }
