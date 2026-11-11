@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 
 import androidx.appcompat.content.res.AppCompatResources
 import android.util.TypedValue
-import android.util.Log
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.R
@@ -67,7 +66,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import android.widget.ImageView
-import android.widget.Toast
+import android.widget.EditText
 import android.graphics.Typeface
 import androidx.core.content.res.ResourcesCompat
 import android.widget.FrameLayout
@@ -87,7 +86,7 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
-import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
+import com.lagradost.cloudstream3.ui.search.SearchFragment
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
@@ -235,51 +234,35 @@ internal class RatingPlotImageHook(
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { _ -> }
     private var homeRoot: View? = null
-    private var homeSearchButton: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
-
-    private fun restoreHomeSearch() {
-        val activity = host
-        homeSearchButton?.setOnClickListener {
-            activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].queryTextSubmit("") }
-        }
-        homeSearchButton = null
-    }
 
     private fun syncHomeHooks() {
         val activity = host
         val selected = activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
-        val homeProvider = APIHolder.allProviders.filterIsInstance<StremioC>()
-            .firstOrNull { it.hasMainPage && it.name == selected }
-        Log.i("StremioCHomeSearch", "bind selected=$selected home=${homeProvider != null} root=${homeRoot != null}")
-        if (activity != null && homeProvider != null) {
-            homeRoot?.let { root ->
-                homeEntries.attach(root)
-                val button = root.findViewById<View>(R.id.home_preview_search_button)
-                Log.i("StremioCHomeSearch", "button found=${button != null} previouslyBound=${button === homeSearchButton}")
-                if (button !== homeSearchButton) {
-                    restoreHomeSearch()
-                    homeSearchButton = button
-                }
-                button?.setOnClickListener {
-                    val homeUrl = stremioManifestUrl(homeProvider.mainUrl.fixSourceUrl())
-                    val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
-                        .filter {
-                            !it.hasMainPage && it.mainUrl.isNotBlank() &&
-                                it.sourcePlugin == homeProvider.sourcePlugin &&
-                                stremioManifestUrl(it.mainUrl.fixSourceUrl()) == homeUrl
-                        }.map { it.name }.distinct()
-                    Log.i("StremioCHomeSearch", "click addon=${homeProvider.name} providers=${providers.size} names=${providers.joinToString()}")
-                    if (providers.isEmpty()) {
-                        Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        QuickSearchFragment.pushSearch(activity, "", providers.toTypedArray())
-                    }
-                }
-            }
+        if (selected != null && APIHolder.allProviders.any {
+                it is StremioC && it.hasMainPage && it.name == selected
+            }) {
+            homeRoot?.let { homeEntries.attach(it) }
         } else {
             homeEntries.detach()
-            restoreHomeSearch()
+        }
+    }
+
+    private fun syncGlobalSearchProviders(fragment: SearchFragment) {
+        val selected = fragment.selectedApis
+        val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
+        selected.toList().forEach { name ->
+            val home = providers.firstOrNull { it.hasMainPage && it.name == name } ?: return@forEach
+            val addon = stremioManifestUrl(home.mainUrl.fixSourceUrl())
+            val catalogs = providers.filter {
+                !it.hasMainPage && it.mainUrl.isNotBlank() &&
+                    it.sourcePlugin == home.sourcePlugin &&
+                    stremioManifestUrl(it.mainUrl.fixSourceUrl()) == addon
+            }.map { it.name }
+            if (catalogs.isNotEmpty()) {
+                selected.remove(name)
+                selected.addAll(catalogs)
+            }
         }
     }
     private var homePreviewText: TextView? = null
@@ -339,6 +322,16 @@ internal class RatingPlotImageHook(
                     homeRoot = v
                     syncHomeHooks()
                 }
+                if (f is SearchFragment) {
+                    syncGlobalSearchProviders(f)
+                    val input = v.findViewById<androidx.appcompat.widget.SearchView>(R.id.main_search)
+                        ?.findViewById<EditText>(androidx.appcompat.R.id.search_src_text)
+                    input?.addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                        override fun afterTextChanged(s: Editable?) = syncGlobalSearchProviders(f)
+                    })
+                }
                 attach(f, v)
             }
         }
@@ -346,12 +339,11 @@ internal class RatingPlotImageHook(
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 syncHomeHooks()
-
+            if (f is SearchFragment) syncGlobalSearchProviders(f)
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
-                restoreHomeSearch()
                 homeRoot = null
                 homeEntries.detach()
             }
@@ -367,7 +359,6 @@ internal class RatingPlotImageHook(
     fun stop() {
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
-        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         app.unregisterActivityLifecycleCallbacks(this)
@@ -381,7 +372,6 @@ internal class RatingPlotImageHook(
         if (host === activity) return
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
-        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -510,7 +500,6 @@ internal class RatingPlotImageHook(
         if (host === activity) {
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
-        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)

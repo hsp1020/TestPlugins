@@ -1,7 +1,6 @@
 package com.hsp1020
 
 import android.content.Context
-import android.util.Log
 import android.os.SystemClock
 import android.content.SharedPreferences
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -2436,7 +2435,6 @@ open class StremioC(
         else fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type), "browser")
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        Log.i("StremioCHomeSearch", "search provider=$name disabled=$disableSearch scoped=${searchCatalogId != null} queryLength=${query.length}")
         if (disableSearch) return emptyList()
         if (!isAddonEnabled()) return emptyList()
         mainUrl = mainUrl.fixSourceUrl()
@@ -2464,7 +2462,6 @@ open class StremioC(
                 prefs.getBoolean("tab_enabled_${legacyKey}_${catalogId}_${catalogType}_default", true)
             }
         } ?: emptyList()
-        Log.i("StremioCHomeSearch", "catalogs provider=$name count=${supportedCatalogs.size}")
 
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
@@ -2474,7 +2471,6 @@ open class StremioC(
             }.awaitAll().flatten()
         }
 
-        Log.i("StremioCHomeSearch", "results provider=$name count=${searchResults.size}")
         val seenIds = mutableSetOf<String>()
         return searchResults.filter { item ->
             val extractedId = item.extractPureId()
