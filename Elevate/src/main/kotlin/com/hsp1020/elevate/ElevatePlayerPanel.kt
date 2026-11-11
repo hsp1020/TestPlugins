@@ -1269,8 +1269,11 @@ internal class ElevatePlayerPanel(
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
-                    if (wasPlaying && fragment.playerView?.player?.playWhenReady == false) {
-                        fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.UI)
+                    if (fragment.playerView?.player?.playWhenReady != wasPlaying) {
+                        fragment.player.handleEvent(
+                            if (wasPlaying) CSPlayerEvent.Play else CSPlayerEvent.Pause,
+                            PlayerEventSource.UI
+                        )
                     }
                     chosenLink = link
                     renderSources()
