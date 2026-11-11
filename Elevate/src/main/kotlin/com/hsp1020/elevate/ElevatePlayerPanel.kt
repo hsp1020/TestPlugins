@@ -1265,9 +1265,13 @@ internal class ElevatePlayerPanel(
             val title = "$name ${Qualities.getStringByInt(link.first?.quality)}"
             Row(title, {
                 if (link != selected) runCatching {
+                    val wasPlaying = fragment.playerView?.player?.playWhenReady == true
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
+                    if (wasPlaying && fragment.playerView?.player?.playWhenReady == false) {
+                        fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.UI)
+                    }
                     chosenLink = link
                     renderSources()
                 }.onFailure { android.util.Log.w("Elevate", "Source switch failed", it) }
