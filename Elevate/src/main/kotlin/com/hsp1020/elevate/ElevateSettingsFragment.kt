@@ -50,7 +50,7 @@ internal enum class ElevateFeature(
         "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
     WATCH_HISTORY_SYNC("Home & Library", "Watch History Sync",
         "View and edit season-specific watch status, episode progress and ratings on MAL, AniList, Kitsu and Simkl."),
-    HISTORY_SYNC("Home & Library", "Watch Progress Sync",
+    WATCH_PROGRESS_SYNC("Home & Library", "Watch Progress Sync",
         "Report playback progress and watched history to the configured AIOMetadata addon."),
     MDB_RATINGS("Home & Library", "MDB Ratings",
         "Show MDBList ratings before the plot on every provider's detail page."),
@@ -96,6 +96,8 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
+    // Preserve the old addon URL but intentionally reset the renamed feature toggle.
+    const val WATCH_PROGRESS_ADDON_URL = "HISTORY_SYNC_URL"
     fun defaultEnabled(@Suppress("UNUSED_PARAMETER") feature: ElevateFeature): Boolean = false
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -265,7 +267,7 @@ class ElevateSettingsFragment : DialogFragment() {
                         }
                     }
                 } else null
-                val historyControls = if (feature == ElevateFeature.HISTORY_SYNC) {
+                val progressControls = if (feature == ElevateFeature.WATCH_PROGRESS_SYNC) {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(8), 0, 0, dp(12))
@@ -276,11 +278,11 @@ class ElevateSettingsFragment : DialogFragment() {
                             isSingleLine = true
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                             applyElevateNativeFont()
-                            setText(preferences.getString("HISTORY_SYNC_URL", "").orEmpty())
+                            setText(preferences.getString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, "").orEmpty())
                             addTextChangedListener(object : TextWatcher {
                                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                                    preferences.edit().putString("HISTORY_SYNC_URL", s.toString().trim()).apply()
+                                    preferences.edit().putString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, s.toString().trim()).apply()
                                 }
                                 override fun afterTextChanged(s: Editable?) = Unit
                             })
@@ -406,7 +408,7 @@ class ElevateSettingsFragment : DialogFragment() {
                     posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     skipControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
-                    historyControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+                    progressControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     mdbControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
@@ -417,7 +419,7 @@ class ElevateSettingsFragment : DialogFragment() {
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         externalControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
-                        historyControls?.visibility =
+                        progressControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         mdbControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
@@ -425,7 +427,7 @@ class ElevateSettingsFragment : DialogFragment() {
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
-                historyControls?.let { content.addView(it) }
+                progressControls?.let { content.addView(it) }
                 mdbControls?.let { content.addView(it) }
                 externalControls?.let { content.addView(it) }
                 skipControls?.let { content.addView(it) }

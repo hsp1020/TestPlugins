@@ -81,7 +81,7 @@ class ElevatePlugin : Plugin() {
     private var pipLibrary: PipLibraryNavigation? = null
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
-    private var historyReporter: ElevateHistoryReporter? = null
+    private var watchProgressReporter: ElevateWatchProgressReporter? = null
     private var watchHistoryHook: ElevateWatchHistoryHook? = null
     private var mdbRatings: ElevateMdbRatings? = null
     private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
@@ -219,13 +219,13 @@ class ElevatePlugin : Plugin() {
             watchHistoryHook?.stop()
             watchHistoryHook = null
         }
-        if (enabled(ElevateFeature.HISTORY_SYNC)) {
-            if (historyReporter == null) {
-                historyReporter = ElevateHistoryReporter(application).also { it.start() }
+        if (enabled(ElevateFeature.WATCH_PROGRESS_SYNC)) {
+            if (watchProgressReporter == null) {
+                watchProgressReporter = ElevateWatchProgressReporter(application).also { it.start() }
             }
         } else {
-            historyReporter?.stop()
-            historyReporter = null
+            watchProgressReporter?.stop()
+            watchProgressReporter = null
         }
         if (enabled(ElevateFeature.MDB_RATINGS)) {
             if (mdbRatings == null) {
@@ -492,8 +492,8 @@ class ElevatePlugin : Plugin() {
         externalQueueBridge = null
         watchHistoryHook?.stop()
         watchHistoryHook = null
-        historyReporter?.stop()
-        historyReporter = null
+        watchProgressReporter?.stop()
+        watchProgressReporter = null
         mdbRatings?.stop()
         mdbRatings = null
         externalDownloaderLifecycle?.stop()

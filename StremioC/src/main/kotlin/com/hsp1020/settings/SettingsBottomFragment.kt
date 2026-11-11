@@ -93,7 +93,7 @@ data class LinkItem(
     val link: String,
     val type: String,
     val isSyncEnabled: Boolean = true,
-    val isHistorySyncEnabled: Boolean = true,
+    val isProgressSyncEnabled: Boolean = true,
     val isStreamsAddonEnabled: Boolean = false,
     val isSubtitlesAddonEnabled: Boolean = false,
     val enabled: Boolean = true
@@ -104,7 +104,7 @@ object SettingsRepository {
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
-    const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
+    const val PREF_KEY_METADATA_ADDON_URL = "history_sync_url"
     const val PREF_KEY_STREAM_SUBTITLE_URLS = "stream_subtitle_addon_urls"
     const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
 
@@ -122,7 +122,7 @@ object SettingsRepository {
                         link = obj.optString("link", ""),
                         type = obj.optString("type", "StremioC"),
                         isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
-                        isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
+                        isProgressSyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
                         isStreamsAddonEnabled = obj.optBoolean("isStreamsAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         isSubtitlesAddonEnabled = obj.optBoolean("isSubtitlesAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         enabled = obj.optBoolean("enabled", true)
@@ -144,7 +144,7 @@ object SettingsRepository {
                 put("link", item.link)
                 put("type", item.type)
                 put("isSyncEnabled", item.isSyncEnabled)
-                put("isHistorySyncEnabled", item.isHistorySyncEnabled)
+                put("isHistorySyncEnabled", item.isProgressSyncEnabled)
                 put("isStreamsAddonEnabled", item.isStreamsAddonEnabled)
                 put("isSubtitlesAddonEnabled", item.isSubtitlesAddonEnabled)
                 put("enabled", item.enabled)
@@ -388,7 +388,7 @@ class SettingsBottomFragment(
         field.backgroundTintList = null
         field.background = getCardBg()
         // Use identical heights and center the input text after applying the themed background.
-        if (field.id == getCachedResId("etHistorySyncUrl", "id")) {
+        if (field.id == getCachedResId("etMetadataAddonUrl", "id")) {
             field.setPadding(dp(12), 0, dp(12), 0)
             field.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         }
@@ -1068,12 +1068,6 @@ class SettingsBottomFragment(
         }
     }
 
-    private fun isElevateHistoryEnabled(): Boolean =
-        com.lagradost.cloudstream3.plugins.PluginManager.plugins.values.any {
-            it.javaClass.name == "com.hsp1020.elevate.ElevatePlugin"
-        } && hostContext.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
-            .getBoolean("HISTORY_SYNC", false)
-
     private fun isCineStreamInstalled(): Boolean {
         return getSafeAllProviders().any { it.name.equals("CineStream", true) } ||
                StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
@@ -1164,15 +1158,15 @@ class SettingsBottomFragment(
         }
         if (view !is LinearLayout || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
-                "layoutHistorySyncUrl",
+                "layoutMetadataAddonUrl",
                 "pageHub", "pageMetadata",
                 "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
                 "rowSources", "rowMetadata", "rowBackup"),
             NestedScrollView::class.java to listOf("settingsViewport"),
             TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack"),
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks"),
-            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
-            EditText::class.java to listOf("etHistorySyncUrl")
+            ImageButton::class.java to listOf("btnConfigureMetadataAddon", "btnDeleteMetadataAddon"),
+            EditText::class.java to listOf("etMetadataAddonUrl")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1526,16 +1520,16 @@ class SettingsBottomFragment(
             if (url.isNotBlank()) sourceDraft.add(LinkItem(id = i.toLong(), name = name, link = url,
                 type = "StremioC", enabled = (entry as? JSONObject)?.optBoolean("enabled", true) ?: true))
         }
-        val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
-        val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
+        val layoutMetadataAddonUrl: View = try { view.findView("layoutMetadataAddonUrl") } catch (e: Throwable) { throw Exception("layoutMetadataAddonUrl View not found", e) }
+        val etMetadataAddonUrl: EditText = try { view.findView("etMetadataAddonUrl") } catch (e: Throwable) { throw Exception("etMetadataAddonUrl EditText not found", e) }
 
-        layoutHistorySyncUrl.visibility = View.VISIBLE
-        etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
-        val historyGear = view.optional("btnConfigureHistoryAddon") as? ImageButton
-        view.optional("btnDeleteHistoryAddon")?.apply {
+        layoutMetadataAddonUrl.visibility = View.VISIBLE
+        etMetadataAddonUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_METADATA_ADDON_URL, ""))
+        val metadataGear = view.optional("btnConfigureMetadataAddon") as? ImageButton
+        view.optional("btnDeleteMetadataAddon")?.apply {
             visibility = View.GONE; isFocusable = false; isClickable = false
         }
-        if (historyGear != null) bindAddonActions(settingsDialog, etHistorySyncUrl, historyGear, trash = null)
+        if (metadataGear != null) bindAddonActions(settingsDialog, etMetadataAddonUrl, metadataGear, trash = null)
 
 
         addlinks.setOnClickListener {
@@ -1643,7 +1637,7 @@ class SettingsBottomFragment(
                         .put("enabled", addon.enabled))
                 }
             }.toString())
-            editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
+            editor.putString(SettingsRepository.PREF_KEY_METADATA_ADDON_URL, etMetadataAddonUrl.text.toString().trim())
             editor.remove("custom_poster_url").remove("custom_poster_enabled")
 
             editor.commit()
@@ -1877,7 +1871,7 @@ class SettingsBottomFragment(
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
             Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchLinkSync",
-                "switchHistorySync", "switchCineStream", "switchStreamPlay", "switchVixSrc"),
+                "switchProgressSync", "switchCineStream", "switchStreamPlay", "switchVixSrc"),
             NestedScrollView::class.java to listOf("catalogEditorScroll")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
@@ -1897,14 +1891,11 @@ class SettingsBottomFragment(
         val streamsAddon = dialogView.findView<Switch>("switchStreamsAddon")
         val subtitlesAddon = dialogView.findView<Switch>("switchSubtitlesAddon")
         val metaSync = dialogView.findView<Switch>("switchLinkSync")
-        val historySync = dialogView.findView<Switch>("switchHistorySync")
+        val progressSync = dialogView.findView<Switch>("switchProgressSync")
         streamsAddon.isChecked = itemToEdit?.isStreamsAddonEnabled ?: false
         subtitlesAddon.isChecked = itemToEdit?.isSubtitlesAddonEnabled ?: false
         metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
-        val historyAvailable = isElevateHistoryEnabled()
-        historySync.isEnabled = historyAvailable
-        historySync.isChecked = historyAvailable && (itemToEdit?.isHistorySyncEnabled ?: false)
-        if (!historyAvailable) historySync.text = "History Sync (Requires Elevate History Sync)"
+        progressSync.isChecked = itemToEdit?.isProgressSyncEnabled ?: false
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
         if (!sources) {
             setupToggle(dialogView, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
@@ -1935,7 +1926,7 @@ class SettingsBottomFragment(
                 name = "", link = "", type = "StremioC"
             )).copy(name = name.text.toString().trim().ifBlank { if (sources) "" else raw },
                 link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
-                isHistorySyncEnabled = historyAvailable && historySync.isChecked,
+                isProgressSyncEnabled = progressSync.isChecked,
                 isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked)
             val values = sourceDraft ?: catalogLinks()
             val index = values.indexOfFirst { it.id == changed.id }

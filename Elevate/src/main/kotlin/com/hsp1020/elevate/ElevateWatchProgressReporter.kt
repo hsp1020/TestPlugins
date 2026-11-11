@@ -7,9 +7,7 @@ import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.lagradost.cloudstream3.CommonActivity
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.function.Consumer
 import android.net.Uri
 import android.util.Log
 import android.os.Handler
@@ -46,7 +44,7 @@ import java.net.URI
 import java.util.UUID
 
 @OptIn(UnstableApi::class)
-internal class ElevateHistoryReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
+internal class ElevateWatchProgressReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
     private val downloadedMappings = LinkedHashMap<String, Pair<Long, Item>>()
@@ -70,10 +68,28 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     private data class Item(
         val id: Int, val url: String, val api: String,
         val movie: Boolean, val season: Int?, val episode: Int?,
-        val anime: Boolean, val stremioProvider: Any?, val stremioData: String?,
+        val anime: Boolean, val progressAllowed: Boolean?, val preferKitsu: Boolean,
+        val originalAnimeId: String?,
         val ids: Map<String, String>, val imdbNumbers: Pair<Int?, Int?>?, val urlId: String?,
         val expectedDurationMs: Long?, val offline: ExtractorUri? = null
     ) { val key: String get() = url + "#" + id }
+
+    /** An explicit per-catalog policy is honored without inspecting the provider class. */
+    private fun progressPolicy(syncData: Map<String, String>?, episodeJson: String?): Pair<Boolean?, Boolean> {
+        val extra = episodeJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val allowed = ElevateWatchProgressRules.flag(syncData?.get("watch_progress_allowed"))
+            ?: ElevateWatchProgressRules.flag(extra?.opt("watchProgressAllowed")?.toString())
+        val prefer = ElevateWatchProgressRules.flag(syncData?.get("watch_progress_prefer_kitsu"))
+            ?: ElevateWatchProgressRules.flag(extra?.opt("watchProgressPreferKitsu")?.toString())
+        return allowed to (prefer == true)
+    }
+
+    private fun originalAnimeId(episodeJson: String?, ids: ElevateMediaIdentity.Ids): String? {
+        val json = episodeJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val explicit = json?.optString("originalAnimeId")
+            ?.takeIf { it.matches(Regex("(?:kitsu|mal|anilist):[0-9]+")) }
+        return explicit ?: ids.original
+    }
 
     private data class Report(
         val item: Item, val event: String, val position: Long,
@@ -101,7 +117,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             for (report in queue) try {
                 send(report)
             } catch (e: Exception) {
-                Log.e("ElevateHistory", "stage=SEND_FAILED event=" +
+                Log.e("ElevateWatchProgress", "stage=SEND_FAILED event=" +
                     report.event + " type=" + e.javaClass.simpleName)
             }
         }
@@ -118,18 +134,12 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             return Item(id, "download:$parentId", "Download", movie,
                 if (movie) null else file.season, if (movie) null else file.episode,
                 file.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
-                null, null, emptyMap(), null, null, null, file)
+                null, false, null, emptyMap(), null, null, null, file)
         }
         val episode = state.meta as? ResultEpisode ?: run { return null }
         val collected = ElevateMediaIdentity.collect(response, episode.data)
         val ids = collected.asMap().toMutableMap()
-        val stremio = APIHolder.allProviders.firstOrNull {
-            it.name.equals(response.apiName, true) &&
-                it.javaClass.name == "com.hsp1020.StremioC"
-        }
-        if (response.apiName == "StremioC" && stremio == null) {
-            return null
-        }
+        val policy = progressPolicy(response.syncData, episode.data)
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val imdbNumbers = if (collected.imdbSeason != null || collected.imdbEpisode != null)
             collected.imdbSeason to collected.imdbEpisode else null
@@ -140,13 +150,13 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
             ElevateMediaIdentity.anime(response, episode, collected),
-            stremio, if (stremio != null) episode.data else null, ids, imdbNumbers, urlId,
+            policy.first, policy.second, originalAnimeId(episode.data, collected), ids, imdbNumbers, urlId,
             expectedMinutes?.takeIf { it in 1 until 1_440 }?.toLong()?.times(60_000L))
     }
 
-    private fun playbackBase(): String? {
-        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return null
-        val url = prefs.getString("HISTORY_SYNC_URL", null)?.trim()
+    private fun progressEndpointBase(): String? {
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) return null
+        val url = prefs.getString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, null)?.trim()
             ?.replace("stremio://", "https://") ?: return null
         return runCatching {
             val uri = URI(url)
@@ -194,7 +204,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         if (!approvedRuntime(item, current)) {
             return
         }
-        val target = playbackBase() ?: run {
+        val target = progressEndpointBase() ?: run {
             return
         }
         val openingSession = event == "start" && lastEvent == null
@@ -424,7 +434,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             }
             "equals" -> proxy === args?.getOrNull(0)
             "hashCode" -> System.identityHashCode(proxy)
-            "toString" -> "ElevateHistoryReporterListener"
+            "toString" -> "ElevateWatchProgressReporterListener"
             else -> null
         }
     } as Media3Player.Listener
@@ -547,64 +557,11 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         queue.close()
     }
 
-    private suspend fun stremioOverrides(item: Item): Map<String, String> {
-        val provider = item.stremioProvider ?: return emptyMap()
-        val result = withTimeoutOrNull(12_000L) {
-            val completion = CompletableDeferred<Map<String, String>>()
-            try {
-                val method = provider.javaClass.getMethod("resolvePlaybackIds",
-                    String::class.java, java.lang.Integer.TYPE, Consumer::class.java)
-                method.invoke(provider, item.stremioData.orEmpty(), item.season ?: 0,
-                    Consumer<Map<String, String>> { completion.complete(it) })
-                completion.await()
-            } catch (_: Exception) {
-                emptyMap()
-            }
-        } ?: emptyMap()
-        return result
-    }
-
     private suspend fun resolveSimkl(id: String, movie: Boolean): Map<String, String> =
         ElevateMediaIdentity.enrichSimkl(
             ElevateMediaIdentity.Ids(simkl = id), movie
         ).asMap()
 
-
-    /**
-     * Offline StremioC headers store the unified metadata URL, not the catalog
-     * that originally enabled metadata sync. Restore a catalog only when its
-     * history permission is unambiguous; never override an explicit OFF.
-     */
-    private fun restoreDownloadedStremioCatalog(episodeJson: String, metaUrl: String): String {
-        if (!metaUrl.contains("/meta/")) return episodeJson
-        fun base(url: String): String = url.substringBefore('?')
-            .removeSuffix("/manifest.json").trimEnd('/').lowercase()
-        val prefs = application.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        val syncBase = base(prefs.getString("history_sync_url", "").orEmpty())
-        if (syncBase.isBlank() || base(metaUrl.substringBefore("/meta/")) != syncBase)
-            return episodeJson
-        val data = runCatching { JSONObject(episodeJson) }.getOrNull() ?: return episodeJson
-        val declared = base(data.optString("addonUrl").takeUnless {
-            it.equals("null", ignoreCase = true)
-        }.orEmpty())
-        if (declared.isNotBlank() && declared != syncBase) return episodeJson
-
-        val links = runCatching {
-            org.json.JSONArray(prefs.getString("stremio_saved_links", "[]"))
-        }.getOrNull() ?: return episodeJson
-        val candidates = linkedMapOf<String, Pair<String, Boolean>>()
-        for (i in 0 until links.length()) {
-            val entry = links.optJSONObject(i) ?: continue
-            if (!entry.optBoolean("enabled", true) ||
-                !entry.optBoolean("isSyncEnabled", true)) continue
-            val url = entry.optString("link").trim().takeIf { it.isNotEmpty() } ?: continue
-            candidates[base(url)] = url to entry.optBoolean("isHistorySyncEnabled", true)
-        }
-        if (candidates.isEmpty() || candidates.values.any { !it.second }) {
-            return episodeJson
-        }
-        return data.put("addonUrl", candidates.values.first().first).toString()
-    }
 
     /** Resolve offline metadata on the sender thread; never block playback callbacks. */
     private suspend fun resolveDownloaded(item: Item): Item? {
@@ -618,7 +575,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         downloadedMappings[cacheKey]?.takeIf { now - it.first < 3_600_000L }
             ?.let { return it.second }
 
-        val stremio = header.apiName.equals("StremioC", true)
         val detail = try {
             withTimeoutOrNull(8_000L) {
                 APIHolder.getApiFromNameNull(header.apiName)?.load(header.url)
@@ -640,14 +596,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             is MovieLoadResponse -> detail.dataUrl
             else -> null
         }
-        val stremioProvider = if (stremio) APIHolder.allProviders.firstOrNull {
-            it.name.equals(header.apiName, true) &&
-                it.javaClass.name == "com.hsp1020.StremioC"
-        } else null
-        if (stremio && (stremioProvider == null || episodeData.isNullOrBlank())) {
-            return null // Never bypass StremioC's per-catalog History Sync toggle.
-        }
-
+        // The source's current metadata carries its policy. When a Stremio
+        // metadata endpoint cannot be reloaded, never assume permission.
+        if (detail == null && Regex("/stremio/[^/]+/meta/").containsMatchIn(header.url)) return null
+        val policy = progressPolicy(detail?.syncData, episodeData)
         val collected = ElevateMediaIdentity.collect(
             detail, episodeData, urls = listOf(header.url), episodeFirst = true
         )
@@ -678,10 +630,8 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             url = header.url, api = header.apiName, movie = movie,
             season = if (movie) null else file.season,
             episode = if (movie) null else file.episode,
-            anime = anime, stremioProvider = stremioProvider,
-            stremioData = if (stremio) episodeData?.let {
-                restoreDownloadedStremioCatalog(it, header.url)
-            } else null,
+            anime = anime, progressAllowed = policy.first, preferKitsu = policy.second,
+            originalAnimeId = originalAnimeId(episodeData, collected),
             ids = ids, imdbNumbers = imdbNumbers, urlId = urlId
         )
         downloadedMappings[cacheKey] = now to resolved
@@ -691,15 +641,40 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
     }
 
     private suspend fun send(report: Report) {
-        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) return
         val item = report.item.offline?.let { resolveDownloaded(report.item) ?: return }
             ?: report.item
-        val overrides = stremioOverrides(item)
-        if (item.stremioProvider != null && overrides["_historyEnabled"] != "true") {
-            return
-        }
+        if (item.progressAllowed == false) return
         val ids = item.ids.toMutableMap()
-        ids.putAll(overrides.filterKeys { !it.startsWith("_") })
+        // Reuse the same verified AIOStreams season mapping as Watch History Sync.
+        if (item.anime && !item.movie) {
+            val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
+            val season = item.imdbNumbers?.first ?: item.season
+            val tmdb = ids["tmdb"]
+            val source = item.originalAnimeId?.substringBefore(':')
+                ?.takeIf { it in setOf("kitsu", "mal", "anilist") }
+            val needsMapping = season == null || season > 1 ||
+                imdb == null || ids["kitsu"] == null
+            val direct = source?.takeIf { needsMapping }?.let { kind ->
+                item.originalAnimeId?.let { id ->
+                    ElevateAnimeIdResolver.resolveTrackingSource(kind, id)
+                }
+            }?.takeIf { mapped ->
+                (imdb == null || mapped.imdb == null || mapped.imdb == imdb) &&
+                    (tmdb == null || mapped.tmdb == null || mapped.tmdb == tmdb) &&
+                    (season == null || mapped.matchesSeason(season))
+            }
+            val mapped = direct ?: if (imdb != null && season != null && season > 0 &&
+                (season > 1 || ids["kitsu"] == null)) {
+                ElevateAnimeIdResolver.resolveTrackingImdbSeason(imdb, season)
+                    ?.takeIf { it.matchesSeason(season) }
+            } else null
+            mapped?.let {
+                it.kitsu?.let { value -> ids["kitsu"] = value }
+                it.mal?.let { value -> ids["mal"] = value }
+                it.anilist?.let { value -> ids["anilist"] = value }
+            }
+        }
         if (ids["imdb"]?.matches(Regex("tt[0-9]+")) != true &&
             ids["tmdb"]?.toLongOrNull()?.let { it > 0L } != true) {
             ids["simkl"]?.let { ids.putAll(resolveSimkl(it, item.movie)) }
@@ -721,10 +696,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val mal = ids["mal"]?.removePrefix("mal:")
             ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
-        val anime = item.anime || overrides["_anime"] == "true"
+        val anime = item.anime
         val originalId = originalPlaybackId(item.url, ids)
         val base = when {
-            item.stremioProvider != null && anime && kitsu != null -> "kitsu:" + kitsu
+            item.preferKitsu && anime && kitsu != null -> "kitsu:" + kitsu
             originalId != null -> originalId
             imdb != null -> imdb
             tmdb != null -> "tmdb:" + tmdb
@@ -737,12 +712,10 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
             }
         }
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
-            else overrides["_season"]?.toIntOrNull()?.takeIf { it > 0 }
-                ?: (if (base.startsWith("tt")) item.imdbNumbers?.first else null)
+            else (if (base.startsWith("tt")) item.imdbNumbers?.first else null)
                 ?: item.season
         val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:")) item.episode
-            else overrides["_episode"]?.toIntOrNull()?.takeIf { it > 0 }
-                ?: (if (base.startsWith("tt")) item.imdbNumbers?.second else null)
+            else (if (base.startsWith("tt")) item.imdbNumbers?.second else null)
                 ?: item.episode
         val videoId = if (item.movie) base else {
             if (episode == null || episode <= 0 || season == null || season <= 0) return

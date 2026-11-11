@@ -83,12 +83,6 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     }
 }
 
-internal data class SeasonTrackerIds(
-    val mal: Int?, val aniList: Int?, val kitsu: Int?,
-    val simkl: Int? = null, val tvdb: Int? = null,
-    val tvdbSeason: Int? = null, val tmdbSeason: Int? = null
-)
-
 
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
@@ -375,44 +369,6 @@ open class StremioC(
         get() = if (mainUrl.isBlank() && libraryMetadataBase() != null) {
             setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
         } else emptySet()
-
-    /** StremioC-only playback ID mapping; other providers never call this method. */
-    fun resolvePlaybackIds(episodeJson: String, season: Int,
-        callback: java.util.function.Consumer<Map<String, String>>) {
-        val data = runCatching {
-            com.lagradost.cloudstream3.utils.AppUtils.parseJson<LoadData>(episodeJson)
-        }.getOrNull()
-        val catalog = data?.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
-        val enabled = getSyncSettings().historySyncMap[catalog.cleanBaseUrl().lowercase()] == true
-        val ids = linkedMapOf("_historyEnabled" to enabled.toString())
-        if (data == null) {
-            callback.accept(ids)
-            return
-        }
-        data.imdbId?.let { ids["imdb"] = it }
-        data.tmdbId?.let { ids["tmdb"] = it.toString() }
-        data.kitsuId?.removePrefix("kitsu:")?.let { ids["kitsu"] = it }
-        data.malId?.let { ids["mal"] = it.toString() }
-        data.anilistId?.let { ids["anilist"] = it.toString() }
-        data.imdbSeason?.takeIf { it > 0 }?.let { ids["_season"] = it.toString() }
-        data.imdbEpisode?.takeIf { it > 0 }?.let { ids["_episode"] = it.toString() }
-        if (data.isAnime) ids["_anime"] = "true"
-        if (!enabled ||
-            (season <= 1 && !ids["imdb"].isNullOrBlank() && !ids["kitsu"].isNullOrBlank())) {
-            callback.accept(ids)
-            return
-        }
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            runCatching {
-                playbackTrackerIds(data)?.let { mapped ->
-                    mapped.kitsu?.let { ids["kitsu"] = it.toString() }
-                    mapped.mal?.let { ids["mal"] = it.toString() }
-                    mapped.aniList?.let { ids["anilist"] = it.toString() }
-                }
-            }
-            callback.accept(ids)
-        }
-    }
 
     private fun libraryMetadataBase(): String? = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -1106,7 +1062,7 @@ open class StremioC(
         private data class SyncSettings(
             val syncUrl: String,
             val syncMap: Map<String, Boolean>,
-            val historySyncMap: Map<String, Boolean>,
+            val progressSyncMap: Map<String, Boolean>,
             val streamsAddonMap: Map<String, Boolean>,
             val subtitlesAddonMap: Map<String, Boolean>,
             val streamSubtitleUrls: List<StreamSubtitleAddon>,
@@ -1130,7 +1086,20 @@ open class StremioC(
                 ?: (url.isBlank() || stremioManifestUrl(url) !in settings.disabledCatalogUrls)
         }
 
-        private fun getSyncSettings(): SyncSettings {
+        /** Encode the catalog's progress permission into returned metadata. */
+    private fun isWatchProgressAllowed(catalogUrl: String?): Boolean {
+        val catalog = catalogUrl?.takeIf { it.isNotBlank() }?.cleanBaseUrl()?.lowercase() ?: return false
+        val settings = getSyncSettings()
+        settings.progressSyncMap[catalog]?.let { return it }
+        // For a unified metadata URL without a clear origin, respect every
+        // enabled catalog's explicit OFF; never guess a source.
+        if (settings.syncUrl.isBlank() ||
+            catalog != settings.syncUrl.cleanBaseUrl().lowercase()) return false
+        val candidates = settings.progressSyncMap.filterKeys { settings.syncMap[it] == true }
+        return candidates.isNotEmpty() && candidates.values.all { it }
+    }
+
+    private fun getSyncSettings(): SyncSettings {
             val now = System.currentTimeMillis()
             val cached = cachedSyncSettings
             if (cached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
@@ -1146,7 +1115,7 @@ open class StremioC(
                 val syncUrl = prefs.getString("history_sync_url", "") ?: ""
                 val json = prefs.getString("stremio_saved_links", null)
                 val map = mutableMapOf<String, Boolean>()
-                val historyMap = mutableMapOf<String, Boolean>()
+                val progressMap = mutableMapOf<String, Boolean>()
                 val streamsMap = mutableMapOf<String, Boolean>()
                 val subtitlesMap = mutableMapOf<String, Boolean>()
                 val catalogEnabled = mutableMapOf<String, Boolean>()
@@ -1171,7 +1140,7 @@ open class StremioC(
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
-                                historyMap[link] = obj.optBoolean("isHistorySyncEnabled", map[link] ?: true)
+                                progressMap[link] = obj.optBoolean("isHistorySyncEnabled", map[link] ?: true)
                                 val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                                 streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
                                 subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
@@ -1192,7 +1161,7 @@ open class StremioC(
                     }
                 }.onFailure { error ->
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
-                val result = SyncSettings(syncUrl, map, historyMap, streamsMap, subtitlesMap, extraUrls,
+                val result = SyncSettings(syncUrl, map, progressMap, streamsMap, subtitlesMap, extraUrls,
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
@@ -3385,13 +3354,6 @@ open class StremioC(
         val tmdbMediaType: String? = null
     )
 
-    internal suspend fun playbackTrackerIds(loadData: LoadData): SeasonTrackerIds? {
-        val mapped = fetchAnimeSeasonMapping(loadData) ?: return null
-        return SeasonTrackerIds(mapped.malId, mapped.aniListId,
-            mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
-            mapped.tvdbSeason, mapped.tmdbSeason)
-    }
-
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
@@ -4130,6 +4092,8 @@ open class StremioC(
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
         @JsonProperty("addonUrl") val addonUrl: String? = null,
+        @JsonProperty("watchProgressAllowed") val watchProgressAllowed: Boolean? = null,
+        @JsonProperty("watchProgressPreferKitsu") val watchProgressPreferKitsu: Boolean? = null,
         @JsonProperty("originalAnimeId") @JsonAlias("originalKitsuId") val originalAnimeId: String? = null, 
         @JsonProperty("embeddedStreams") val embeddedStreams: String? = null,
         @JsonProperty("embeddedStreamTitle") val embeddedStreamTitle: String? = null
@@ -5250,6 +5214,8 @@ open class StremioC(
                     }.toString()
                 }
 
+                syncData["watch_progress_allowed"] = StremioC.isWatchProgressAllowed(provider.mainUrl).toString()
+                syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && !finalKitsuId.isNullOrBlank()).toString()
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)
                 syncData["logo_expected"] = (!finalLogo.isNullOrBlank()).toString()
                 syncData["logo_foreign_language"] = finalLogoFallback.toString()
@@ -5291,6 +5257,8 @@ open class StremioC(
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
                         addonUrl = provider.mainUrl,
+                        watchProgressAllowed = StremioC.isWatchProgressAllowed(provider.mainUrl),
+                        watchProgressPreferKitsu = isAnimeMedia && !finalKitsuId.isNullOrBlank(),
                         originalAnimeId = originalAnimeId,
                         embeddedStreams = finalVideos?.singleOrNull()?.embeddedStreamsJson(),
                         embeddedStreamTitle = finalVideos?.singleOrNull()?.let { it.title ?: it.name }
@@ -5454,6 +5422,8 @@ open class StremioC(
                 malId = malId,
                 kitsuId = kitsuId,
                 addonUrl = addonUrl,
+                watchProgressAllowed = StremioC.isWatchProgressAllowed(addonUrl),
+                watchProgressPreferKitsu = isAnime && !kitsuId.isNullOrBlank(),
                 originalAnimeId = originalAnimeId,
                 embeddedStreams = embeddedStreamsJson(),
                 embeddedStreamTitle = title ?: name

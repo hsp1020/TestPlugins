@@ -233,7 +233,7 @@
                 android:orientation="vertical"
                 android:visibility="gone">
                 <LinearLayout
-                    android:id="@+id/layoutHistorySyncUrl"
+                    android:id="@+id/layoutMetadataAddonUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
@@ -266,7 +266,7 @@
                             android:layout_weight="1"
                             android:layout_marginStart="12dp">
                             <EditText
-                                android:id="@+id/etHistorySyncUrl"
+                                android:id="@+id/etMetadataAddonUrl"
                                 android:layout_width="match_parent"
                                 android:layout_height="28dp"
                                 android:layout_gravity="top"
@@ -283,7 +283,7 @@
                                 android:background="@android:color/transparent" />
                         </FrameLayout>
                         <ImageButton
-                            android:id="@+id/btnConfigureHistoryAddon"
+                            android:id="@+id/btnConfigureMetadataAddon"
                             android:layout_width="48dp"
                             android:layout_height="48dp"
                             android:paddingLeft="12dp"
@@ -295,7 +295,7 @@
                             android:focusable="true"
                             android:background="?android:attr/selectableItemBackgroundBorderless" />
                         <ImageButton
-                            android:id="@+id/btnDeleteHistoryAddon"
+                            android:id="@+id/btnDeleteMetadataAddon"
                             android:layout_width="48dp"
                             android:layout_height="48dp"
                             android:padding="12dp"
