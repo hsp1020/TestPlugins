@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 
 import androidx.appcompat.content.res.AppCompatResources
 import android.util.TypedValue
+import android.util.Log
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.R
@@ -250,10 +251,12 @@ internal class RatingPlotImageHook(
         val selected = activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
         val homeProvider = APIHolder.allProviders.filterIsInstance<StremioC>()
             .firstOrNull { it.hasMainPage && it.name == selected }
+        Log.i("StremioCHomeSearch", "bind selected=$selected home=${homeProvider != null} root=${homeRoot != null}")
         if (activity != null && homeProvider != null) {
             homeRoot?.let { root ->
                 homeEntries.attach(root)
                 val button = root.findViewById<View>(R.id.home_preview_search_button)
+                Log.i("StremioCHomeSearch", "button found=${button != null} previouslyBound=${button === homeSearchButton}")
                 if (button !== homeSearchButton) {
                     restoreHomeSearch()
                     homeSearchButton = button
@@ -266,6 +269,7 @@ internal class RatingPlotImageHook(
                                 it.sourcePlugin == homeProvider.sourcePlugin &&
                                 stremioManifestUrl(it.mainUrl.fixSourceUrl()) == homeUrl
                         }.map { it.name }.distinct()
+                    Log.i("StremioCHomeSearch", "click addon=${homeProvider.name} providers=${providers.size} names=${providers.joinToString()}")
                     if (providers.isEmpty()) {
                         Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
                     } else {
