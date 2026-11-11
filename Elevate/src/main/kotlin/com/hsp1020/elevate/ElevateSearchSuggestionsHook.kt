@@ -8,7 +8,6 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.View
 import android.view.ViewTreeObserver
 import androidx.appcompat.widget.SearchView
@@ -19,7 +18,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -203,84 +201,25 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         private val originalListHeight = suggestionList.layoutParams.height
         private var pendingFirstPosition: List<String>? = null
         private var layoutObserver: ViewTreeObserver? = null
-
-        // Temporary read-only tracing; native focus and IME handlers are not replaced.
-        private val queryInput = view.findViewById<View>(androidx.appcompat.R.id.search_src_text)
-        private val nativeFocusCallback = runCatching {
-            SearchView::class.java.getDeclaredField("mOnQueryTextFocusChangeListener")
-                .apply { isAccessible = true }.get(view) != null
-        }.getOrNull()
-        private var focusObserverTree: ViewTreeObserver? = null
-        private var observedAdapter: RecyclerView.Adapter<*>? = null
-        private var lastLayoutSnapshot: String? = null
-        private val focusObserver = ViewTreeObserver.OnGlobalFocusChangeListener { oldFocus, newFocus ->
-            traceSearch("focus_from=${focusName(oldFocus)}_to=${focusName(newFocus)}", true)
-        }
-        private val suggestionObserver = Observer<List<String>> { current ->
-            traceSearch("suggestion_emitted_count=${current.size}", true)
-        }
-        private val adapterObserver = object : RecyclerView.AdapterDataObserver() {
-            override fun onChanged() {
-                traceSearch("adapter_changed", true)
-            }
-            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
-                traceSearch("adapter_insert_at=$positionStart,count=$itemCount", true)
-            }
-            override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) {
-                traceSearch("adapter_remove_at=$positionStart,count=$itemCount", true)
-            }
-            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) {
-                traceSearch("adapter_update_at=$positionStart,count=$itemCount", true)
-            }
-            override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) {
-                traceSearch("adapter_move_from=$fromPosition,to=$toPosition,count=$itemCount", true)
-            }
-        }
-
-        private fun focusName(target: View?): String = when (target) {
-            null -> "none"
-            queryInput -> "search_input"
-            view -> "search_view"
-            suggestionList -> "suggestions"
-            else -> "${target.javaClass.simpleName}#${target.id}"
-        }
-
-        private fun traceSearch(event: String, force: Boolean = false) {
-            val frame = Rect()
-            root.getWindowVisibleDisplayFrame(frame)
-            val insets = ViewCompat.getRootWindowInsets(root)
-            val imeVisible = insets?.isVisible(WindowInsetsCompat.Type.ime())
-            val imeBottom = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom
-            val list = (suggestionList.adapter as? SearchSuggestionAdapter)?.immutableCurrentList
-            val snapshot = listOf(
-                imeVisible, imeBottom, frame.bottom, root.height, suggestionList.height,
-                view.hasFocus(), queryInput?.hasFocus(), focusName(root.rootView.findFocus()),
-                suggestions.value?.size, list?.size, suggestionList.adapter?.itemCount,
-                suggestionList.visibility, suggestionList.canScrollVertically(1),
-                fragment.lifecycle.currentState
-            ).joinToString("|")
-            if (!force && snapshot == lastLayoutSnapshot) return
-            lastLayoutSnapshot = snapshot
-            Log.i(TRACE_TAG,
-                "event=$event ime=$imeVisible imeBottom=$imeBottom windowBottom=${frame.bottom} " +
-                    "rootHeight=${root.height} listHeight=${suggestionList.height} " +
-                    "listVisibility=${suggestionList.visibility} dataCount=${suggestions.value?.size} " +
-                    "adapterDataCount=${list?.size} adapterItemCount=${suggestionList.adapter?.itemCount} " +
-                    "canScrollDown=${suggestionList.canScrollVertically(1)} " +
-                    "searchHasFocus=${view.hasFocus()} inputHasFocus=${queryInput?.hasFocus()} " +
-                    "focused=${focusName(root.rootView.findFocus())} " +
-                    "queryLength=${view.query.length} resumed=$resumed lifecycle=${fragment.lifecycle.currentState} " +
-                    "pending=${pending != null} requestActive=${request?.isActive} generation=$generation"
-            )
-        }
-
+        private var lastImeVisible: Boolean? = null
         private val viewportListener = ViewTreeObserver.OnGlobalLayoutListener {
             updateSuggestionViewport()
-            traceSearch("layout")
         }
 
         private fun updateSuggestionViewport() {
             if (!started || search !== this@SearchBinding) return
+
+            if (Globals.isLayout(Globals.PHONE)) {
+                val imeVisible = ViewCompat.getRootWindowInsets(root)
+                    ?.isVisible(WindowInsetsCompat.Type.ime())
+                if (imeVisible != null) {
+                    val imeClosed = lastImeVisible == true && !imeVisible
+                    lastImeVisible = imeVisible
+                    if (imeClosed && resumed && view.query.isNotBlank()) {
+                        dismissSuggestions()
+                    }
+                }
+            }
 
             val params = suggestionList.layoutParams
             if (suggestionList.visibility == View.VISIBLE) {
@@ -318,7 +257,6 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
         private val replacement = object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
-                traceSearch("query_submitted_length=${query.length}", true)
                 cancelPending()
                 submittedQuery = query
                 editedSinceResume = false
@@ -326,7 +264,6 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             }
 
             override fun onQueryTextChange(query: String): Boolean {
-                traceSearch("query_changed_length=${query.length}", true)
                 // A restored submitted query is not a new edit; preserve native layout updates.
                 if (!resumed || (!editedSinceResume && query.isNotBlank() &&
                         (query == submittedQuery || query == model.lastQuery))) {
@@ -374,44 +311,24 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             layoutObserver = root.viewTreeObserver.apply {
                 addOnGlobalLayoutListener(viewportListener)
             }
-            focusObserverTree = root.viewTreeObserver.apply {
-                addOnGlobalFocusChangeListener(focusObserver)
-            }
-            observedAdapter = suggestionList.adapter?.also {
-                it.registerAdapterDataObserver(adapterObserver)
-            }
-            suggestions.observe(fragment.viewLifecycleOwner, suggestionObserver)
-            val layoutPreference = PreferenceManager.getDefaultSharedPreferences(view.context)
-                .getInt(view.context.getString(R.string.app_layout_key), -1)
-            traceSearch(
-                "open_layoutPref=$layoutPreference,phone=${Globals.isLayout(Globals.PHONE)}," +
-                    "tv=${Globals.isLayout(Globals.TV)},emulator=${Globals.isLayout(Globals.EMULATOR)}," +
-                    "nativeFocusCallback=$nativeFocusCallback," +
-                    "softInputMode=${fragment.activity?.window?.attributes?.softInputMode}," +
-                    "orientation=${root.resources.configuration.orientation}",
-                true
-            )
         }
 
         fun pause() {
-            traceSearch("fragment_pause", true)
             resumed = false
+            lastImeVisible = null
             dismissSuggestions()
         }
 
         fun resume() {
-            traceSearch("fragment_resume", true)
             resumed = true
             editedSinceResume = false
             dismissSuggestions()
         }
 
         private fun dismissSuggestions() {
-            traceSearch("dismiss_before", true)
             cancelPending()
             model.clearSuggestions()
             suggestionList.visibility = View.GONE
-            traceSearch("dismiss_after", true)
         }
 
         private fun cancelPending() {
@@ -436,7 +353,6 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                         if (started && search === this@SearchBinding && serial == generation &&
                             resumed && fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             fragment.view === root && view.query.toString() == query) {
-                            traceSearch("tmdb_result_accepted_count=${result.size}", true)
                             pendingFirstPosition = result.takeIf { it.isNotEmpty() }
                             suggestions.value = result
                             suggestionList.post { updateSuggestionViewport() }
@@ -449,13 +365,6 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
 
         fun close() {
-            traceSearch("close", true)
-            focusObserverTree?.takeIf { it.isAlive }
-                ?.removeOnGlobalFocusChangeListener(focusObserver)
-            focusObserverTree = null
-            observedAdapter?.unregisterAdapterDataObserver(adapterObserver)
-            observedAdapter = null
-            suggestions.removeObserver(suggestionObserver)
             layoutObserver?.takeIf { it.isAlive }
                 ?.removeOnGlobalLayoutListener(viewportListener)
             layoutObserver = null
@@ -518,7 +427,6 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     }
 
     private companion object {
-        const val TRACE_TAG = "ElevateSearchImeTrace"
         const val SEARCH_CLASS = "com.lagradost.cloudstream3.ui.search.SearchFragment"
     }
 }
