@@ -20,7 +20,7 @@ import java.net.URL
 import kotlin.math.ceil
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override var mainUrl = "https://dlive.sx"
+    override var mainUrl = "https://thedaddy.li"
     override val name = "DaddyLive"
     override val requiresReferer = false
 
