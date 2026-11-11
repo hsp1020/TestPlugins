@@ -2436,7 +2436,7 @@ open class StremioC(
 
     override suspend fun search(query: String): List<SearchResponse>? {
 
-        if (disableSearch) return null
+        if (disableSearch) return emptyList()
         if (!isAddonEnabled()) return emptyList()
         mainUrl = mainUrl.fixSourceUrl()
         val manifest = getManifest()

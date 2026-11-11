@@ -66,6 +66,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import android.widget.ImageView
+import android.widget.Toast
 import android.graphics.Typeface
 import androidx.core.content.res.ResourcesCompat
 import android.widget.FrameLayout
@@ -85,6 +86,7 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
+import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
@@ -232,16 +234,48 @@ internal class RatingPlotImageHook(
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { _ -> }
     private var homeRoot: View? = null
+    private var homeSearchButton: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
+
+    private fun restoreHomeSearch() {
+        val activity = host
+        homeSearchButton?.setOnClickListener {
+            activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].queryTextSubmit("") }
+        }
+        homeSearchButton = null
+    }
+
     private fun syncHomeHooks() {
         val activity = host
         val selected = activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
-        if (selected != null && APIHolder.allProviders.any {
-                it is StremioC && it.hasMainPage && it.name == selected
-            }) {
-            homeRoot?.let { homeEntries.attach(it) }
+        val homeProvider = APIHolder.allProviders.filterIsInstance<StremioC>()
+            .firstOrNull { it.hasMainPage && it.name == selected }
+        if (activity != null && homeProvider != null) {
+            homeRoot?.let { root ->
+                homeEntries.attach(root)
+                val button = root.findViewById<View>(R.id.home_preview_search_button)
+                if (button !== homeSearchButton) {
+                    restoreHomeSearch()
+                    homeSearchButton = button
+                }
+                button?.setOnClickListener {
+                    val homeUrl = stremioManifestUrl(homeProvider.mainUrl.fixSourceUrl())
+                    val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
+                        .filter {
+                            !it.hasMainPage && it.mainUrl.isNotBlank() &&
+                                it.sourcePlugin == homeProvider.sourcePlugin &&
+                                stremioManifestUrl(it.mainUrl.fixSourceUrl()) == homeUrl
+                        }.map { it.name }.distinct()
+                    if (providers.isEmpty()) {
+                        Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        QuickSearchFragment.pushSearch(activity, "", providers.toTypedArray())
+                    }
+                }
+            }
         } else {
             homeEntries.detach()
+            restoreHomeSearch()
         }
     }
     private var homePreviewText: TextView? = null
@@ -313,6 +347,7 @@ internal class RatingPlotImageHook(
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+                restoreHomeSearch()
                 homeRoot = null
                 homeEntries.detach()
             }
@@ -328,6 +363,7 @@ internal class RatingPlotImageHook(
     fun stop() {
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
+        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         app.unregisterActivityLifecycleCallbacks(this)
@@ -341,6 +377,7 @@ internal class RatingPlotImageHook(
         if (host === activity) return
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
+        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -469,6 +506,7 @@ internal class RatingPlotImageHook(
         if (host === activity) {
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
+        restoreHomeSearch()
         homeRoot = null
         homeEntries.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
