@@ -4,11 +4,16 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.icu.util.ULocale
+import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
+import android.view.ViewTreeObserver
 import androidx.appcompat.widget.SearchView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -16,6 +21,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.R
@@ -203,6 +209,69 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         private var editedSinceResume = false
         private var submittedQuery: String? = null
 
+        // Temporary, read-only diagnostics. Remove after the scroll/IME defect is fixed.
+        private var traceObserver: ViewTreeObserver? = null
+        private var lastTraceSignature: String? = null
+        private val traceLayout = ViewTreeObserver.OnGlobalLayoutListener {
+            traceBounds("layout")
+        }
+        private val traceScroll = object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                traceBounds("scroll_dx=$dx,dy=$dy")
+            }
+
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                traceBounds("scroll_state=$newState", true)
+            }
+        }
+
+        private fun traceBounds(reason: String, force: Boolean = false) {
+            val layout = suggestionList.layoutManager as? LinearLayoutManager
+            val imeInsets = ViewCompat.getRootWindowInsets(root)
+            val imeVisible = imeInsets?.isVisible(WindowInsetsCompat.Type.ime())
+            val imeBottom = imeInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom
+            val listRect = Rect()
+            val listVisible = suggestionList.getGlobalVisibleRect(listRect)
+            val rootRect = Rect()
+            root.getGlobalVisibleRect(rootRect)
+            val windowRect = Rect()
+            root.getWindowVisibleDisplayFrame(windowRect)
+            val first = layout?.findFirstVisibleItemPosition() ?: -1
+            val last = layout?.findLastVisibleItemPosition() ?: -1
+            val firstFull = layout?.findFirstCompletelyVisibleItemPosition() ?: -1
+            val lastFull = layout?.findLastCompletelyVisibleItemPosition() ?: -1
+            val dataCount = suggestions.value?.size ?: -1
+            val adapterCount = suggestionList.adapter?.itemCount ?: -1
+            val offset = suggestionList.computeVerticalScrollOffset()
+            val extent = suggestionList.computeVerticalScrollExtent()
+            val range = suggestionList.computeVerticalScrollRange()
+            val up = suggestionList.canScrollVertically(-1)
+            val down = suggestionList.canScrollVertically(1)
+            val focusedPosition = suggestionList.findFocus()?.let {
+                suggestionList.findContainingViewHolder(it)?.bindingAdapterPosition
+            } ?: -1
+            val signature = listOf(
+                imeVisible, imeBottom, listRect, rootRect, windowRect,
+                suggestionList.height, suggestionList.measuredHeight,
+                dataCount, adapterCount, first, last, firstFull, lastFull,
+                offset / 48, extent, range, up, down, focusedPosition,
+                suggestionList.visibility, suggestionList.scrollState
+            ).joinToString("|")
+            if (!force && signature == lastTraceSignature) return
+            lastTraceSignature = signature
+            Log.i(TRACE_TAG,
+                "reason=$reason queryLength=${view.query.length} resumed=$resumed " +
+                    "ime=$imeVisible imeBottom=$imeBottom window=$windowRect root=$rootRect " +
+                    "listVisible=$listVisible rect=$listRect listHeight=${suggestionList.height} " +
+                    "measured=${suggestionList.measuredHeight} layoutHeight=${suggestionList.layoutParams?.height} " +
+                    "dataCount=$dataCount adapterCount=$adapterCount positions=$first..$last " +
+                    "complete=$firstFull..$lastFull offset=$offset extent=$extent range=$range " +
+                    "canUp=$up canDown=$down scrollState=${suggestionList.scrollState} " +
+                    "focusPosition=$focusedPosition searchFocus=${view.hasFocus()} " +
+                    "listVisibility=${suggestionList.visibility}"
+            )
+        }
+
         private val replacement = object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
                 cancelPending()
@@ -212,6 +281,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             }
 
             override fun onQueryTextChange(query: String): Boolean {
+                traceBounds("query_changed", true)
                 // A restored submitted query is not a new edit; preserve native layout updates.
                 if (!resumed || (!editedSinceResume && query.isNotBlank() &&
                         (query == submittedQuery || query == model.lastQuery))) {
@@ -259,17 +329,22 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             // Screen navigation and submission still clear them through their existing paths.
             if (nativeFocusListener != null) view.setOnQueryTextFocusChangeListener(null)
             if (resumed) resume()
+            traceObserver = root.viewTreeObserver.apply { addOnGlobalLayoutListener(traceLayout) }
+            suggestionList.addOnScrollListener(traceScroll)
+            traceBounds("open", true)
         }
 
         fun pause() {
             resumed = false
             dismissSuggestions()
+            traceBounds("pause", true)
         }
 
         fun resume() {
             resumed = true
             editedSinceResume = false
             dismissSuggestions()
+            traceBounds("resume", true)
         }
 
         private fun dismissSuggestions() {
@@ -299,7 +374,14 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                         if (started && search === this@SearchBinding && serial == generation &&
                             resumed && fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             fragment.view === root && view.query.toString() == query) {
+                            Log.i(TRACE_TAG,
+                                "tmdb_result queryLength=${query.length} generation=$serial count=${result.size}"
+                            )
                             suggestions.value = result
+                            traceBounds("result_published", true)
+                            suggestionList.post {
+                                if (search === this@SearchBinding) traceBounds("result_post_layout", true)
+                            }
                         }
                     }
                 }
@@ -309,6 +391,10 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
 
         fun close() {
+            traceBounds("close", true)
+            suggestionList.removeOnScrollListener(traceScroll)
+            traceObserver?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(traceLayout)
+            traceObserver = null
             cancelPending()
             if (runCatching { queryListenerField?.get(view) }.getOrNull() === replacement) {
                 view.setOnQueryTextListener(native)
@@ -367,6 +453,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     }
 
     private companion object {
+        const val TRACE_TAG = "ElevateSuggestionBounds"
         const val SEARCH_CLASS = "com.lagradost.cloudstream3.ui.search.SearchFragment"
     }
 }
