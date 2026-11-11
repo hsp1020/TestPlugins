@@ -5215,7 +5215,7 @@ open class StremioC(
                 }
 
                 syncData["watch_progress_allowed"] = StremioC.isWatchProgressAllowed(provider.mainUrl).toString()
-                syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && !finalKitsuId.isNullOrBlank()).toString()
+                syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && finalKitsuId != null).toString()
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)
                 syncData["logo_expected"] = (!finalLogo.isNullOrBlank()).toString()
                 syncData["logo_foreign_language"] = finalLogoFallback.toString()
@@ -5258,7 +5258,7 @@ open class StremioC(
                         englishTitle = tmdbData?.fetchedEnglishTitle,
                         addonUrl = provider.mainUrl,
                         watchProgressAllowed = StremioC.isWatchProgressAllowed(provider.mainUrl),
-                        watchProgressPreferKitsu = isAnimeMedia && !finalKitsuId.isNullOrBlank(),
+                        watchProgressPreferKitsu = isAnimeMedia && finalKitsuId != null,
                         originalAnimeId = originalAnimeId,
                         embeddedStreams = finalVideos?.singleOrNull()?.embeddedStreamsJson(),
                         embeddedStreamTitle = finalVideos?.singleOrNull()?.let { it.title ?: it.name }
