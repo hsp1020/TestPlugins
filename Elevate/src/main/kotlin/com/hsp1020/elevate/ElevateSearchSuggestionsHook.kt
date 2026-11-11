@@ -7,13 +7,18 @@ import android.icu.util.ULocale
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
+import android.view.ViewTreeObserver
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.RecyclerView
@@ -44,6 +49,10 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     private var started = false
     private var host: FragmentActivity? = null
     private var search: SearchBinding? = null
+
+    private fun trace(event: String) {
+        Log.i("ElevateSearchTrace", "pid=${android.os.Process.myPid()} ${event}")
+    }
 
     private val queryListenerField by lazy {
         runCatching {
@@ -80,18 +89,30 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: android.view.View, saved: Bundle?
         ) {
-            if (fragment.javaClass.name == SEARCH_CLASS) attachSearch(fragment, view)
+            if (fragment.javaClass.name == SEARCH_CLASS) {
+                trace("fragment_view_created id=${System.identityHashCode(fragment)}")
+                attachSearch(fragment, view)
+            }
         }
 
         override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            if (fragment.javaClass.name == SEARCH_CLASS) {
+                trace("fragment_resumed id=${System.identityHashCode(fragment)} bound=${search?.fragment === fragment}")
+            }
             if (search?.fragment === fragment) search?.resume()
         }
 
         override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
+            if (fragment.javaClass.name == SEARCH_CLASS) {
+                trace("fragment_paused id=${System.identityHashCode(fragment)} bound=${search?.fragment === fragment}")
+            }
             if (search?.fragment === fragment) search?.pause()
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
+            if (fragment.javaClass.name == SEARCH_CLASS) {
+                trace("fragment_view_destroyed id=${System.identityHashCode(fragment)} bound=${search?.fragment === fragment}")
+            }
             if (search?.fragment === fragment) {
                 search?.close()
                 search = null
@@ -101,7 +122,11 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
     fun start() {
         if (started || tmdbApiKey == null || queryListenerField == null ||
-            suggestionField == null || suggestionJobField == null) return
+            suggestionField == null || suggestionJobField == null) {
+            trace("start_skipped started=$started keyAvailable=${tmdbApiKey != null} queryField=${queryListenerField != null} suggestionsField=${suggestionField != null} jobField=${suggestionJobField != null}")
+            return
+        }
+        trace("start")
         started = true
         application.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? FragmentActivity)?.let(::attachActivity)
@@ -109,6 +134,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
     fun stop() {
         if (!started) return
+        trace("stop")
         started = false
         application.unregisterActivityLifecycleCallbacks(this)
         detachActivity()
@@ -119,6 +145,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         if (!started || host === activity) return
         detachActivity()
         host = activity
+        trace("attach_activity id=${System.identityHashCode(activity)}")
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { fragment ->
@@ -132,6 +159,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     }
 
     private fun detachActivity() {
+        if (host != null) trace("detach_activity id=${System.identityHashCode(host)}")
         search?.close()
         search = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
@@ -139,6 +167,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
     }
 
     private fun attachSearch(fragment: Fragment, root: android.view.View) {
+        trace("attach_search_attempt started=$started fragment=${System.identityHashCode(fragment)} root=${System.identityHashCode(root)} alreadyBound=${search?.fragment === fragment && search?.root === root}")
         if (!started || (search?.fragment === fragment && search?.root === root)) return
         search?.close()
         search = null
@@ -157,6 +186,7 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         val suggestions = runCatching {
             suggestionField?.get(model) as? MutableLiveData<List<String>>
         }.getOrNull() ?: return
+        trace("attach_search_success fragment=${System.identityHashCode(fragment)} model=${System.identityHashCode(model)}")
         search = SearchBinding(fragment, root, searchView, suggestionList, original, model, suggestions).also {
             it.open()
         }
@@ -191,20 +221,64 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         private var resumed = fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         private var editedSinceResume = false
         private var submittedQuery: String? = null
+        private val input = view.findViewById<View>(androidx.appcompat.R.id.search_src_text)
+        private var lastIme: Boolean? = null
+        private var lastListVisibility = -1
+        private var lastAdapterCount = -1
+        private var lastSearchFocus: Boolean? = null
+        private var lastInputFocus: Boolean? = null
+
+        private fun snapshot(reason: String) {
+            val ime = ViewCompat.getRootWindowInsets(root)?.isVisible(WindowInsetsCompat.Type.ime())
+            trace("state reason=$reason binding=${System.identityHashCode(root)} resumed=$resumed lifecycle=${fragment.lifecycle.currentState} viewAttached=${fragment.view === root} queryLength=${view.query.length} generation=$generation ime=$ime searchFocus=${view.hasFocus()} inputFocus=${input?.hasFocus()} windowFocus=${root.hasWindowFocus()} listVisibility=${suggestionList.visibility} listShown=${suggestionList.isShown} adapterCount=${suggestionList.adapter?.itemCount} liveCount=${suggestions.value?.size} requestActive=${request?.isActive} pending=${pending != null}")
+        }
+
+        private val focusTrace = ViewTreeObserver.OnGlobalFocusChangeListener { oldFocus, newFocus ->
+            snapshot("focus ${oldFocus?.javaClass?.simpleName}:${oldFocus?.id} -> ${newFocus?.javaClass?.simpleName}:${newFocus?.id}")
+            main.post { if (search === this@SearchBinding) snapshot("after_focus_dispatch") }
+        }
+
+        private val layoutTrace = ViewTreeObserver.OnGlobalLayoutListener {
+            val ime = ViewCompat.getRootWindowInsets(root)?.isVisible(WindowInsetsCompat.Type.ime())
+            val listVisibility = suggestionList.visibility
+            val adapterCount = suggestionList.adapter?.itemCount ?: -1
+            val searchFocus = view.hasFocus()
+            val inputFocus = input?.hasFocus()
+            if (ime != lastIme || listVisibility != lastListVisibility ||
+                adapterCount != lastAdapterCount || searchFocus != lastSearchFocus ||
+                inputFocus != lastInputFocus) {
+                snapshot("layout_changed")
+                lastIme = ime
+                lastListVisibility = listVisibility
+                lastAdapterCount = adapterCount
+                lastSearchFocus = searchFocus
+                lastInputFocus = inputFocus
+            }
+        }
+
+        private val dataTrace = Observer<List<String>> { list ->
+            snapshot("suggestions_observed count=${list?.size}")
+        }
 
         private val replacement = object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String): Boolean {
+                snapshot("submit_before queryLength=${query.length}")
                 cancelPending()
                 submittedQuery = query
                 editedSinceResume = false
-                return native.onQueryTextSubmit(query)
+                val handled = native.onQueryTextSubmit(query)
+                snapshot("submit_after_native handled=$handled")
+                return handled
             }
 
             override fun onQueryTextChange(query: String): Boolean {
+                snapshot("query_change queryLength=${query.length} editedSinceResume=$editedSinceResume")
                 // A restored submitted query is not a new edit; preserve native layout updates.
                 if (!resumed || (!editedSinceResume && query.isNotBlank() &&
                         (query == submittedQuery || query == model.lastQuery))) {
+                    trace("query_suppressed resumed=$resumed submittedMatch=${query == submittedQuery} lastQueryMatch=${query == model.lastQuery}")
                     val handled = native.onQueryTextChange(query)
+                    snapshot("query_suppressed_after_native")
                     dismissSuggestions()
                     return handled
                 }
@@ -212,12 +286,14 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
                 // Native fetchSuggestions() posts an empty list for a one-character query.
                 // Keep the existing suggestions visible while the new result is loading.
                 if (query.length == 1 && query.isNotBlank()) {
+                    trace("query_single_character")
                     cancelNativeRequest()
                     showTypingUi()
                     schedule(query)
                     return true
                 }
                 val handled = native.onQueryTextChange(query)
+                snapshot("query_after_native handled=$handled")
                 if (query.isNotBlank()) cancelNativeRequest()
                 schedule(query)
                 return handled
@@ -225,10 +301,12 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
 
         private fun cancelNativeRequest() {
+            trace("cancel_native_request active=${runCatching { (suggestionJobField?.get(model) as? Job)?.isActive }.getOrNull()}")
             runCatching { (suggestionJobField?.get(model) as? Job)?.cancel() }
         }
 
         private fun showTypingUi() {
+            snapshot("show_typing_ui")
             // Mirror the native SearchFragment's nonempty-query visibility changes.
             val advanced = PreferenceManager.getDefaultSharedPreferences(view.context)
                 .getBoolean("advanced_search", true)
@@ -241,30 +319,43 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
 
         fun open() {
+            snapshot("open_before")
             originalAnimator = suggestionList.itemAnimator
             suggestionList.itemAnimator = null
             view.setOnQueryTextListener(replacement)
+            root.viewTreeObserver.addOnGlobalFocusChangeListener(focusTrace)
+            root.viewTreeObserver.addOnGlobalLayoutListener(layoutTrace)
+            suggestions.observe(fragment.viewLifecycleOwner, dataTrace)
+            snapshot("open_after")
             if (resumed) resume()
         }
 
         fun pause() {
+            snapshot("pause_before")
             resumed = false
             dismissSuggestions()
+            snapshot("pause_after")
         }
 
         fun resume() {
+            snapshot("resume_before")
             resumed = true
             editedSinceResume = false
             dismissSuggestions()
+            snapshot("resume_after")
         }
 
         private fun dismissSuggestions() {
+            snapshot("dismiss_before")
             cancelPending()
+            trace("clear_suggestions_from_elevate")
             model.clearSuggestions()
             suggestionList.visibility = View.GONE
+            snapshot("dismiss_after")
         }
 
         private fun cancelPending() {
+            trace("cancel_pending generation=$generation pending=${pending != null} requestActive=${request?.isActive}")
             generation++
             pending?.let(main::removeCallbacks)
             pending = null
@@ -274,17 +365,25 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
 
         private fun schedule(query: String) {
             cancelPending()
-            if (query.isBlank()) return
+            if (query.isBlank()) {
+                trace("schedule_skipped_blank")
+                return
+            }
             val serial = generation
             val language = tmdbLanguage(view.context)
+            trace("schedule generation=$serial queryLength=${query.length} language=$language delayMs=120")
             val task = Runnable {
                 pending = null
+                trace("request_launched generation=$serial queryLength=${query.length}")
                 request = scope.launch {
                     val result = fetchSuggestions(query, language)
+                    trace("request_completed generation=$serial resultCount=${result.size}")
                     main.post {
-                        if (started && search === this@SearchBinding && serial == generation &&
+                        val accepted = started && search === this@SearchBinding && serial == generation &&
                             resumed && fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
-                            fragment.view === root && view.query.toString() == query) {
+                            fragment.view === root && view.query.toString() == query
+                        snapshot("request_delivery generation=$serial accepted=$accepted resultCount=${result.size}")
+                        if (accepted) {
                             suggestions.value = result
                         }
                     }
@@ -295,14 +394,22 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
         }
 
         fun close() {
+            snapshot("close_before")
             cancelPending()
+            suggestions.removeObserver(dataTrace)
+            if (root.viewTreeObserver.isAlive) {
+                root.viewTreeObserver.removeOnGlobalFocusChangeListener(focusTrace)
+                root.viewTreeObserver.removeOnGlobalLayoutListener(layoutTrace)
+            }
             if (runCatching { queryListenerField?.get(view) }.getOrNull() === replacement) {
                 view.setOnQueryTextListener(native)
+                trace("close_restoring_native_and_clearing_suggestions")
                 model.clearSuggestions()
             }
             if (suggestionList.itemAnimator == null) {
                 suggestionList.itemAnimator = originalAnimator
             }
+            snapshot("close_after")
         }
     }
 
@@ -330,22 +437,32 @@ internal class ElevateSearchSuggestionsHook(private val application: Application
             }
             titles
         } catch (cancel: CancellationException) {
+            trace("tmdb_fetch_cancelled")
             throw cancel
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            trace("tmdb_fetch_failed type=${error.javaClass.simpleName} message=${error.message?.take(100)}")
             emptyList()
         }
     }
 
     override fun onActivityResumed(activity: Activity) {
         if (activity is FragmentActivity) attachActivity(activity)
+        if (activity === host) trace("activity_resumed id=${System.identityHashCode(activity)}")
     }
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityStarted(activity: Activity) = Unit
-    override fun onActivityPaused(activity: Activity) = Unit
-    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) {
+        if (activity === host) trace("activity_paused id=${System.identityHashCode(activity)}")
+    }
+    override fun onActivityStopped(activity: Activity) {
+        if (activity === host) trace("activity_stopped id=${System.identityHashCode(activity)}")
+    }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
     override fun onActivityDestroyed(activity: Activity) {
-        if (activity === host) detachActivity()
+        if (activity === host) {
+            trace("activity_destroyed id=${System.identityHashCode(activity)}")
+            detachActivity()
+        }
     }
 
     private companion object {
