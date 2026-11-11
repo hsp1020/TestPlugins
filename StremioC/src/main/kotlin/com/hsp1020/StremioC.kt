@@ -353,7 +353,7 @@ private class NoNativeTrailerPreview : AbstractMutableList<TrailerData>() {
 open class StremioC(
     override var mainUrl: String,
     override var name: String,
-    private val addonId: Long? = null,
+    internal val addonId: Long? = null,
     private val searchCatalogId: String? = null,
     private val searchCatalogType: String? = null,
     private val showHome: Boolean = true,
