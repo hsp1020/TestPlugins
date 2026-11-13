@@ -81,6 +81,7 @@ class StremioCPlugin : Plugin() {
         }
         isUnloaded = false
         val appContext = context.applicationContext
+        StremioC.initializeActorImage(appContext, resources)
         NativeCoilDispatcher.configure(appContext)
 
         val subtitlePrefs = appContext.getSharedPrefs()

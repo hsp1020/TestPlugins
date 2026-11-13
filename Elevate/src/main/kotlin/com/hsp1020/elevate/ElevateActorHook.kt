@@ -48,11 +48,22 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.WeakHashMap
 
-private const val NO_ACTOR_IMAGE = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/assets/actor_no_image.webp"
-
 /** Universal cast binding based on sync IDs, never on provider names or URL schemas. */
-internal class ElevateActorHook(private val appContext: Application) :
+internal class ElevateActorHook(
+    private val appContext: Application,
+    pluginResources: android.content.res.Resources?
+) :
     Application.ActivityLifecycleCallbacks {
+    private val noActorImage = runCatching {
+        val res = pluginResources ?: return@runCatching null
+        val id = res.getIdentifier("no_image", "drawable", "com.example")
+        if (id == 0) return@runCatching null
+        val file = java.io.File(appContext.cacheDir, "elevate_no_image.jpg")
+        res.openRawResource(id).use { input ->
+            file.outputStream().use { output -> input.copyTo(output) }
+        }
+        android.net.Uri.fromFile(file).toString()
+    }.getOrNull()
     private fun trace(step: String, detail: String) = Log.d("ElevateActorTrace", "$step $detail")
     private val main = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -145,7 +156,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
                 val photo = obj.optString("profile_path")
                     .takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: NO_ACTOR_IMAGE
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: noActorImage
                 val existing = pairs.indexOfFirst { it.second.id == personId }
                 if (existing >= 0) {
                     val roles = listOfNotNull(pairs[existing].first.roleString, job)
@@ -162,7 +173,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
                 val photo = obj.optString("profile_path")
                     .takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: NO_ACTOR_IMAGE
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: noActorImage
                 pairs += ActorData(Actor(name, photo),
                     roleString = obj.optString("character").takeIf(String::isNotBlank)) to
                     ElevateActorPersonRef(personId, name, photo, false)
@@ -454,10 +465,10 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val resolved = loaded ?: CastResult(fallback, null)
                 val actors = resolved.actors.map { row ->
                     val actor = row.actor.takeIf { !it.image.isNullOrBlank() }
-                        ?: row.actor.copy(image = NO_ACTOR_IMAGE)
+                        ?: row.actor.copy(image = noActorImage)
                     val voice = row.voiceActor?.let { person ->
                         person.takeIf { !it.image.isNullOrBlank() }
-                            ?: person.copy(image = NO_ACTOR_IMAGE)
+                            ?: person.copy(image = noActorImage)
                     }
                     if (actor === row.actor && voice === row.voiceActor) row
                     else row.copy(actor = actor, voiceActor = voice)

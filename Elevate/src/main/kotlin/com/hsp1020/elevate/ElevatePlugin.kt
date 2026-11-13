@@ -327,7 +327,7 @@ class ElevatePlugin : Plugin() {
             subtitleSyncRepair = null
         }
         if (enabled(ElevateFeature.ACTOR_INFORMATION)) {
-            if (actorHook == null) actorHook = ElevateActorHook(application).also { it.start() }
+            if (actorHook == null) actorHook = ElevateActorHook(application, resources).also { it.start() }
         } else {
             actorHook?.stop()
             actorHook = null
