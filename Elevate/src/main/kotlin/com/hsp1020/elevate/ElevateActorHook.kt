@@ -48,6 +48,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.WeakHashMap
 
+private const val NO_ACTOR_IMAGE = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/assets/actor_no_image.webp"
+
 /** Universal cast binding based on sync IDs, never on provider names or URL schemas. */
 internal class ElevateActorHook(private val appContext: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -143,7 +145,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
                 val photo = obj.optString("profile_path")
                     .takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: NO_ACTOR_IMAGE
                 val existing = pairs.indexOfFirst { it.second.id == personId }
                 if (existing >= 0) {
                     val roles = listOfNotNull(pairs[existing].first.roleString, job)
@@ -160,7 +162,7 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
                 val photo = obj.optString("profile_path")
                     .takeIf { it.startsWith("/") }
-                    ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" } ?: NO_ACTOR_IMAGE
                 pairs += ActorData(Actor(name, photo),
                     roleString = obj.optString("character").takeIf(String::isNotBlank)) to
                     ElevateActorPersonRef(personId, name, photo, false)
@@ -450,14 +452,24 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val fallback = page.actors?.takeIf { it.isNotEmpty() }
                     ?: response?.actors.orEmpty()
                 val resolved = loaded ?: CastResult(fallback, null)
+                val actors = resolved.actors.map { row ->
+                    val actor = row.actor.takeIf { !it.image.isNullOrBlank() }
+                        ?: row.actor.copy(image = NO_ACTOR_IMAGE)
+                    val voice = row.voiceActor?.let { person ->
+                        person.takeIf { !it.image.isNullOrBlank() }
+                            ?: person.copy(image = NO_ACTOR_IMAGE)
+                    }
+                    if (actor === row.actor && voice === row.voiceActor) row
+                    else row.copy(actor = actor, voiceActor = voice)
+                }
                 if (!fragment.isAdded || pageIdentity != identity ||
                     (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
                     !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
                     run { trace("LOAD_REJECTED", "added=${fragment.isAdded} sameIdentity=${pageIdentity == identity} enabled=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}"); return@launch }
                 people = resolved.people
-                lastActors = resolved.actors
+                lastActors = actors
                 (list.adapter as? ActorAdaptor)?.let { adapter ->
-                    adapter.submitList(resolved.actors)
+                    adapter.submitList(actors)
                     list.post {
                         if (list.adapter === adapter && pageIdentity == identity) {
                             adapter.notifyDataSetChanged()
@@ -465,10 +477,10 @@ internal class ElevateActorHook(private val appContext: Application) :
                         }
                     }
                 }
-                list.visibility = if (castEnabled() && resolved.actors.isNotEmpty())
+                list.visibility = if (castEnabled() && actors.isNotEmpty())
                     View.VISIBLE else View.GONE
                 castText?.visibility = if (castEnabled() && loaded == null &&
-                    resolved.actors.isEmpty() && page.actorsText != null)
+                    actors.isEmpty() && page.actorsText != null)
                     View.VISIBLE else View.GONE
                 list.post { attachClicks() }
             }
@@ -516,13 +528,6 @@ internal class ElevateActorHook(private val appContext: Application) :
                 val pos = list.getChildAdapterPosition(card)
                 if (pos == RecyclerView.NO_POSITION) continue
                 card.setOnLongClickListener(searchLongPress)
-                // Native loadImage(null) leaves a recycled actor image drawable in place.
-                val visibleActor = actors?.getOrNull(pos)
-                if (visibleActor != null && adapter.getItemOrNull(pos) === visibleActor &&
-                    visibleActor.actor.image.isNullOrBlank() &&
-                    (adapter.inverted[visibleActor] != true || visibleActor.voiceActor?.image.isNullOrBlank())) {
-                    card.findViewById<android.widget.ImageView>(R.id.actor_image)?.setImageDrawable(null)
-                }
                 // AniList: leave native click and cast/voice-actor inversion untouched.
                 val person = refs?.getOrNull(pos) ?: continue
                 val actor = actors?.getOrNull(pos) ?: continue

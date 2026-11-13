@@ -705,6 +705,7 @@ open class StremioC(
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
+        private const val NO_ACTOR_IMAGE = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/assets/actor_no_image.webp"
 
 
         // Recommendations do not depend on the user's watchlist, but reuse the logged-in
@@ -4400,7 +4401,7 @@ open class StremioC(
                 val roles = jobs.map { it.first }.distinct()
                     .sortedBy { if (it == "Director") 0 else 1 }.joinToString(", ")
                 val photo = jobs.firstNotNullOfOrNull { it.second.photo?.takeIf(String::isNotBlank) }
-                    ?: TRANSPARENT_PIXEL
+                    ?: NO_ACTOR_IMAGE
                 AioActorRow(ActorData(Actor(name, photo), roleString = roles),
                     person.tmdbId?.takeIf { it > 0 }, true)
             }.sortedBy { row ->
@@ -4413,7 +4414,7 @@ open class StremioC(
             val castRows = credits.cast.orEmpty().mapNotNull { person ->
                 val name = person.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 AioActorRow(ActorData(Actor(name,
-                    person.photo?.takeIf(String::isNotBlank) ?: TRANSPARENT_PIXEL),
+                    person.photo?.takeIf(String::isNotBlank) ?: NO_ACTOR_IMAGE),
                     roleString = person.character),
                     person.tmdbId?.takeIf { it > 0 }, false)
             }
