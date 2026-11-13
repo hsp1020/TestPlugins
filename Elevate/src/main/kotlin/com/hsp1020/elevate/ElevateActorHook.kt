@@ -2,7 +2,6 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
-import android.util.Log
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
@@ -64,7 +63,6 @@ internal class ElevateActorHook(
         }
         android.net.Uri.fromFile(file).toString()
     }.getOrNull()
-    private fun trace(step: String, detail: String) = Log.d("ElevateActorTrace", "$step $detail")
     private val main = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bindings = mutableMapOf<Fragment, Binding>()
@@ -72,7 +70,7 @@ internal class ElevateActorHook(
     private val responseField = runCatching {
         ResultViewModel2::class.java.getDeclaredField("currentResponse")
             .apply { isAccessible = true }
-    }.getOrNull().also { Log.d("ElevateActorTrace", "REFLECTION currentResponse=${it != null}") }
+    }.getOrNull()
     private data class CastResult(val actors: List<ActorData>,
         val people: List<ElevateActorPersonRef>?)
     private data class Cached(val at: Long, val result: CastResult)
@@ -103,15 +101,12 @@ internal class ElevateActorHook(
             anilistCache[id]?.takeIf { now - it.at in 0 until 43_200_000L }
                 ?.let { return it.result }
             anilistFlights[id] ?: io.async(start = CoroutineStart.LAZY) {
-                trace("ANILIST_START", "id=$id")
                 val cast = try {
                     AccountManager.aniListApi.load(null, id)?.actors
                 } catch (cancelled: CancellationException) { throw cancelled }
                   catch (e: Exception) {
-                    trace("ANILIST_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}")
                     null
                 }
-                trace("ANILIST_RESULT", "id=$id count=${cast?.size ?: 0}")
                 val found = cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
                 if (found != null) synchronized(anilistCache) {
                     anilistCache[id] = Cached(System.currentTimeMillis(), found)
@@ -131,9 +126,7 @@ internal class ElevateActorHook(
         return flight.await()
     }
     private suspend fun animeMapped(source: String, id: String): CastResult? {
-        trace("ANIME_MAP_START", "source=$source id=$id")
         val mapped = ElevateAnimeIdResolver.resolve(source, id)
-        trace("ANIME_MAP_RESULT", "source=$source id=$id anilist=${mapped?.anilist}")
         if (mapped == null) return null
         return mapped.anilist?.let { anilist(it) }
     }
@@ -141,7 +134,6 @@ internal class ElevateActorHook(
     private suspend fun tmdb(raw: String, movie: Boolean): CastResult? {
         val id = positive(raw)
         val apiKey = ElevateIdResolver.tmdbApiKey()
-        trace("TMDB_PRECHECK", "raw=$raw id=$id movie=$movie apiKeyPresent=${!apiKey.isNullOrBlank()}")
         if (id == null || apiKey == null) return null
         return try {
             val json = ElevateTmdbMetadata.credits(id, movie, getCurrentLocale(appContext))
@@ -178,13 +170,11 @@ internal class ElevateActorHook(
                     roleString = obj.optString("character").takeIf(String::isNotBlank)) to
                     ElevateActorPersonRef(personId, name, photo, false)
             }
-            trace("TMDB_PARSED", "id=$id valid=${pairs.size}")
             pairs.takeIf { it.isNotEmpty() }?.let { rows ->
                 CastResult(rows.map { it.first }, rows.map { it.second })
             }
         } catch (cancelled: CancellationException) { throw cancelled }
           catch (e: Exception) {
-            trace("TMDB_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}")
             null
         }
     }
@@ -228,11 +218,9 @@ internal class ElevateActorHook(
                 else null
         }
         val anime = nativeAnime
-        trace("RESOLVE_START", "url=${page.url.take(140)} type=$type ids=$ids season=$selectedSeason multi=$multiSeason anime=$anime")
         val options = if (anime) {
             if (multiSeason) emptyList() else listOf("anilist", "mal")
         } else listOf("tmdb", "imdb", "simkl")
-        trace("RESOLVE_ORDER", "anime=$anime movie=$movie options=$options")
         for (candidate in options) {
             val result = when (candidate) {
                 "anilist" -> ids.anilist?.let { anilist(it) }
@@ -246,7 +234,6 @@ internal class ElevateActorHook(
                 }
                 else -> null
             }
-            trace("RESOLVE_STEP_RESULT", "candidate=$candidate actors=${result?.actors?.size ?: 0}")
             if (result != null) return result
         }
         // A single-season anime page already carries its own title-specific IDs.
@@ -254,7 +241,6 @@ internal class ElevateActorHook(
         if (anime && !movie && selectedSeason != null && ids.imdb != null) {
             val mapping = ElevateAnimeIdResolver.resolveImdbSeason(ids.imdb, selectedSeason)
             val seasonal = mapping?.anilist?.let { anilist(it) }
-            trace("ANIME_SEASON_RESULT", "imdb=${ids.imdb} season=$selectedSeason anilist=${mapping?.anilist} actors=${seasonal?.actors?.size ?: 0}")
             if (seasonal != null) return seasonal
         }
         return if (anime && !multiSeason && !ids.hasNonKitsu() && ids.kitsu != null)
@@ -338,7 +324,6 @@ internal class ElevateActorHook(
             val nav = activity?.let {
                 it.resources.getIdentifier("navigation_search", "id", it.packageName)
             } ?: 0
-            trace("LONG_PRESS", "pos=$pos query=$query activity=${activity != null} nav=$nav")
             if (query.isNullOrBlank() || activity == null || nav == 0)
                 false else {
                 longPressed = true
@@ -444,7 +429,7 @@ internal class ElevateActorHook(
             adapter?.submitList(emptyList())
             list.visibility = View.GONE
             castText?.visibility = View.GONE
-            if (!castEnabled()) { trace("RESOLVE_SKIPPED", "castDisabled"); return }
+            if (!castEnabled()) return
             // Episode-based anime need the native season selection before lookup.
             // Waiting prevents an initial season-1 cast from flashing on season 2.
             if (response is TvSeriesLoadResponse &&
@@ -454,7 +439,6 @@ internal class ElevateActorHook(
                     ((ids.simkl != null || ids.imdb != null || ids.tmdb != null) &&
                         response.episodes.mapNotNull { it.season }.distinct().size > 1)) &&
                 season == null) {
-                trace("SEASON_PENDING", "url=${page.url.take(120)}")
                 return
             }
             loadJob = main.launch {
@@ -476,7 +460,7 @@ internal class ElevateActorHook(
                 if (!fragment.isAdded || pageIdentity != identity ||
                     (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
                     !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
-                    run { trace("LOAD_REJECTED", "added=${fragment.isAdded} sameIdentity=${pageIdentity == identity} enabled=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}"); return@launch }
+                    return@launch
                 people = resolved.people
                 lastActors = actors
                 (list.adapter as? ActorAdaptor)?.let { adapter ->
@@ -510,7 +494,7 @@ internal class ElevateActorHook(
                 list.visibility = View.VISIBLE
                 castText?.visibility = View.GONE
             }
-            val adapter = list.adapter as? ActorAdaptor ?: run { trace("CLICK_NO_ADAPTER", "adapter=${list.adapter?.javaClass?.name}"); return }
+            val adapter = list.adapter as? ActorAdaptor ?: return
             if (observedAdapter !== adapter) {
                 observedAdapter?.unregisterAdapterDataObserver(dataObserver)
                 adapter.registerAdapterDataObserver(dataObserver)
@@ -523,7 +507,6 @@ internal class ElevateActorHook(
                 })) {
                 if (!restoringCast) {
                     restoringCast = true
-                    trace("CAST_RESTORE", "current=${adapter.itemCount} expected=${actors.size}")
                     adapter.submitList(actors, Runnable {
                         restoringCast = false
                         if (active && list.adapter === adapter) {
@@ -549,14 +532,12 @@ internal class ElevateActorHook(
                 card.setOnTouchListener(touch)
                 val click = object : View.OnClickListener {
                     override fun onClick(view: View) {
-                        trace("CARD_CLICK", "pos=$pos person=${person.id} pending=${pendingAnimation != null} pageUrl=$pageUrl")
                         if (!active || !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) return
                         if (pendingAnimation != null || pageUrl !=
                             (model.page.value as? Resource.Success<ResultData>)?.value?.url)
                             return
                         val current = list.getChildAdapterPosition(view)
                         if (current != pos || adapter.getItemOrNull(current) !== actor) {
-                            trace("CARD_CLICK_REJECT", "pos=$pos current=$current same=${adapter.getItemOrNull(current) === actor}")
                             return
                         }
                         card.findViewById<View>(R.id.voice_actor_image_holder2)?.let {
@@ -575,7 +556,6 @@ internal class ElevateActorHook(
                         }
                         val running = view.findViewById<View>(
                             R.id.voice_actor_image_holder2)?.animation
-                        trace("CARD_CLICK_DISPATCH", "pos=$pos running=${running != null}")
                         if (running == null || running.hasEnded()) controller.click(person, view)
                         else {
                             pendingAnimation = running
@@ -590,7 +570,7 @@ internal class ElevateActorHook(
                                     if (fragment.isAdded && view.isAttachedToWindow &&
                                         list.getChildAdapterPosition(view) == pos &&
                                         adapter.getItemOrNull(pos) === actor)
-                                        controller.click(person, view).also { trace("CARD_ANIMATION_DISPATCH", "pos=$pos person=${person.id}") }
+                                        controller.click(person, view)
                                 }
                             })
                         }

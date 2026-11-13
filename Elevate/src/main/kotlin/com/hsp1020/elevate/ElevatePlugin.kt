@@ -120,7 +120,6 @@ class ElevatePlugin : Plugin() {
     override fun load(context: Context) {
         val application = context.applicationContext as? Application ?: return
         logProcessExitHistoryOnce(application)
-        ElevateJavaAllocationProfile.initialize(application)
         val token = generation.incrementAndGet()
         openSettings = { ctx ->
             (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
@@ -602,7 +601,6 @@ class ElevatePlugin : Plugin() {
     }
 
     override fun beforeUnload() {
-        ElevateJavaAllocationProfile.shutdown()
         val token = generation.incrementAndGet()
         openSettings = null
         main.post {

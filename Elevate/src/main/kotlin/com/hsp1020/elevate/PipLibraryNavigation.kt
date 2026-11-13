@@ -86,14 +86,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private fun Activity.inPip(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode
 
-    private fun traceRoute(event: String, activity: Activity, detail: String) {
-        Log.i("ElevatePiP", "$event pid=${android.os.Process.myPid()} " +
-            "type=${activity.javaClass.simpleName} activity=${System.identityHashCode(activity)} " +
-            "taskId=${activity.taskId} taskRoot=${activity.isTaskRoot} " +
-            "mainTaskId=${mainActivity?.taskId} playerTaskId=${playerActivity?.taskId} " +
-            "finishing=${activity.isFinishing} pip=${activity.inPip()} $detail")
-    }
-
     /** The native nav layout reads system orientation, which may remain portrait
      * after Shorts PiP although MainActivity is still landscape. */
     private fun restoreLandscapeNavigation() {
@@ -135,7 +127,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             val uuid = args.getString("uuid")!!
             pending = Bundle(args).apply { remove("youtube_direct_launch") }
             try {
-                traceRoute("PLAYER_LAUNCH_REQUEST", origin!!, "reason=YOUTUBE_DIRECT")
                 origin!!.startActivity(Intent(origin, DownloadedPlayerActivity::class.java).apply {
                     action = Intent.ACTION_SEND
                     putExtra(Intent.EXTRA_TEXT, "https://127.0.0.1/__elevate_pip/$uuid")
@@ -185,7 +176,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             } else {
                 pending = Bundle(bundle)
                 val uuid = bundle.getString("uuid")
-                traceRoute("PLAYER_LAUNCH_REQUEST", origin, "reason=NAV_REDIRECT")
                 // A non-network stub creates the native player destination.
                 origin.startActivity(Intent(origin, DownloadedPlayerActivity::class.java).apply {
                     action = Intent.ACTION_SEND
@@ -348,16 +338,14 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     private val exitBack = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
-            playerActivity?.let { closePlayer(it, "BACK_PRESS") }
+            playerActivity?.let(::closePlayer)
         }
     }
 
-    private fun closePlayer(activity: DownloadedPlayerActivity, trigger: String) {
+    private fun closePlayer(activity: DownloadedPlayerActivity) {
         if (closing || playerActivity !== activity) {
-            traceRoute("PLAYER_CLOSE_SKIPPED", activity, "trigger=$trigger closing=$closing")
             return
         }
-        traceRoute("PLAYER_CLOSE", activity, "trigger=$trigger exit=finishAndRemoveTask")
         closing = true
         nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
         nextPipVideo = null
@@ -374,7 +362,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             _: NavController, destination: NavDestination, _: Bundle? ->
         if (switching) return@OnDestinationChangedListener
         if (destination.id == R.id.navigation_player) wasPlaying = true
-        else if (wasPlaying) playerActivity?.let { closePlayer(it, "NAV_EXIT") }
+        else if (wasPlaying) playerActivity?.let(::closePlayer)
     }
 
     private val playerFragments = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -404,14 +392,11 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     private val pipChanged = Consumer<PictureInPictureModeChangedInfo> { change ->
         val activity = playerActivity ?: return@Consumer
-        traceRoute("PIP_MODE_CHANGE", activity, "entered=${change.isInPictureInPictureMode}")
         if (!change.isInPictureInPictureMode) return@Consumer
         wasInPip = true
         activity.window.decorView.post {
             if (playerActivity !== activity || !activity.isInPictureInPictureMode) return@post
             runCatching {
-                traceRoute("MAIN_REORDER_REQUEST", activity,
-                    "reason=PIP_ENTER mainActivityId=${mainActivity?.let(System::identityHashCode)}")
                 activity.startActivity(Intent(activity, MainActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 })
@@ -489,8 +474,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             exitBackBound = false
         }
         playerActivity = activity
-        traceRoute("PLAYER_ACTIVITY_CREATE", activity,
-            "savedState=${savedInstanceState != null} pending=${pending != null}")
         activeUuid = savedInstanceState?.getString(PLAYER_UUID_KEY) ?: activeUuid
         closing = false
         wasPlaying = false
@@ -545,7 +528,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             mainActivity = null
         }
         if (activity === playerActivity) {
-            traceRoute("PLAYER_ACTIVITY_DESTROY", activity, "changingConfig=${activity.isChangingConfigurations}")
             (activity as DownloadedPlayerActivity).apply {
                 playerNavigation?.removeOnDestinationChangedListener(playerDestination)
                 supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
@@ -576,8 +558,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         // release it rather than leaving a paused task/session behind.
         if (activity === playerActivity && !activity.isChangingConfigurations &&
             (activity.isFinishing || wasInPip)) {
-            closePlayer(activity as DownloadedPlayerActivity,
-                if (activity.isFinishing) "ACTIVITY_STOP_FINISHING" else "STOP_AFTER_PIP")
+            closePlayer(activity as DownloadedPlayerActivity)
         }
     }
 

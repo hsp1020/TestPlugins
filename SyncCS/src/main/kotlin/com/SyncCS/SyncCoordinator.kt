@@ -351,7 +351,6 @@ internal object SyncCoordinator {
         upload: Map<String, String?>, remoteCursor: Long?,
         githubRevision: String, githubGeneration: Int, serverPluginManifest: String?
     ) {
-        val started = android.os.SystemClock.elapsedRealtime()
         val listBaselineJson = if (completeLocal) JSONObject()
             else JSONObject(priorLists.toString())
         val keysToRecord = if (completeLocal) local.keys + apply.keys
@@ -378,17 +377,8 @@ internal object SyncCoordinator {
         check(editor.commit())
         val accountId = config.preferences.getString("github_account_id", null)
             ?: error("Missing GitHub account for verified SQLite baseline")
-        val changes = SyncBaselineStore.commit(context, accountId, previous,
+        SyncBaselineStore.commit(context, accountId, previous,
             next, versions, githubRevision, githubGeneration)
-        Log.i("SyncCSAlloc", "BASE_WRITE_SQLITE full=" + completeLocal +
-            " keys=" + next.size + " versions=" + versions.size +
-            " hashUpserts=" + changes.hashUpserts +
-            " hashDeletes=" + changes.hashDeletes +
-            " versionUpserts=" + changes.versionUpserts +
-            " versionDeletes=" + changes.versionDeletes +
-            " listKeys=" + listBaselineJson.length() +
-            " listCipherReused=" + reuseListCipher +
-            " totalMs=" + (android.os.SystemClock.elapsedRealtime() - started))
     }
 
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
@@ -476,7 +466,6 @@ internal object SyncCoordinator {
 
 
             val remoteByKey = pull.entries.associateBy { it.key }
-            val versionsStarted = android.os.SystemClock.elapsedRealtime()
             val observedKeys = if (pull.full || needsLocalAudit()) null else
                 (remoteValues.keys + config.preferences.all.keys.asSequence()
                     .filter { it.startsWith("modified/") }
@@ -487,12 +476,6 @@ internal object SyncCoordinator {
                 .toMutableMap()
             for (entry in pull.entries) versions[entry.key] = entry.version
             var base = priorBaseline?.hashes.orEmpty()
-            Log.i("SyncCSAlloc", "BASE_READ_SQLITE initialized=" + (priorBaseline != null) +
-                " keys=" + base.size + " versionKeys=" + versions.size +
-                " full=" + pull.full + " selected=" + (observedKeys != null) +
-                " entries=" + pull.entries.size +
-                " ms=" + (android.os.SystemClock.elapsedRealtime() - versionsStarted))
-
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
             val verifiedRemovals = verifiedDeletionPaths(context, config, base)
@@ -613,18 +596,11 @@ internal object SyncCoordinator {
 
             val currentPlugins = PluginInventory.snapshot(context)
             stageTo("comparing changed settings")
-            val listReadStarted = android.os.SystemClock.elapsedRealtime()
             val savedLists = if (priorBaseline == null) null
                 else config.preferences.getString("list_baselines", null)
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
-            Log.i("SyncCSAlloc", "LIST_READ full=" + pull.full +
-                " completeLocal=" + completeLocal +
-                " cipherChars=" + (savedLists?.length ?: 0) +
-                " listKeys=" + priorLists.length() +
-                " marked=" + marked.size + " remoteKeys=" + remoteValues.size +
-                " ms=" + (android.os.SystemClock.elapsedRealtime() - listReadStarted))
             val planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
                 replacedProfileUuids, marked, priorLists, firstRemoteRestore,

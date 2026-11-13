@@ -2,12 +2,6 @@ package com.hsp1020.elevate
 
 import android.app.Dialog
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.widget.Button
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import java.io.File
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
@@ -140,30 +134,6 @@ internal fun Spinner.useElevateSettingsDropdown(
 }
 
 class ElevateSettingsFragment : DialogFragment() {
-    private var pendingAllocationExport: File? = null
-    private val exportAllocation = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri ->
-        val source = pendingAllocationExport
-        pendingAllocationExport = null
-        val app = context?.applicationContext
-        if (uri == null || source == null || app == null) return@registerForActivityResult
-        Thread({
-            val result = runCatching {
-                val output = app.contentResolver.openOutputStream(uri)
-                    ?: error("Destination unavailable")
-                output.use { stream -> source.inputStream().use { it.copyTo(stream) } }
-            }
-            Handler(Looper.getMainLooper()).post {
-                context?.let { ctx ->
-                    Toast.makeText(ctx, if (result.isSuccess) "Profile exported"
-                        else "Export failed: " + result.exceptionOrNull()?.javaClass?.simpleName,
-                        Toast.LENGTH_LONG).show()
-                }
-            }
-        }, "ElevateJavaAllocExport").start()
-    }
-
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val ctx = requireContext()
         fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
@@ -466,57 +436,6 @@ class ElevateSettingsFragment : DialogFragment() {
                     content.addView(container)
                 }
             }
-        }
-        content.addView(TextView(ctx).apply {
-            text = "Java Allocation Sampling (temporary)"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            applyElevateNativeFont(bold = true)
-            setPadding(0, dp(16), 0, dp(6))
-        })
-        content.addView(TextView(ctx).apply {
-            text = "Android 15+. Samples Java allocation call stacks only when manually started. " +
-                "Run a scenario, Stop, then export the Perfetto profile. The system may rate-limit requests."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, 0, 0, dp(6))
-        })
-        val allocationStatus = TextView(ctx).apply {
-            text = ElevateJavaAllocationProfile.statusText()
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        content.addView(allocationStatus)
-        fun allocationButton(title: String, action: () -> Unit) {
-            content.addView(Button(ctx).apply {
-                text = title
-                applyElevateNativeFont()
-                setOnClickListener { action() }
-            })
-        }
-        allocationButton("Start Java allocation profile") {
-            val result = ElevateJavaAllocationProfile.start(ctx.applicationContext)
-            allocationStatus.text = result
-            Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
-            if (result.startsWith("Recording requested")) dismiss()
-        }
-        allocationButton("Stop / finish profile") {
-            val result = ElevateJavaAllocationProfile.stop()
-            allocationStatus.text = result
-            Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
-        }
-        allocationButton("Export allocation profile") {
-            val files = ElevateJavaAllocationProfile.profiles(ctx)
-            if (files.isEmpty()) {
-                Toast.makeText(ctx, "No completed profile. Check status or retry.", Toast.LENGTH_LONG).show()
-            } else {
-                AlertDialog.Builder(ctx)
-                    .setTitle("Choose Java allocation profile")
-                    .setItems(files.map { it.name }.toTypedArray()) { _, index ->
-                        pendingAllocationExport = files[index]
-                        exportAllocation.launch(files[index].name)
-                    }.show()
-            }
-        }
-        allocationButton("Refresh profiling status") {
-            allocationStatus.text = ElevateJavaAllocationProfile.statusText()
         }
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")

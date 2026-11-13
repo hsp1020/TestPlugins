@@ -123,24 +123,6 @@ internal class GithubBackupStore(
         require(url.startsWith("https://api.github.com/"))
         return authorized { currentToken ->
             transport?.let { return@authorized it(url, method, json) }
-            val traceStarted = android.os.SystemClock.elapsedRealtime()
-            var responseStatus = -1
-            var responseSize = -1
-            var requestSize = 0
-            var parseMs = 0L
-            var phase = "connect"
-            val apiCategory = when {
-                url.contains("/git/blobs/") -> "blob"
-                url.contains("/git/trees/") -> "tree"
-                url.contains("/git/commits/") -> "commit"
-                url.contains("/git/ref/") || url.contains("/git/refs") -> "ref"
-                url.contains("/compare/") -> "compare"
-                url == apiRoot -> "repo"
-                url.endsWith("/git/blobs") -> "blob-create"
-                url.endsWith("/git/trees") -> "tree-create"
-                url.endsWith("/git/commits") -> "commit-create"
-                else -> "other"
-            }
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.requestMethod = method
             conn.instanceFollowRedirects = false
@@ -152,19 +134,14 @@ internal class GithubBackupStore(
             conn.setRequestProperty("User-Agent", "SyncCS-Backup")
             try {
                 if (json != null) {
-                    phase = "write"
                     conn.doOutput = true
                     conn.setRequestProperty("Content-Type", "application/json")
                     val body = json.toString()
                     // Request body is written through OutputStreamWriter.
                     // Avoid allocating a second UTF-8 array solely for logging.
-                    requestSize = -1
                     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
                 }
-                phase = "response-code"
                 val status = conn.responseCode
-                responseStatus = status
-                responseSize = conn.contentLength
                 if (status !in 200..299) {
                     val stage = when {
                         url == apiRoot -> "repository-access"
@@ -177,23 +154,14 @@ internal class GithubBackupStore(
                     }
                     throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
                 }
-                phase = "parse"
-                val parseStarted = android.os.SystemClock.elapsedRealtime()
                 val result = conn.inputStream.use { input ->
                     if (url.contains("/git/trees/") && url.contains("recursive=1"))
                         parseTree(input)
                     else JSONObject(InputStreamReader(input, Charsets.UTF_8).use { it.readText() })
                 }
-                parseMs = android.os.SystemClock.elapsedRealtime() - parseStarted
-                phase = "completed"
                 result
             } finally {
                 conn.disconnect()
-                android.util.Log.i("SyncCSAlloc", "GITHUB_API route=" + apiCategory +
-                    " method=" + method + " status=" + responseStatus +
-                    " requestBytes=" + requestSize + " responseBytes=" + responseSize +
-                    " phase=" + phase + " parseMs=" + parseMs +
-                    " totalMs=" + (android.os.SystemClock.elapsedRealtime() - traceStarted))
             }
         }
     }
@@ -586,7 +554,6 @@ internal class GithubBackupStore(
             "Backup recovery generation changed; re-link before uploading"
         }
         SyncSafety.validateChanges(requested.size)
-        val started = android.os.SystemClock.elapsedRealtime()
         val hashes = root.hashes.toMutableList()
         val overlays = root.overlays.toMutableList()
         val patches = linkedMapOf<String, ByteArray>()
@@ -655,11 +622,6 @@ internal class GithubBackupStore(
         }
         SyncSafety.validateDeletes(deletes, approvedDeletes, 0)
         val newArchives = archiveChanges(existing, archives)
-        android.util.Log.i("SyncCSAlloc", "V3_OVERLAY requestedKeys=" + requested.size +
-            " modifiedKeys=" + changed.size + " touchedShards=" + touched.size +
-            " changedShards=" + changedShards + " compacted=" + compactedShards +
-            " writeBytes=" + writeBytes + " totalMs=" +
-            (android.os.SystemClock.elapsedRealtime() - started))
         if (patches.isEmpty() && newArchives.isEmpty()) return expectedRevision
         patches.putAll(newArchives)
         val journal = if (changed.size <= 1000) changeJournal(cipher, changed) else null

@@ -50,15 +50,12 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             DownloadQueueManager.queue.collect { queued ->
                 val target = if (queued.isNotEmpty()) ExternalDownloads.selected(app) else null
                 val enabled = ElevateFeaturePrefs.enabled(app, ElevateFeature.EXTERNAL_DOWNLOADS)
-                if (queued.isNotEmpty()) android.util.Log.i("ElevateExternal",
-                    "QUEUE_OBSERVED count=${queued.size} ids=${queued.map { it.id }} enabled=$enabled app=${target?.label}")
                 if (queued.isEmpty() || target == null || !enabled) {
                     return@collect
                 }
                 // Drain synchronously on StateFlow emission, before the download service
                 // normally receives and processes the newly queued request.
                 DownloadQueueManager.removeAllFromQueue()
-                android.util.Log.i("ElevateExternal", "QUEUE_DRAINED count=${queued.size}")
                 queued.forEach {
                     jobs.trySend(it)
                 }
@@ -89,10 +86,8 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                     while (true) {
                         val next = withTimeoutOrNull(750L) { jobs.receive() } ?: break
                         val duplicate = batch.any { it.id == next.id }
-                        android.util.Log.i("ElevateExternal", "QUEUE_BATCH_ITEM id=${next.id} duplicate=$duplicate")
                         if (!duplicate) batch.add(next)
                     }
-                    android.util.Log.i("ElevateExternal", "QUEUE_BATCH_READY ids=${batch.map { it.id }}")
                     withTimeoutOrNull(2500L) {
                         while (host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true) {
                             resumes.receive()
@@ -106,9 +101,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                             async(Dispatchers.IO) {
                                 limit.acquire()
                                 try {
-                                    android.util.Log.i("ElevateExternal", "SOURCE_LOOKUP_BEGIN id=${queued.id}")
                                     val result = prepare(queued)
-                                    android.util.Log.i("ElevateExternal", "SOURCE_LOOKUP_END id=${queued.id} found=${result != null} subtitles=${result?.second?.size ?: 0}")
                                     result?.let { queued to it }
                                 } catch (error: CancellationException) {
                                     if (!currentCoroutineContext().isActive) throw error
@@ -128,7 +121,6 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                         ?: host?.takeIf { it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             !it.isFinishing && !it.isDestroyed }
                     val target = activity ?: app
-                    android.util.Log.i("ElevateExternal", "QUEUE_HANDOFF_READY resolved=${resolved.size} requested=${batch.size} context=${target.javaClass.simpleName}")
                     if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(
                         target, resolved.map { it.first to it.second.first },
                         resolved.associate { it.first.id to it.second.second }

@@ -1203,51 +1203,11 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
-        // Diagnostic events are INFO so CloudStream's saved Logcat includes them.
-        // No raw payload, title, URL or account IDs are logged.
-        private data class StreamPlayTraceKey(
-            val provider: MainAPI, val payload: String, val casting: Boolean
-        )
-        private val streamPlayTraceActive = HashMap<StreamPlayTraceKey, Int>()
-        private var streamPlayTraceSequence = 0L
-
         private suspend fun traceStreamPlay(
-            route: String, provider: MainAPI, payload: String, casting: Boolean,
+            @Suppress("UNUSED_PARAMETER") route: String, provider: MainAPI,
+            payload: String, casting: Boolean,
             subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
-        ): Boolean {
-            val tag = "StremioSPTrace"
-            val key = StreamPlayTraceKey(provider, payload, casting)
-            val (id, overlapping) = synchronized(streamPlayTraceActive) {
-                val active = streamPlayTraceActive[key] ?: 0
-                streamPlayTraceActive[key] = active + 1
-                (++streamPlayTraceSequence) to active
-            }
-            val fingerprint = payload.hashCode().toUInt().toString(16)
-            val started = SystemClock.elapsedRealtime()
-            val links = java.util.concurrent.atomic.AtomicInteger()
-            var result = "exception"
-            android.util.Log.i(tag, "BEGIN id=$id route=$route provider=${provider.javaClass.simpleName} " +
-                "request=$fingerprint casting=$casting identicalActiveBefore=$overlapping")
-            try {
-                val ok = provider.loadLinks(payload, casting, subtitleCallback, { link ->
-                    links.incrementAndGet()
-                    callback(link)
-                })
-                result = "returned:$ok"
-                return ok
-            } catch (cancelled: CancellationException) {
-                result = "cancelled"
-                throw cancelled
-            } finally {
-                synchronized(streamPlayTraceActive) {
-                    val remaining = (streamPlayTraceActive[key] ?: 1) - 1
-                    if (remaining == 0) streamPlayTraceActive.remove(key)
-                    else streamPlayTraceActive[key] = remaining
-                }
-                android.util.Log.i(tag, "END id=$id route=$route request=$fingerprint " +
-                    "elapsedMs=${SystemClock.elapsedRealtime() - started} links=${links.get()} result=$result")
-            }
-        }
+        ): Boolean = provider.loadLinks(payload, casting, subtitleCallback, callback)
 
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 16

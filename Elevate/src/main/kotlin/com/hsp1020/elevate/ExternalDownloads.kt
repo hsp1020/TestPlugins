@@ -53,9 +53,6 @@ internal object ExternalDownloads {
     private val checking = AtomicBoolean(false)
     private val scanSequence = AtomicInteger()
     private val csFileMarker = Regex("""\[CS-(-?\d+)\]""")
-    private fun trace(event: String, message: String) {
-        android.util.Log.i("ElevateExternal", "$event $message")
-    }
     private fun pathForLog(path: String?): String =
         path?.substringBefore('?')?.substringBefore('#') ?: "@default"
     private val main = Handler(Looper.getMainLooper())
@@ -85,13 +82,11 @@ internal object ExternalDownloads {
     }.getOrNull()
 
     fun select(c: Context, app: App) {
-        trace("APP_SELECTED", "app=${app.label} component=${app.component}")
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(TARGET, app.json().toString()).apply()
     }
 
     fun clearSelection(c: Context) {
-        trace("APP_CLEARED", "selectionRemoved=true")
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .remove(TARGET).apply()
     }
@@ -131,27 +126,22 @@ internal object ExternalDownloads {
         runCatching {
             val array = JSONArray(c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(PENDING, "[]"))
-            trace("PENDING_LOAD", "stored=${array.length()}")
             for (i in 0 until array.length()) {
                 val item = runCatching { Pending.parse(array.getJSONObject(i)) }
                     .onFailure { android.util.Log.w("ElevateExternal", "PENDING_PARSE_FAIL index=$i", it) }
                     .getOrNull() ?: continue
                 if (item.created <= 0L || System.currentTimeMillis() - item.created > 30L * 24 * 60 * 60 * 1000) {
-                    trace("PENDING_EXPIRED", "index=$i id=${item.id} created=${item.created}")
                     continue
                 }
                 result[item.id] = item
-                trace("PENDING_RESTORED", "index=$i id=${item.id} parent=${item.parentId} expected=${item.expectedFile} created=${item.created}")
             }
         }.onFailure { android.util.Log.w("ElevateExternal", "PENDING_LOAD_FAIL", it) }
         // The old recovery archive is no longer used; discard it without touching Pending.
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).let { prefs ->
             if (prefs.contains("known_downloads")) {
                 prefs.edit().remove("known_downloads").apply()
-                trace("LEGACY_ARCHIVE_CLEARED", "pending=${result.size}")
             }
         }
-        trace("PENDING_READY", "count=${result.size}")
         pendingCache = result
         return result
     }
@@ -164,7 +154,6 @@ internal object ExternalDownloads {
         val persisted = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(PENDING, JSONArray(pendingMap(c).values.map { it.json() }).toString())
             .commit()
-        trace("PENDING_SAVED", "success=$persisted pending=${pendingMap(c).size}")
         return persisted
     }
 
@@ -172,10 +161,8 @@ internal object ExternalDownloads {
         if (items.isEmpty()) return
         val map = pendingMap(c)
         val oldPending = LinkedHashMap(map)
-        trace("PENDING_BATCH", "added=${items.size} before=${map.size}")
         for (item in items) {
             val replaced = map.put(item.id, item)
-            trace("PENDING_ADD", "id=${item.id} parent=${item.parentId} season=${item.season} episode=${item.episode} expected=${item.expectedFile} replaced=${replaced != null} created=${item.created}")
         }
         if (!savePending(c)) {
             map.clear(); map.putAll(oldPending)
@@ -189,7 +176,6 @@ internal object ExternalDownloads {
     @Synchronized private fun removePending(c: Context, id: Int) {
         val map = pendingMap(c)
         val removed = map.remove(id)
-        trace("PENDING_REMOVE", "id=$id existed=${removed != null} remaining=${map.size}")
         if (removed == null) return
         if (!savePending(c)) {
             map[id] = removed
@@ -451,25 +437,18 @@ internal object ExternalDownloads {
      */
     private fun dispatch(context: Context, app: App, transfers: List<Transfer>): Boolean {
         val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: return false
-        trace("HANDOFF_BEGIN", "app=${app.label} pkg=$pkg transfers=${transfers.size} videos=${transfers.count { it.queued != null }} folder=${pathForLog(basePath(context))}")
-        for (transfer in transfers) {
-            trace("HANDOFF_TRANSFER", "id=${transfer.queued?.id} file=${transfer.filename} scheme=${Uri.parse(transfer.url).scheme} headerKeys=${transfer.headers.keys}")
-        }
         val valid = transfers.filter { transfer ->
             val scheme = Uri.parse(transfer.url).scheme
             if (scheme !in listOf("http", "https")) {
-                trace("HANDOFF_REJECT", "file=${transfer.filename} scheme=$scheme")
                 toast(context, "External download requires an HTTP(S) link")
                 false
             } else true
         }
         if (valid.isEmpty()) {
-            trace("HANDOFF_EMPTY", "reason=noValidTransfers")
             return false
         }
         var launched = false
         for ((headers, group) in valid.groupBy { it.headers }) {
-            trace("HANDOFF_GROUP", "pkg=$pkg count=${group.size} headerKeys=${headers.keys}")
             val first = group.first()
             val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
             val intent = if (pkg == "com.dv.adm") {
@@ -515,11 +494,9 @@ internal object ExternalDownloads {
                     addPendingBatch(context.applicationContext, videos)
                     saved = true
                 }
-                trace("HANDOFF_PENDINGS", "count=${videos.size} saved=$saved ids=${videos.map { it.id }}")
                 if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
                 launched = true
-                trace("HANDOFF_LAUNCHED", "pkg=$pkg count=${group.size} context=${context.javaClass.simpleName}")
             } catch (e: Exception) {
                 if (saved) {
                     runCatching {
@@ -534,7 +511,6 @@ internal object ExternalDownloads {
                 toast(context, "Cannot open " + app.label + ": " + e.message)
             }
         }
-        trace("HANDOFF_END", "launched=$launched")
         return launched
     }
 
@@ -544,19 +520,16 @@ internal object ExternalDownloads {
         subtitles: Map<Int, List<SubtitleData>> = emptyMap()
     ) {
         val app = selected(context) ?: return
-        trace("BATCH_PREPARE", "app=${app.label} requests=${requests.size} ids=${requests.map { it.first.id }}")
         val transfers = requests.flatMap { (queued, link) ->
             if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
                 toast(context, "External download requires an HTTP(S) link")
                 return@flatMap emptyList()
             }
             val filename = fileName(queued, link)
-            trace("BATCH_VIDEO", "id=${queued.id} parent=${queued.parentId} filename=$filename urlScheme=${Uri.parse(link.url).scheme} isM3u8=${link.isM3u8}")
             val video = Transfer(queued, link.url, filename, headersFor(link))
             val stem = subtitleStemFromVideo(queued.id, filename)
                 ?: filename.substringBeforeLast('.')
             val subs = matchingSubtitles(context, subtitles[queued.id].orEmpty())
-            trace("BATCH_SUBTITLES", "id=${queued.id} available=${subtitles[queued.id].orEmpty().size} selected=${subs.size}")
             listOf(video) + subs.map { choice ->
                 subtitleTransfer(stem, choice.subtitle, choice.title)
             }
@@ -570,7 +543,6 @@ internal object ExternalDownloads {
     @Synchronized private fun register(
         c: Context, p: Pending, name: String, size: Long, base: String?, relativePath: String
     ): Boolean {
-        trace("REGISTER_BEGIN", "id=${p.id} parent=${p.parentId} name=$name bytes=$size base=${pathForLog(base)} relative=$relativePath")
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return false
         val epKey = getFolderName(DOWNLOAD_EPISODE_CACHE, p.parentId.toString())
         val existingEpisode = c.getKey<DownloadObjects.DownloadEpisodeCached>(epKey, p.id.toString())
@@ -581,12 +553,10 @@ internal object ExternalDownloads {
         val fileInfo = VideoDownloadManager.getDownloadFileInfo(c, p.id)
         if (fileInfo != null && existingFile != null &&
             (existingFile.displayName != name || existingFile.relativePath != relativePath)) {
-            trace("REGISTER_CONFLICT", "id=${p.id} existing=${existingFile.displayName} existingRelative=${existingFile.relativePath}")
             return false
         }
         if (existingEpisode != null && (existingEpisode.id != p.id || existingEpisode.parentId != p.parentId) ||
             existingHeader != null && existingHeader.id != p.parentId) {
-            trace("REGISTER_CONFLICT", "id=${p.id} reason=metadataIdMismatch")
             return false
         }
         // Header and episode metadata must be durable before the file becomes visible in Library.
@@ -602,7 +572,6 @@ internal object ExternalDownloads {
         if (existingHeader == null) {
             val type = runCatching { TvType.valueOf(p.type) }.getOrNull()
             if (type == null || p.title.isBlank() || p.api.isBlank()) {
-                trace("REGISTER_METADATA_MISSING", "id=${p.id} type=${p.type} hasTitle=${p.title.isNotBlank()} hasApi=${p.api.isNotBlank()}")
                 return false
             }
             c.setKey(
@@ -618,7 +587,6 @@ internal object ExternalDownloads {
             DOWNLOAD_HEADER_CACHE, p.parentId.toString())
         if (verifyEpisode?.id != p.id || verifyEpisode?.parentId != p.parentId ||
             verifyHeader?.id != p.parentId) {
-            trace("REGISTER_VERIFY_FAIL", "id=${p.id} reason=episodeOrHeader missingEpisode=${verifyEpisode == null} missingHeader=${verifyHeader == null}")
             return false
         }
         if (fileInfo == null) {
@@ -629,12 +597,9 @@ internal object ExternalDownloads {
         }
         val verified = VideoDownloadManager.getDownloadFileInfo(c, p.id)
         if (verified == null || verified.fileLength <= 1024L) {
-            trace("REGISTER_VERIFY_FAIL", "id=${p.id} reason=downloadInfo fileLength=${verified?.fileLength}")
             return false
         }
-        trace("REGISTER_VERIFY_OK", "id=${p.id} fileLength=${verified.fileLength} parent=${p.parentId} relative=$relativePath")
         removePending(c, p.id)
-        trace("REGISTER_SUCCESS", "id=${p.id} parent=${p.parentId} name=$name")
         return fileInfo == null || existingEpisode == null || existingHeader == null
     }
 
@@ -668,8 +633,6 @@ internal object ExternalDownloads {
                 }
             }
         }
-        if (inspected >= 1500) trace("SCAN_LIMIT", "scan=$scan maxEntries=1500")
-        trace("SCAN_LIST", "scan=$scan inspected=$inspected files=${found.size}")
         return found
     }
 
@@ -678,14 +641,11 @@ internal object ExternalDownloads {
         val path = basePath(c)
         val needed = pendingMap(c).isNotEmpty()
         val key = path ?: "@default"
-        trace("WATCH_CHECK", "needed=$needed folder=${pathForLog(path)} existing=${pathForLog(watchPath)} observer=${fileObserver != null} contentObserver=${contentObserver != null}")
         if (!needed) {
-            trace("WATCH_STOP_EMPTY", "pending=0")
             stopWatching(c)
             return
         }
         if (watchPath == key) {
-            trace("WATCH_REUSED", "folder=${pathForLog(path)}")
             return
         }
         stopWatching(c)
@@ -694,19 +654,16 @@ internal object ExternalDownloads {
         val physical = if (path.isNullOrBlank()) {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
         } else path.takeUnless { it.startsWith("content://") }
-        trace("WATCH_PATH", "configured=${pathForLog(path)} physical=${pathForLog(physical)}")
         if (physical != null) {
             runCatching {
                 object : FileObserver(physical, FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.CREATE) {
                     override fun onEvent(event: Int, name: String?) {
                         val accepted = name != null && isVideo(name)
-                        trace("FILE_EVENT", "mask=$event name=$name accepted=$accepted")
                         if (accepted) scheduleCheck(c, 2400L)
                     }
                 }.also { it.startWatching() }
             }.onSuccess {
                 fileObserver = it
-                trace("WATCH_FILE_READY", "path=${pathForLog(physical)}")
             }.onFailure { android.util.Log.w("ElevateExternal", "WATCH_FILE_FAILED path=${pathForLog(physical)}", it) }
         }
         val uri = when {
@@ -718,20 +675,17 @@ internal object ExternalDownloads {
         if (uri != null) {
             val observer = object : ContentObserver(main) {
                 override fun onChange(selfChange: Boolean) {
-                    trace("CONTENT_EVENT", "self=$selfChange uri=${pathForLog(uri.toString())}")
                     scheduleCheck(c, 2400L)
                 }
             }
             runCatching { c.contentResolver.registerContentObserver(uri, true, observer) }
                 .onSuccess {
                     contentObserver = observer
-                    trace("WATCH_CONTENT_READY", "uri=${pathForLog(uri.toString())}")
                 }.onFailure { android.util.Log.w("ElevateExternal", "WATCH_CONTENT_FAILED", it) }
-        } else trace("WATCH_CONTENT_SKIPPED", "reason=noContentUri")
+        }
     }
 
     @Synchronized private fun stopWatching(c: Context) {
-        trace("WATCH_STOP", "file=${fileObserver != null} content=${contentObserver != null} folder=${pathForLog(watchPath)}")
         fileObserver?.stopWatching()
         fileObserver = null
         contentObserver?.let { runCatching { c.contentResolver.unregisterContentObserver(it) } }
@@ -745,14 +699,11 @@ internal object ExternalDownloads {
 
     @Synchronized private fun scheduleCheck(c: Context, delayMs: Long) {
         if (pendingMap(c).isEmpty()) {
-            trace("SCAN_SCHEDULE_SKIPPED", "reason=noPending delayMs=$delayMs")
             return
         }
-        trace("SCAN_SCHEDULE", "delayMs=$delayMs pending=${pendingMap(c).size} replaced=${scheduled != null}")
         scheduled?.let(main::removeCallbacks)
         val task = Runnable {
             synchronized(this) { scheduled = null }
-            trace("SCAN_TIMER_FIRED", "delayMs=$delayMs")
             checkFolder(c)
         }
         scheduled = task
@@ -761,14 +712,12 @@ internal object ExternalDownloads {
 
     /** Manually retry recognition for downloads with an active Pending entry. */
     fun syncNow(c: Context) {
-        trace("SYNC_BUTTON", "clicked=true pending=${pending(c).size} folder=${pathForLog(basePath(c))}")
         checkFolder(c, manual = true)
     }
 
     /** Reuse native registration for pending files, including renamed or nested downloads. */
     fun checkFolder(c: Context, manual: Boolean = false) {
         val scan = scanSequence.incrementAndGet()
-        trace("SCAN_REQUEST", "scan=$scan manual=$manual checking=${checking.get()} feature=${ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)}")
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (manual) toast(c, "Enable External Downloads first.")
             return
@@ -788,15 +737,12 @@ internal object ExternalDownloads {
             var ambiguous = 0
             try {
                 val requests = pending(c)
-                trace("SCAN_BEGIN", "scan=$scan manual=$manual pending=${requests.size} retry=$unstableRetries thread=${Thread.currentThread().name}")
                 if (requests.isEmpty()) {
-                    trace("SCAN_EMPTY", "scan=$scan reason=noPending")
                     if (manual) scanError = "No pending external downloads."
                     return@launch
                 }
                 val base = basePath(c)
                 val dir = directory(c, base)
-                trace("SCAN_DIRECTORY", "scan=$scan configured=${pathForLog(base)} kind=${if (base.isNullOrBlank()) "default" else if (base.startsWith("content://")) "SAF" else "filesystem"} opened=${dir != null}")
                 if (dir == null) {
                     if (manual) scanError = "CloudStream download folder unavailable."
                     return@launch
@@ -831,7 +777,6 @@ internal object ExternalDownloads {
                         }
                         markerGroups[markerId]?.size != 1 -> {
                             ambiguous++
-                            trace("SCAN_AMBIGUOUS", "scan=$scan id=$markerId name=$name reason=multipleVideosSameId count=${markerGroups[markerId]?.size}")
                             continue
                         }
                         else -> {
@@ -841,7 +786,6 @@ internal object ExternalDownloads {
                                 continue
                             }
                             renamed++
-                            trace("SCAN_PENDING_RENAMED", "scan=$scan id=$markerId parent=${current.parentId} actual=$name expected=${current.expectedFile}")
                             current
                         }
                     }
@@ -860,7 +804,6 @@ internal object ExternalDownloads {
                     }
                     candidates.add(Candidate(pending, found, size))
                 }
-                trace("SCAN_MATCH_SUMMARY", "scan=$scan pending=${requests.size} files=${files.size} exact=$exactMatches renamed=$renamed withoutPending=$withoutPending ambiguous=$ambiguous candidates=${candidates.size}")
                 if (candidates.isEmpty()) return@launch
                 delay(750L)
                 val stableAt = System.currentTimeMillis()
@@ -880,7 +823,6 @@ internal object ExternalDownloads {
                     }.onFailure {
                         android.util.Log.w("ElevateExternal", "SCAN_REGISTER_EXCEPTION scan=$scan id=${p.id}", it)
                     }.getOrDefault(false)
-                    trace("SCAN_REGISTER_RESULT", "scan=$scan id=${p.id} result=$result")
                     if (result) registered++
                 }
             } catch (e: Exception) {
@@ -888,10 +830,8 @@ internal object ExternalDownloads {
                 if (manual) scanError = "Cannot scan CloudStream download folder."
             } finally {
                 checking.set(false)
-                trace("SCAN_END", "scan=$scan manual=$manual exact=$exactMatches renamed=$renamed noPending=$withoutPending ambiguous=$ambiguous registered=$registered unstable=$unstableFile durationMs=${android.os.SystemClock.elapsedRealtime() - started}")
                 if (unstableFile && unstableRetries < 2) {
                     unstableRetries++
-                    trace("SCAN_RETRY", "scan=$scan retry=$unstableRetries delayMs=6000")
                     scheduleCheck(c, 6_000L)
                 } else if (!unstableFile) unstableRetries = 0
                 if (manual) {
@@ -903,14 +843,12 @@ internal object ExternalDownloads {
     }
 
     fun startRecognition(c: Context) {
-        trace("RECOGNITION_START", "pending=${pending(c).size} configured=${pathForLog(basePath(c))}")
         unstableRetries = 0
         watch(c)
         scheduleCheck(c, 2400L)
     }
 
     @Synchronized fun stopRecognition(c: Context) {
-        trace("RECOGNITION_STOP", "pending=${pending(c).size}")
         unstableRetries = 0
         stopWatching(c)
         scheduled?.let(main::removeCallbacks)
@@ -922,7 +860,6 @@ internal object ExternalDownloads {
 internal class ExternalDownloaderLifecycle(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     fun start() {
-        android.util.Log.i("ElevateExternal", "LIFECYCLE_REGISTER")
         app.registerActivityLifecycleCallbacks(this)
         ExternalDownloads.startRecognition(app)
     }
@@ -932,7 +869,6 @@ internal class ExternalDownloaderLifecycle(private val app: Application) :
     }
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) {
-            android.util.Log.i("ElevateExternal", "LIFECYCLE_RESUMED activity=MainActivity restartRecognition=true")
             ExternalDownloads.startRecognition(app)
         }
     }
