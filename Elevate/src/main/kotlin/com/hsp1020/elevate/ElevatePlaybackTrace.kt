@@ -8,6 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -49,6 +52,30 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         activity.isChangingConfigurations -> "CONFIGURATION_CHANGE"
         activity.isFinishing -> "FINISHING"
         else -> "SYSTEM_OR_EXTERNAL_UNKNOWN"
+    }
+
+    private fun findWebView(view: View?): WebView? {
+        if (view is WebView) return view
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                val found = findWebView(view.getChildAt(index))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun dialogInfo(fragment: DialogFragment): String {
+        val dialog = fragment.dialog
+        val owner = fragment.activity
+        val webView = findWebView(dialog?.window?.decorView ?: fragment.view)
+        return "pid=${Process.myPid()} host=${owner?.javaClass?.simpleName} " +
+            "hostActivity=${owner?.let(System::identityHashCode)} taskId=${owner?.taskId} " +
+            "dialogClass=${fragment.javaClass.name} tag=${fragment.tag} " +
+            "fragment=${System.identityHashCode(fragment)} " +
+            "parent=${fragment.parentFragment?.javaClass?.name ?: "root"} " +
+            "dialogType=${dialog?.javaClass?.name} showing=${dialog?.isShowing} " +
+            "webView=${webView != null} webViewId=${webView?.let(System::identityHashCode)}"
     }
 
     private fun snapshotHeap(fragmentId: Int, phase: String) {
@@ -105,6 +132,31 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentCreated(fm: FragmentManager, fragment: Fragment, state: Bundle?) {
+            if (fragment is DialogFragment) {
+                Log.i(TAG, "DIALOG_CREATE ${dialogInfo(fragment)}")
+            }
+        }
+        override fun onFragmentStarted(fm: FragmentManager, fragment: Fragment) {
+            if (fragment is DialogFragment) {
+                Log.i(TAG, "DIALOG_START ${dialogInfo(fragment)}")
+                fragment.dialog?.window?.decorView?.post {
+                    if (running && fragment.isAdded && fragment.dialog?.isShowing == true) {
+                        Log.i(TAG, "DIALOG_WINDOW ${dialogInfo(fragment)}")
+                    }
+                }
+            }
+        }
+        override fun onFragmentStopped(fm: FragmentManager, fragment: Fragment) {
+            if (fragment is DialogFragment) {
+                Log.i(TAG, "DIALOG_STOP ${dialogInfo(fragment)}")
+            }
+        }
+        override fun onFragmentDestroyed(fm: FragmentManager, fragment: Fragment) {
+            if (fragment is DialogFragment) {
+                Log.i(TAG, "DIALOG_DESTROY ${dialogInfo(fragment)}")
+            }
+        }
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
