@@ -70,16 +70,21 @@ internal object SyncCoordinator {
     // comparison invalidates it on another plugin instance, rollback or relink.
     @Volatile private var cachedBaseline: Pair<String, Map<String, String>>? = null
     private fun baseline(context: Context): Map<String, String> {
+        val readStarted = android.os.SystemClock.elapsedRealtime()
         val raw = SyncConfiguration(context).preferences.getString("base", "{}") ?: "{}"
         val cached = cachedBaseline
         if (cached != null && cached.first == raw) {
-
+            Log.i("SyncCSAlloc", "BASE_READ cached=true keys=" + cached.second.size +
+                " storedChars=" + raw.length +
+                " ms=" + (android.os.SystemClock.elapsedRealtime() - readStarted))
             return cached.second
         }
         val json = JSONObject(raw)
         val parsed = json.keys().asSequence().associateWith { json.getString(it) }.toMap()
         cachedBaseline = raw to parsed
-
+        Log.i("SyncCSAlloc", "BASE_READ cached=false keys=" + parsed.size +
+            " storedChars=" + raw.length +
+            " ms=" + (android.os.SystemClock.elapsedRealtime() - readStarted))
         return parsed
     }
 
@@ -362,13 +367,24 @@ internal object SyncCoordinator {
         upload: Map<String, String?>, remoteCursor: Long?,
         githubRevision: String, githubGeneration: Int, serverPluginManifest: String?
     ) {
+    val persistStarted = android.os.SystemClock.elapsedRealtime()
+    val priorBaseRaw = config.preferences.getString("base", null)
+    val priorVersionsRaw = config.preferences.getString("remote_versions", null)
+    val baseStarted = android.os.SystemClock.elapsedRealtime()
     val baseJson = JSONObject()
     for ((key, hash) in next) baseJson.put(key, hash)
     val baseRaw = baseJson.toString()
+    val baseMs = android.os.SystemClock.elapsedRealtime() - baseStarted
+    val versionsStarted = android.os.SystemClock.elapsedRealtime()
     val revisionJson = JSONObject()
     versions.forEach { (key, version) -> revisionJson.put(key, version) }
+    val versionsRaw = revisionJson.toString()
+    val versionsMs = android.os.SystemClock.elapsedRealtime() - versionsStarted
+    val copyStarted = android.os.SystemClock.elapsedRealtime()
     val listBaselineJson = if (completeLocal) JSONObject()
         else JSONObject(priorLists.toString())
+    val listCopyMs = android.os.SystemClock.elapsedRealtime() - copyStarted
+    val updateStarted = android.os.SystemClock.elapsedRealtime()
     val keysToRecord = if (completeLocal) local.keys + apply.keys
         else (marked + remoteKeys + apply.keys + upload.keys)
     for (key in keysToRecord) {
@@ -377,14 +393,17 @@ internal object SyncCoordinator {
             listBaselineJson.put(key, raw)
         } else listBaselineJson.remove(key)
     }
+    val updateMs = android.os.SystemClock.elapsedRealtime() - updateStarted
+    val encryptStarted = android.os.SystemClock.elapsedRealtime()
     // Reuse validated ciphertext only when the effective collection ancestry
     // is unchanged. Full audits and first-time/recovery snapshots still re-encrypt.
     val listCipher = if (!completeLocal && previousListCipher != null &&
         sameListBaselines(priorLists, listBaselineJson)) previousListCipher
     else LocalVault.encrypt(listBaselineJson.toString().toByteArray(Charsets.UTF_8))
+    val encryptMs = android.os.SystemClock.elapsedRealtime() - encryptStarted
     val persisted = config.preferences.edit()
         .putString("base", baseRaw)
-        .putString("remote_versions", revisionJson.toString())
+        .putString("remote_versions", versionsRaw)
         .putString("list_baselines", listCipher)
     if (remoteCursor != null) persisted.putLong("remote_cursor", remoteCursor)
     else persisted.remove("remote_cursor")
@@ -398,6 +417,22 @@ internal object SyncCoordinator {
     }
     check(persisted.commit())
     cachedBaseline = baseRaw to next
+    Log.i("SyncCSAlloc", "BASE_WRITE full=" + completeLocal +
+        " keys=" + next.size + " versions=" + versions.size +
+        " priorListKeys=" + priorLists.length() +
+        " newListKeys=" + listBaselineJson.length() +
+        " touchedListKeys=" + keysToRecord.size +
+        " marked=" + marked.size + " apply=" + apply.size +
+        " upload=" + upload.size + " remoteKeys=" + remoteKeys.size +
+        " baseUnchanged=" + (priorBaseRaw == baseRaw) +
+        " versionsUnchanged=" + (priorVersionsRaw == versionsRaw) +
+        " listCipherReused=" + (previousListCipher != null && listCipher === previousListCipher) +
+        " baseChars=" + baseRaw.length + " versionsChars=" + versionsRaw.length +
+        " listCipherChars=" + listCipher.length +
+        " baseMs=" + baseMs + " versionsMs=" + versionsMs +
+        " listCopyMs=" + listCopyMs + " listUpdateMs=" + updateMs +
+        " listEncryptMs=" + encryptMs +
+        " totalMs=" + (android.os.SystemClock.elapsedRealtime() - persistStarted))
 
     }
 
@@ -485,12 +520,16 @@ internal object SyncCoordinator {
 
 
             val remoteByKey = pull.entries.associateBy { it.key }
+            val versionsStarted = android.os.SystemClock.elapsedRealtime()
             val versions = mutableMapOf<String, Long>()
             if (!pull.full) {
                 val old = JSONObject(config.preferences.getString("remote_versions", "{}") ?: "{}")
                 for (key in old.keys()) versions[key] = old.getLong(key)
             }
             for (entry in pull.entries) versions[entry.key] = entry.version
+            Log.i("SyncCSAlloc", "VERSIONS_READ full=" + pull.full +
+                " entries=" + pull.entries.size + " versionKeys=" + versions.size +
+                " ms=" + (android.os.SystemClock.elapsedRealtime() - versionsStarted))
 
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
@@ -603,10 +642,17 @@ internal object SyncCoordinator {
 
             val currentPlugins = PluginInventory.snapshot(context)
             stageTo("comparing changed settings")
+            val listReadStarted = android.os.SystemClock.elapsedRealtime()
             val savedLists = config.preferences.getString("list_baselines", null)
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
+            Log.i("SyncCSAlloc", "LIST_READ full=" + pull.full +
+                " completeLocal=" + completeLocal +
+                " cipherChars=" + (savedLists?.length ?: 0) +
+                " listKeys=" + priorLists.length() +
+                " marked=" + marked.size + " remoteKeys=" + remoteValues.size +
+                " ms=" + (android.os.SystemClock.elapsedRealtime() - listReadStarted))
             val planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
                 replacedProfileUuids, marked, priorLists, firstRemoteRestore,

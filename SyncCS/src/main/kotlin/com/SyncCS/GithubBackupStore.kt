@@ -74,6 +74,25 @@ internal class GithubBackupStore(
         require(url.startsWith("https://api.github.com/"))
         return authorized { currentToken ->
         transport?.let { return@authorized it(url, method, json) }
+        val traceStarted = android.os.SystemClock.elapsedRealtime()
+        var responseStatus = -1
+        var responseSize = -1
+        var requestSize = 0
+        var readMs = 0L
+        var parseMs = 0L
+        var phase = "connect"
+        val apiCategory = when {
+            url.contains("/git/blobs/") -> "blob"
+            url.contains("/git/trees/") -> "tree"
+            url.contains("/git/commits/") -> "commit"
+            url.contains("/git/ref/") || url.contains("/git/refs") -> "ref"
+            url.contains("/compare/") -> "compare"
+            url == apiRoot -> "repo"
+            url.endsWith("/git/blobs") -> "blob-create"
+            url.endsWith("/git/trees") -> "tree-create"
+            url.endsWith("/git/commits") -> "commit-create"
+            else -> "other"
+        }
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.instanceFollowRedirects = false
@@ -85,13 +104,22 @@ internal class GithubBackupStore(
         conn.setRequestProperty("User-Agent", "SyncCS-Backup")
         try {
             if (json != null) {
+                phase = "write"
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/json")
-                conn.outputStream.use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
+                val requestBytes = json.toString().toByteArray(Charsets.UTF_8)
+                requestSize = requestBytes.size
+                conn.outputStream.use { it.write(requestBytes) }
             }
+            phase = "response-code"
             val status = conn.responseCode
+            responseStatus = status
+            phase = "read"
+            val readStarted = android.os.SystemClock.elapsedRealtime()
             val response = (if (status in 200..299) conn.inputStream else conn.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
+            readMs = android.os.SystemClock.elapsedRealtime() - readStarted
+            responseSize = response.size
             if (status !in 200..299) {
                 val stage = when {
                     url == apiRoot -> "repository-access"
@@ -104,10 +132,20 @@ internal class GithubBackupStore(
                 }
                 throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
             }
-            if (response.isEmpty()) JSONObject()
+            phase = "parse"
+            val parseStarted = android.os.SystemClock.elapsedRealtime()
+            val parsed = if (response.isEmpty()) JSONObject()
                 else JSONObject(String(response, Charsets.UTF_8))
+            parseMs = android.os.SystemClock.elapsedRealtime() - parseStarted
+            phase = "completed"
+            parsed
         } finally {
             conn.disconnect()
+            android.util.Log.i("SyncCSAlloc", "GITHUB_API route=" + apiCategory +
+                " method=" + method + " status=" + responseStatus +
+                " requestBytes=" + requestSize + " responseBytes=" + responseSize +
+                " phase=" + phase + " readMs=" + readMs + " parseMs=" + parseMs +
+                " totalMs=" + (android.os.SystemClock.elapsedRealtime() - traceStarted))
         }
         }
     }
@@ -413,6 +451,12 @@ internal class GithubBackupStore(
         check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
             hashes.joinToString("|")) { "Backup root authentication failed." }
         SyncSafety.validateChanges(requested.size)
+        val shardStarted = android.os.SystemClock.elapsedRealtime()
+        var shardReadBytes = 0L
+        var shardWriteBytes = 0L
+        var shardParseMs = 0L
+        var shardSerializeMs = 0L
+        var shardChangedCount = 0
         val patches = linkedMapOf<String, ByteArray>()
         val changed = linkedMapOf<String, String?>()
         val nestedDeletes = linkedSetOf<String>()
@@ -422,7 +466,10 @@ internal class GithubBackupStore(
             check(SyncBackend.digestBytes(bytes) == hashes[bucket]) {
                 "Backup shard $bucket failed verification"
             }
+            shardReadBytes += bytes.size
+            val shardParseStarted = android.os.SystemClock.elapsedRealtime()
             val rows = JSONObject(String(bytes, Charsets.UTF_8))
+            shardParseMs += android.os.SystemClock.elapsedRealtime() - shardParseStarted
             var altered = false
             for ((key, value) in requested) {
                 if (bucket(key) != bucket) continue
@@ -446,11 +493,22 @@ internal class GithubBackupStore(
                 altered = true
             }
             if (altered) {
+                val shardSerializeStarted = android.os.SystemClock.elapsedRealtime()
                 val data = rows.toString().toByteArray(Charsets.UTF_8)
+                shardSerializeMs += android.os.SystemClock.elapsedRealtime() - shardSerializeStarted
+                shardChangedCount++
+                shardWriteBytes += data.size
                 patches[path] = data
                 hashes[bucket] = SyncBackend.digestBytes(data)
             }
         }
+        android.util.Log.i("SyncCSAlloc", "SHARD_EDIT requestedKeys=" + requested.size +
+            " modifiedKeys=" + changed.size + " touchedShards=" +
+            requested.keys.map(::bucket).distinct().size +
+            " changedShards=" + shardChangedCount +
+            " readBytes=" + shardReadBytes + " writeBytes=" + shardWriteBytes +
+            " parseMs=" + shardParseMs + " serializeMs=" + shardSerializeMs +
+            " totalMs=" + (android.os.SystemClock.elapsedRealtime() - shardStarted))
         val deletes = changed.filterValues { it == null }.keys + nestedDeletes
         check(deletes.all { it in approvedDeletes }) {
             "Unverified deletion detected; refusing to publish."
