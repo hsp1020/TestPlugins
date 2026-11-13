@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /**
  * Add-on inventory reconciliation. Each manifest includes persistent tombstones.
- * Only the current object manifest format is supported; no legacy upgrade.
+ * Accept plugin inventory arrays (including GitHub x/plugins) and object manifests.
  * Online identity is name+repository (not release URL); local identity is name+filename.
  */
 internal object PluginSync {
@@ -32,8 +32,18 @@ internal object PluginSync {
     fun decode(raw: String?): State {
         val result = State()
         if (raw.isNullOrBlank()) return result
-        val root = JSONObject(raw)
-        val array = root.optJSONArray("items") ?: JSONArray()
+        // PluginInventory.snapshot() stores arrays, including in GitHub backups.
+        // Decode both supported representations without migrating stored data.
+        val array: JSONArray
+        val removed: JSONArray
+        if (raw.trimStart().startsWith("[")) {
+            array = JSONArray(raw)
+            removed = JSONArray()
+        } else {
+            val root = JSONObject(raw)
+            array = root.optJSONArray("items") ?: JSONArray()
+            removed = root.optJSONArray("deleted") ?: JSONArray()
+        }
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
             val key = identity(item)
@@ -42,7 +52,6 @@ internal object PluginSync {
                 result.items[key] = item
             }
         }
-        val removed = root.optJSONArray("deleted") ?: JSONArray()
         for (i in 0 until removed.length()) result.deleted.add(removed.getString(i))
         result.deleted.forEach { result.items.remove(it) }
         return result

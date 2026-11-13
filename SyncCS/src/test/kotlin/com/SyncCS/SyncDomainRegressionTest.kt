@@ -99,14 +99,27 @@ class SyncDomainRegressionTest {
             encoded("string", "a,d")))
     }
 
-    @Test fun pluginInventoryDoesNotConvertLegacyArrayManifests() {
-        assertThrows(org.json.JSONException::class.java) {
-            PluginSync.decode("""[{"type":"online","name":"legacy"}]""")
-        }
+    @Test fun githubPluginArrayRestoreRetainsAllPluginsWithoutMigration() {
+        // GithubSyncAdapter.pull decodes x/plugins before restoring B.
+        // PluginInventory.snapshot uses this array representation.
+        val a = plugin("StremioC", 378, "https://example.org/stremioc.cs3")
+        val b = plugin("GlobalSearchHook", 2, "https://example.org/global.cs3")
+        val remote = JSONArray().put(a).put(b).toString()
+        val decoded = PluginSync.decode(remote)
+        assertEquals(2, decoded.items.size)
+        assertEquals(a.getString("sha"), decoded.items[PluginSync.identity(a)]?.getString("sha"))
+        assertEquals(b.getString("url"), decoded.items[PluginSync.identity(b)]?.getString("url"))
+
+        // A fresh B keeps all remote plugins; the merge does not modify GitHub.
+        val initial = PluginSync.merge("[]", remote, null, false)
+        assertEquals(2, initial.target.items.size)
+        assertFalse(initial.changedRemote)
+
         val current = JSONObject().put("format", 2)
-            .put("items", JSONArray().put(plugin("Plugin", 2, "https://example.org/test.cs3")))
+            .put("items", JSONArray().put(a).put(b))
             .put("deleted", JSONArray()).toString()
-        assertEquals(1, PluginSync.decode(current).items.size)
+        assertEquals(decoded.items.keys, PluginSync.decode(current).items.keys)
+        assertEquals(2, PluginSync.items(remote).length())
     }
 
     @Test fun sqliteBaselineStartsFreshAndUpdatesOnlyChangedKeys() {
