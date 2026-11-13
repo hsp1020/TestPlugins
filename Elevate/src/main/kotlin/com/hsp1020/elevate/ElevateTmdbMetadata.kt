@@ -16,7 +16,8 @@ internal object ElevateTmdbMetadata {
     private const val TTL = 12L * 60 * 60 * 1000
     private data class Entry(
         val at: Long, val detailLoaded: Boolean, val originalLanguage: String?,
-        val creditsLocale: String?, val credits: JSONObject?
+        val creditsLocale: String?, val credits: JSONObject?,
+        val detailLocale: String?, val details: JSONObject?
     )
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cache = LinkedHashMap<String, Entry>()
@@ -38,22 +39,31 @@ internal object ElevateTmdbMetadata {
         synchronized(cache) {
             val previous = cache[key]
             cache[key] = Entry(System.currentTimeMillis(), previous?.detailLoaded == true,
-                original, previous?.creditsLocale, previous?.credits)
+                original, previous?.creditsLocale, previous?.credits,
+                previous?.detailLocale, previous?.details)
             if (cache.size > 128) cache.remove(cache.keys.first())
         }
     }
 
     suspend fun originalLanguage(
         id: String, movie: Boolean, locale: String, includeCredits: Boolean = false
-    ): String? = resolve(id, movie, locale, needsCredits = false, prefetchCredits = includeCredits)
+    ): String? = resolve(id, movie, locale, needsDetails = false,
+        needsCredits = false, prefetchCredits = includeCredits)
         ?.originalLanguage
 
     suspend fun credits(id: String, movie: Boolean, locale: String): JSONObject? =
-        resolve(id, movie, locale, needsCredits = true, prefetchCredits = false)?.credits
+        resolve(id, movie, locale, needsDetails = false,
+            needsCredits = true, prefetchCredits = false)?.credits
+
+    /** Full detail from the same response as /credits; no second TMDB request on cache hits. */
+    suspend fun details(id: String, movie: Boolean, locale: String,
+        includeCredits: Boolean = false): JSONObject? =
+        resolve(id, movie, locale, needsDetails = true,
+            needsCredits = includeCredits, prefetchCredits = includeCredits)?.details
 
     private suspend fun resolve(
         id: String, movie: Boolean, locale: String,
-        needsCredits: Boolean, prefetchCredits: Boolean
+        needsDetails: Boolean, needsCredits: Boolean, prefetchCredits: Boolean
     ): Entry? {
         val number = id.toLongOrNull()?.takeIf { it > 0 } ?: return null
         val kind = if (movie) "movie" else "tv"
@@ -64,12 +74,14 @@ internal object ElevateTmdbMetadata {
                 val now = System.currentTimeMillis()
                 val previous = cache[key]?.takeIf { now - it.at in 0 until TTL }
                 val hasDetails = previous?.detailLoaded == true || previous?.originalLanguage != null
-                val hasCredits = previous?.creditsLocale == normalizedLocale
-                if (hasDetails && (!needsCredits || hasCredits)) return previous
+                val hasCredits = previous?.creditsLocale == normalizedLocale && previous?.credits != null
+                val hasFullDetails = previous?.detailLocale == normalizedLocale && previous?.details != null
+                if (hasDetails && (!needsCredits || hasCredits) &&
+                    (!needsDetails || hasFullDetails)) return previous
                 val active = flights[key]
                 if (active != null) active to true
                 else {
-                    val fetchDetails = !hasDetails
+                    val fetchDetails = !hasDetails || needsDetails && !hasFullDetails
                     val fetchCredits = (needsCredits || prefetchCredits && fetchDetails) && !hasCredits
                     val task = scope.async(start = CoroutineStart.LAZY) {
                         try {
@@ -83,6 +95,14 @@ internal object ElevateTmdbMetadata {
                             val json = JSONObject(response.text)
                             val original = if (fetchDetails) language(json.optString("original_language"))
                                 else null
+                            // Keep only display fields; don't retain the full appended credits tree twice.
+                            val foundDetail = if (fetchDetails) JSONObject().apply {
+                                for (field in listOf("name", "title", "overview", "poster_path",
+                                    "backdrop_path", "genres", "vote_average", "release_date",
+                                    "first_air_date", "runtime", "episode_run_time")) {
+                                    if (json.has(field)) put(field, json.get(field))
+                                }
+                            } else null
                             val foundCredits = if (fetchCredits) {
                                 if (fetchDetails) json.optJSONObject("credits") else json
                             } else null
@@ -94,7 +114,9 @@ internal object ElevateTmdbMetadata {
                                     fetchDetails || current?.detailLoaded == true,
                                     original ?: current?.originalLanguage,
                                     if (fetchCredits) normalizedLocale else current?.creditsLocale,
-                                    if (fetchCredits) foundCredits else current?.credits)
+                                    if (fetchCredits) foundCredits else current?.credits,
+                                    if (fetchDetails) normalizedLocale else current?.detailLocale,
+                                    if (fetchDetails) foundDetail else current?.details)
                                 cache[key] = entry
                                 if (cache.size > 128) cache.remove(cache.keys.first())
                                 entry

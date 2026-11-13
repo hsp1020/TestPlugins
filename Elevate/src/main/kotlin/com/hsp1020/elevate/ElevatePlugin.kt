@@ -103,6 +103,7 @@ class ElevatePlugin : Plugin() {
     private var libraryPosters: LibraryPosterHook? = null
     private var recommendationPosters: RecommendationPosterHook? = null
     private var actorHook: ElevateActorHook? = null
+    private var metadataSwap: ElevateMetadataSwap? = null
     private var thumbnailRatios: OriginalThumbnailRatioHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
@@ -137,11 +138,16 @@ class ElevatePlugin : Plugin() {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 featurePrefs = preferences
                 featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-                    if (ElevateFeature.entries.any { it.name == key }) {
+                    if (ElevateFeature.entries.any { it.name == key } ||
+                        key == ElevateFeaturePrefs.METADATA_SWAP_PROVIDER ||
+                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL) {
                         main.post {
                             if (generation.get() == token) {
                                 try {
                                     syncFeatures()
+                                    if (key == ElevateFeaturePrefs.METADATA_SWAP_PROVIDER ||
+                                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL)
+                                        metadataSwap?.refresh()
                                 } catch (failure: Exception) {
                                     android.util.Log.e("Elevate", "Feature update failed", failure)
                                 }
@@ -343,6 +349,14 @@ class ElevatePlugin : Plugin() {
         } else {
             actorHook?.stop()
             actorHook = null
+        }
+        if (enabled(ElevateFeature.METADATA_SWAP)) {
+            if (metadataSwap == null) {
+                metadataSwap = ElevateMetadataSwap(application).also { it.start() }
+            }
+        } else {
+            metadataSwap?.stop()
+            metadataSwap = null
         }
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
@@ -582,6 +596,8 @@ class ElevatePlugin : Plugin() {
         recommendationPosters = null
         actorHook?.stop()
         actorHook = null
+        metadataSwap?.stop()
+        metadataSwap = null
         libraryPosters?.stop()
         libraryPosters = null
         thumbnailRatios?.stop()

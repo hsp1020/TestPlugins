@@ -372,10 +372,12 @@ open class StremioC(
             setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
         } else emptySet()
 
-    private fun libraryMetadataBase(): String? = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("history_sync_url", null)
-        ?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
+    private fun libraryMetadataBase(): String? = CloudStreamApp.context?.let { context ->
+        context.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+            .getString("METADATA_SWAP_ADDON_URL", null)?.takeIf(String::isNotBlank)
+            ?: context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                .getString("history_sync_url", null)
+    }?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
 
     private fun libraryItemId(url: String, host: String, vararg sections: String): String? =
         runCatching {
@@ -1128,7 +1130,9 @@ open class StremioC(
                 }
                 val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyList())
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                val syncUrl = prefs.getString("history_sync_url", "") ?: ""
+                val syncUrl = context.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+                    .getString("METADATA_SWAP_ADDON_URL", null)?.takeIf(String::isNotBlank)
+                    ?: prefs.getString("history_sync_url", "").orEmpty()
                 val json = prefs.getString("stremio_saved_links", null)
                 val map = mutableMapOf<String, Boolean>()
                 val progressMap = mutableMapOf<String, Boolean>()

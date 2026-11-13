@@ -104,7 +104,6 @@ object SettingsRepository {
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
-    const val PREF_KEY_METADATA_ADDON_URL = "history_sync_url"
     const val PREF_KEY_STREAM_SUBTITLE_URLS = "stream_subtitle_addon_urls"
     const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
 
@@ -295,7 +294,7 @@ class SettingsBottomFragment(
         } catch (t: Throwable) {}
     }
 
-    private enum class SettingsPage { HUB, METADATA, BACKUP }
+    private enum class SettingsPage { HUB, BACKUP }
     private var backHandler: (() -> Boolean)? = null
     private var refreshSummaries: (() -> Unit)? = null
     private var closing = false
@@ -388,10 +387,6 @@ class SettingsBottomFragment(
         field.backgroundTintList = null
         field.background = getCardBg()
         // Use identical heights and center the input text after applying the themed background.
-        if (field.id == getCachedResId("etMetadataAddonUrl", "id")) {
-            field.setPadding(dp(12), 0, dp(12), 0)
-            field.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        }
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
         field.textSize = 14f
@@ -1027,7 +1022,7 @@ class SettingsBottomFragment(
         if (getTag(key) == true) return
         val tv = isLayout(TV)
         if (!tv) return
-        val navigationRow = id in listOf("rowCatalogs", "rowSources", "rowMetadata",
+        val navigationRow = id in listOf("rowCatalogs", "rowSources",
             "rowBackup").map { getCachedResId(it, "id") }
         val attrs = hostContext.obtainStyledAttributes(intArrayOf(HostR.attr.focusBackground))
         val effect = attrs.getDrawable(0)
@@ -1158,15 +1153,13 @@ class SettingsBottomFragment(
         }
         if (view !is LinearLayout || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
-                "layoutMetadataAddonUrl",
-                "pageHub", "pageMetadata",
+                "pageHub",
                 "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
-                "rowSources", "rowMetadata", "rowBackup"),
+                "rowSources", "rowBackup"),
             NestedScrollView::class.java to listOf("settingsViewport"),
             TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack"),
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks"),
-            ImageButton::class.java to listOf("btnConfigureMetadataAddon", "btnDeleteMetadataAddon"),
-            EditText::class.java to listOf("etMetadataAddonUrl")
+
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1520,18 +1513,6 @@ class SettingsBottomFragment(
             if (url.isNotBlank()) sourceDraft.add(LinkItem(id = i.toLong(), name = name, link = url,
                 type = "StremioC", enabled = (entry as? JSONObject)?.optBoolean("enabled", true) ?: true))
         }
-        val layoutMetadataAddonUrl: View = try { view.findView("layoutMetadataAddonUrl") } catch (e: Throwable) { throw Exception("layoutMetadataAddonUrl View not found", e) }
-        val etMetadataAddonUrl: EditText = try { view.findView("etMetadataAddonUrl") } catch (e: Throwable) { throw Exception("etMetadataAddonUrl EditText not found", e) }
-
-        layoutMetadataAddonUrl.visibility = View.VISIBLE
-        etMetadataAddonUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_METADATA_ADDON_URL, ""))
-        val metadataGear = view.optional("btnConfigureMetadataAddon") as? ImageButton
-        view.optional("btnDeleteMetadataAddon")?.apply {
-            visibility = View.GONE; isFocusable = false; isClickable = false
-        }
-        if (metadataGear != null) bindAddonActions(settingsDialog, etMetadataAddonUrl, metadataGear, trash = null)
-
-
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
         }
@@ -1541,8 +1522,8 @@ class SettingsBottomFragment(
         var currentPage = SettingsPage.HUB
         val pageScroll = IntArray(SettingsPage.entries.size)
         val pageFocus = arrayOfNulls<View>(SettingsPage.entries.size)
-        val pages = listOf("pageHub", "pageMetadata", "pageBackup").map { view.optional(it) }
-        val titles = listOf("Stremio Settings", "Metadata", "Backup")
+        val pages = listOf("pageHub", "pageBackup").map { view.optional(it) }
+        val titles = listOf("Stremio Settings", "Backup")
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
             val catalogCount = catalogLinks().count { it.link.isNotBlank() }
@@ -1551,7 +1532,7 @@ class SettingsBottomFragment(
             val count = sourceDraft.count { it.link.isNotBlank() }
             (view.optional("summarySources") as? TextView)?.text =
                 if (count == 0) "No URL entries" else if (count == 1) "1 URL entry" else "$count URL entries"
-            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowBackup").forEach { id ->
+            listOf("rowCatalogs", "rowSources", "rowBackup").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
                     fun labels(node: View) {
@@ -1579,11 +1560,9 @@ class SettingsBottomFragment(
             currentPage = next
             pages.forEachIndexed { i, page -> page?.visibility = if (i == next.ordinal) View.VISIBLE else View.GONE }
             settingsToggle.text = titles[next.ordinal]
-            settingsToggle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
-                if (next == SettingsPage.METADATA) 18f else 16f)
-            val metadataPage = next == SettingsPage.METADATA
-            settingsHeader.minimumHeight = if (metadataPage) 0 else dp(48)
-            settingsToggle.minimumHeight = if (metadataPage) 0 else dp(48)
+            settingsToggle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16f)
+            settingsHeader.minimumHeight = dp(48)
+            settingsToggle.minimumHeight = dp(48)
             back?.text = "Close"
             view.optional("saveAction")?.visibility = if (next == SettingsPage.BACKUP) View.GONE else View.VISIBLE
             updateSummaries()
@@ -1602,8 +1581,7 @@ class SettingsBottomFragment(
             view.findView<View>("rowSources").setOnClickListener {
                 showAddonListDialog(sourceDraft, onDraftChanged = { refreshSummaries?.invoke() })
             }
-            listOf("rowMetadata" to SettingsPage.METADATA,
-                "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
+            listOf("rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
                 view.findView<View>(id).setOnClickListener { showPage(page) }
             }
             view.findView<View>("saveAction").setOnClickListener { saveIcon.performClick() }
@@ -1637,7 +1615,6 @@ class SettingsBottomFragment(
                         .put("enabled", addon.enabled))
                 }
             }.toString())
-            editor.putString(SettingsRepository.PREF_KEY_METADATA_ADDON_URL, etMetadataAddonUrl.text.toString().trim())
             editor.remove("custom_poster_url").remove("custom_poster_enabled")
 
             editor.commit()

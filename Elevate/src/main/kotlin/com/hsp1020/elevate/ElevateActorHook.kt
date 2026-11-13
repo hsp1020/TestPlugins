@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
@@ -136,8 +137,13 @@ internal class ElevateActorHook(
         val apiKey = ElevateIdResolver.tmdbApiKey()
         if (id == null || apiKey == null) return null
         return try {
-            val json = ElevateTmdbMetadata.credits(id, movie, getCurrentLocale(appContext))
-                ?: return null
+            val locale = getCurrentLocale(appContext)
+            val settings = appContext.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+            val shareDetails = settings.getBoolean(ElevateFeature.METADATA_SWAP.name, false) &&
+                settings.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB") == "TMDB"
+            val json = (if (shareDetails) ElevateTmdbMetadata.details(
+                id, movie, locale, includeCredits = true)?.optJSONObject("credits")
+                else ElevateTmdbMetadata.credits(id, movie, locale)) ?: return null
             val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
             val crew = json.optJSONArray("crew")
             if (crew != null) for (i in 0 until crew.length()) {

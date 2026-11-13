@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SwitchCompat
 import android.widget.Spinner
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.content.ComponentName
 import com.lagradost.cloudstream3.R
@@ -52,6 +53,8 @@ internal enum class ElevateFeature(
         "View and edit season-specific watch status, episode progress and ratings on MAL, AniList, Kitsu and Simkl."),
     WATCH_PROGRESS_SYNC("Home & Library", "Watch Progress Sync",
         "Report playback progress and watched history to the configured AIOMetadata addon."),
+    METADATA_SWAP("Home & Library", "Metadata Swap",
+        "Swap displayed detail metadata from TMDB or an AIOMetadata addon without changing playback and sync data."),
     MDB_RATINGS("Home & Library", "MDB Ratings",
         "Show MDBList ratings before the plot on every provider's detail page."),
     EXTERNAL_DOWNLOADS("Home & Library", "External Downloads",
@@ -98,6 +101,8 @@ internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
     // Preserve the old addon URL but intentionally reset the renamed feature toggle.
     const val WATCH_PROGRESS_ADDON_URL = "HISTORY_SYNC_URL"
+    const val METADATA_SWAP_PROVIDER = "METADATA_SWAP_PROVIDER"
+    const val METADATA_SWAP_ADDON_URL = "METADATA_SWAP_ADDON_URL"
     fun defaultEnabled(@Suppress("UNUSED_PARAMETER") feature: ElevateFeature): Boolean = false
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -291,6 +296,54 @@ class ElevateSettingsFragment : DialogFragment() {
                         ))
                     }
                 } else null
+                val metadataControls = if (feature == ElevateFeature.METADATA_SWAP) {
+                    LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(8), 0, 0, dp(12))
+                        if (!preferences.contains(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL)) {
+                            val oldUrl = ctx.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                                .getString("history_sync_url", "").orEmpty().trim()
+                            if (oldUrl.isNotEmpty()) preferences.edit()
+                                .putString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, oldUrl).apply()
+                        }
+                        val addonInput = EditText(ctx).apply {
+                            hint = "AIOMetadata manifest.json URL"
+                            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                                android.text.InputType.TYPE_TEXT_VARIATION_URI
+                            isSingleLine = true
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            applyElevateNativeFont()
+                            setText(preferences.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty())
+                            addTextChangedListener(object : TextWatcher {
+                                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                                    preferences.edit().putString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL,
+                                        s.toString().trim()).apply()
+                                }
+                                override fun afterTextChanged(s: Editable?) = Unit
+                            })
+                        }
+                        addView(Spinner(ctx).apply {
+                            useElevateSettingsDropdown(ctx, listOf("TMDB", "Aiometadata Addon"))
+                            val selected = preferences.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB")
+                            setSelection(if (selected == "AIO") 1 else 0)
+                            addonInput.visibility = if (selected == "AIO") View.VISIBLE else View.GONE
+                            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                                override fun onItemSelected(parent: AdapterView<*>?, view: View?,
+                                    position: Int, id: Long) {
+                                    val provider = if (position == 1) "AIO" else "TMDB"
+                                    addonInput.visibility = if (position == 1) View.VISIBLE else View.GONE
+                                    if (preferences.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB") != provider)
+                                        preferences.edit().putString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, provider).apply()
+                                }
+                            }
+                        }, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                        addView(addonInput, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    }
+                } else null
                 val mdbControls = if (feature == ElevateFeature.MDB_RATINGS) {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
@@ -410,6 +463,7 @@ class ElevateSettingsFragment : DialogFragment() {
                     externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     progressControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     mdbControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+                    metadataControls?.visibility = if (isChecked) View.VISIBLE else View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
                         if (feature == ElevateFeature.HERO_CAROUSEL) updatePhoneHeroAvailability()
@@ -423,12 +477,14 @@ class ElevateSettingsFragment : DialogFragment() {
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         mdbControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
+                        metadataControls?.visibility = if (checked) View.VISIBLE else View.GONE
                     }
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
                 progressControls?.let { content.addView(it) }
                 mdbControls?.let { content.addView(it) }
+                metadataControls?.let { content.addView(it) }
                 externalControls?.let { content.addView(it) }
                 skipControls?.let { content.addView(it) }
                 posterControls?.let { container ->
