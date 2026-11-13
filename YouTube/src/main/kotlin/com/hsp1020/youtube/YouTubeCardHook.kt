@@ -1444,9 +1444,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     val previous = YoutubeProvider.channelSortMode(pageUrl)
                     if (next != previous && !channelLoading) {
                         val loaded = activeChannelResponse(model)
-                        if (loaded == null) {
-                            Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=native_response_missing")
-                        } else {
+                        if (loaded != null) {
                             val beforeVideos = loaded.episodes.count { it.season == 1 }
                             channelLoading = true
                             owner.viewLifecycleOwner.lifecycleScope.launch {
@@ -1462,12 +1460,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                     }
                                     val afterVideos = response?.episodes?.count { it.season == 1 } ?: 0
                                     if (response == null || afterVideos < minOf(beforeVideos, 30)) {
-                                        Log.w("YouTubeChannel", "event=CHANNEL_SORT_FAILED mode=$next " +
-                                            "reason=missing_videos afterVideos=$afterVideos beforeVideos=$beforeVideos")
                                         YoutubeProvider.setChannelSortMode(pageUrl, previous)
                                     } else if (screens[owner] !== this@Screen || !owner.isAdded ||
                                         owner.view !== root) {
-                                        Log.w("YouTubeChannel", "event=CHANNEL_SORT_SKIPPED reason=screen_changed")
                                         YoutubeProvider.setChannelSortMode(pageUrl, previous)
                                     } else {
                                         if (deliverChannelEpisodes(model, provider, response, "sort")) {
@@ -1478,8 +1473,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                     }
                                 } catch (error: Exception) {
                                     YoutubeProvider.setChannelSortMode(pageUrl, previous)
-                                    Log.w("YouTubeChannel", "event=CHANNEL_SORT_FAILED mode=$next " +
-                                        "reason=${error.javaClass.simpleName}", error)
                                 } finally {
                                     channelLoading = false
                                     root.post {
@@ -1561,8 +1554,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }
                 }
             } catch (error: Throwable) {
-                Log.w("YouTubeChannel", "event=CHANNEL_UI_REBUILD_FAILED " +
-                    "reason=${error.javaClass.simpleName}", error)
                 false
             }
         }
@@ -1576,8 +1567,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val owner = fragment ?: return false
             val cached = activeChannelResponse(model)
             if (cached == null) {
-                Log.w("YouTubeChannel", "event=CHANNEL_UI_UPDATE_FAILED reason=$reason " +
-                    "cause=native_cached_response_missing episodes=${response.episodes.size}")
                 return false
             }
             cached.episodes = response.episodes
@@ -1589,7 +1578,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val separator = if (pageUrl.contains("?")) "&" else "?"
             val refreshUrl = "$pageUrl${separator}cs_youtube_refresh=${System.nanoTime()}"
             provider.cacheChannelResponse(refreshUrl, response)
-            Log.w("YouTubeChannel", "event=CHANNEL_UI_REBUILD_FALLBACK reason=$reason")
             model.load(owner.activity, refreshUrl, "YouTube", false,
                 DubStatus.None, null, loadTrailers = false)
             return true
@@ -1623,15 +1611,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         provider.loadChannelPages(pageUrl, nextPages, tab)
                     }
                     if (response == null) {
-                        Log.w("YouTubeChannel", "event=CHANNEL_UI_EXPAND_SKIPPED reason=null_response")
                         return@launch
                     }
                     if (screens[owner] !== this@Screen || !owner.isAdded ||
                         owner.view !== root ||
                         requestedMode != YoutubeProvider.channelSortMode(pageUrl)) {
-                        Log.w("YouTubeChannel", "event=CHANNEL_UI_EXPAND_SKIPPED " +
-                            "reason=screen_or_sort_changed active=${screens[owner] === this@Screen} " +
-                            "added=${owner.isAdded} sameView=${owner.view === root}")
                         return@launch
                     }
                     deliverChannelEpisodes(model, provider, response, "expand")

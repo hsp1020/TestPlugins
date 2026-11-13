@@ -3647,8 +3647,6 @@ class YoutubeProvider(
                 val maxPagesLimit = channelPageLimit()
                 val pageTarget = channelTargetPages.coerceIn(1, maxPagesLimit.coerceAtLeast(1))
                 val headerKey = "${normalizedChannelUrl(cleanUrl)}|$lang"
-                val channelTraceId = System.nanoTime()
-                var cacheMissReason = "not_expansion"
                 // Expansion reuses metadata only when both tab caches are still valid
                 // for the current channel, language, and sort order.
                 val cachedHeader = if (channelExpansionTab == "videos" || channelExpansionTab == "shorts") {
@@ -3656,47 +3654,24 @@ class YoutubeProvider(
                     val tabsValid = synchronized(channelTabCache) {
                         listOf("videos", "shorts").all { tab ->
                             val cached = channelTabCache[channelCacheKey(cleanUrl, tab, lang, maxPagesLimit)]
-                            val valid = cached != null && cached.episodes.isNotEmpty() &&
+                            cached != null && cached.episodes.isNotEmpty() &&
                                 (now - cached.savedAtMs) in 0L..(
                                     if (cached.nextToken.isNullOrBlank()) CHANNEL_TAB_REUSE_MS
                                     else CHANNEL_HEADER_REUSE_MS
                                 )
-                            if (!valid) cacheMissReason = when {
-                                cached == null -> "tab_${tab}_missing"
-                                cached.episodes.isEmpty() -> "tab_${tab}_empty"
-                                else -> "tab_${tab}_expired"
-                            }
-                            valid
                         }
                     }
                     if (tabsValid) synchronized(channelHeaderCache) {
-                        val header = channelHeaderCache[headerKey]
-                        val valid = header?.takeIf {
+                        channelHeaderCache[headerKey]?.takeIf {
                             !it.apiKey.isNullOrBlank() &&
                                 (now - it.savedAtMs) in 0L..CHANNEL_HEADER_REUSE_MS
                         }
-                        if (valid == null) cacheMissReason = when {
-                            header == null -> "header_missing"
-                            header.apiKey.isNullOrBlank() -> "header_api_key_missing"
-                            else -> "header_expired"
-                        }
-                        valid
                     } else null
                 } else null
 
-                Log.i("YouTubeChannel",
-                    "event=${if (cachedHeader == null) "HEADER_CACHE_MISS" else "HEADER_CACHE_HIT"} " +
-                        "req=$channelTraceId channel=$headerKey expansion=${channelExpansionTab ?: "none"} " +
-                        "reason=${if (cachedHeader == null) cacheMissReason else "valid"}")
                 val response = if (cachedHeader == null) withContext(Dispatchers.IO) {
-                    Log.i("YouTubeChannel",
-                        "event=CHANNEL_HTTP_GET req=$channelTraceId path=/videos stage=header reason=$cacheMissReason")
                     app.get(channelUrl, interceptor = ytInterceptor)
-                } else {
-                    Log.i("YouTubeChannel",
-                        "event=CHANNEL_HTTP_SKIP req=$channelTraceId path=/videos stage=header reason=header_cache_hit")
-                    null
-                }
+                } else null
                 val html = response?.text.orEmpty()
                 val data = if (response != null) {
                     extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
@@ -3831,18 +3806,9 @@ class YoutubeProvider(
                     try {
                         if (snapshot == null) {
                         // The channel header already fetched and parsed /videos.
-                        var tabData = if (tabUrl == channelUrl && data != null) {
-                            Log.i("YouTubeChannel",
-                                "event=CHANNEL_HTTP_SKIP req=$channelTraceId path=/videos stage=tab_initial reason=header_data_reuse")
-                            data
-                        } else {
-                            Log.i("YouTubeChannel",
-                                "event=CHANNEL_HTTP_GET req=$channelTraceId path=/$tabName stage=tab_initial reason=tab_cache_missing")
+                        var tabData = if (tabUrl == channelUrl && data != null) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
-                            extractYtInitialData(tabHtml) ?: run {
-                                Log.w("YouTubeChannel", "event=CHANNEL_ERROR tab=$tabName page=1 reason=initial_data_missing")
-                                return emptyList()
-                            }
+                            extractYtInitialData(tabHtml) ?: return emptyList()
                         }
 
                         var initialItems: List<*>? = null
@@ -3906,8 +3872,6 @@ class YoutubeProvider(
                         // Some channel header responses contain metadata but an empty tab grid.
                         // Retry /videos only in that case; normally the existing HTML is reused.
                         if (initialItems.isNullOrEmpty() && tabUrl == channelUrl) {
-                            Log.i("YouTubeChannel",
-                                "event=CHANNEL_HTTP_GET req=$channelTraceId path=/videos stage=empty_grid_retry reason=initial_items_empty")
                             val refreshedData = extractYtInitialData(
                                 app.get(tabUrl, interceptor = ytInterceptor).text
                             )
@@ -4007,44 +3971,30 @@ class YoutubeProvider(
                                 val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                                 if (jsonResponse == null) {
                                     cacheable = false
-                                    Log.w("YouTubeChannel",
-                                        "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=response_invalid")
                                     break
                                 }
                                 val javaContinuationItems = findContinuationItemsRecursive(jsonResponse)
                                 if (javaContinuationItems == null) {
                                     cacheable = false
-                                    Log.w("YouTubeChannel",
-                                        "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=continuation_items_missing")
                                     break
                                 }
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                             } catch (e: Exception) {
                                 cacheable = false
-                                Log.w("YouTubeChannel",
-                                    "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName}")
                                 break
                             }
                         }
                         if (tabEpisodes.isEmpty() && currentToken.isNullOrBlank()) {
                             cacheable = false
-                            Log.w("YouTubeChannel",
-                                "event=CHANNEL_ERROR tab=$tabName page=1 reason=empty_initial_no_token " +
-                                    "cached=${snapshot != null} fetchedPages=$pagesFetchedLocal")
                         }
                         if (!currentToken.isNullOrBlank() && apiKey.isNullOrBlank()) {
                             cacheable = false
-                            Log.w("YouTubeChannel",
-                                "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=api_key_missing")
                         } else if (!currentToken.isNullOrBlank() && pagesFetchedLocal < tabPageTarget) {
                             cacheable = false
                         }
                     } catch (e: Exception) {
                         cacheable = false
-                        Log.w("YouTubeChannel",
-                            "event=CHANNEL_ERROR tab=$tabName page=$pagesFetchedLocal reason=${e.javaClass.simpleName} " +
-                            "message=${e.message?.take(120)}")
                         logError(e)
                     }
                     if (cacheable && tabEpisodes.isNotEmpty()) {
@@ -4070,8 +4020,6 @@ class YoutubeProvider(
                         videosTitle, shortsTitle, apiKey, clientVersion, visitorData,
                         System.currentTimeMillis()
                     )
-                    Log.i("YouTubeChannel",
-                        "event=HEADER_CACHE_STORE req=$channelTraceId channel=$headerKey api_key_present=${!apiKey.isNullOrBlank()}")
                 }
 
                 val videosEpisodes = pair.first
