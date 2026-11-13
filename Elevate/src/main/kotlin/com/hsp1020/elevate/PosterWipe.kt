@@ -91,17 +91,16 @@ internal object PosterWipe {
         OkHttpNetworkFetcherFactory(OkHttpClient.Builder().dispatcher(dispatcher).build())
     }
 
-    // Opt-in diagnostics: adb shell setprop log.tag.ElevateCoilTrace DEBUG
+    // INFO events are included in CloudStream's saved Logcat without ADB configuration.
     private fun traceImage(
         phase: String, url: String, size: Size, scale: Scale,
         result: ImageResult? = null
     ) {
-        if (!android.util.Log.isLoggable("ElevateCoilTrace", android.util.Log.DEBUG)) return
-        val success = result as? SuccessResult
+         val success = result as? SuccessResult
         val source = success?.dataSource?.toString()
             ?: if (result is ErrorResult) "ERROR" else "-"
         val dimensions = success?.image?.let { "${it.width}x${it.height}" } ?: "-"
-        android.util.Log.d("ElevateCoilTrace", "phase=$phase urlHash=${url.hashCode().toUInt().toString(16)} " +
+        android.util.Log.i("ElevateCoilTrace", "phase=$phase urlHash=${url.hashCode().toUInt().toString(16)} " +
             "requested=$size scale=$scale source=$source decoded=$dimensions")
     }
 

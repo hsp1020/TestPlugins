@@ -1187,8 +1187,8 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
-        // Opt-in diagnostics; never logs raw payload, title, URL or account IDs.
-        // Enable via: adb shell setprop log.tag.StremioSPTrace DEBUG
+        // Diagnostic events are INFO so CloudStream's saved Logcat includes them.
+        // No raw payload, title, URL or account IDs are logged.
         private data class StreamPlayTraceKey(
             val provider: MainAPI, val payload: String, val casting: Boolean
         )
@@ -1200,9 +1200,6 @@ open class StremioC(
             subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
         ): Boolean {
             val tag = "StremioSPTrace"
-            if (!android.util.Log.isLoggable(tag, android.util.Log.DEBUG))
-                return provider.loadLinks(payload, casting, subtitleCallback, callback)
-
             val key = StreamPlayTraceKey(provider, payload, casting)
             val (id, overlapping) = synchronized(streamPlayTraceActive) {
                 val active = streamPlayTraceActive[key] ?: 0
@@ -1213,7 +1210,7 @@ open class StremioC(
             val started = SystemClock.elapsedRealtime()
             val links = java.util.concurrent.atomic.AtomicInteger()
             var result = "exception"
-            android.util.Log.d(tag, "BEGIN id=$id route=$route provider=${provider.javaClass.simpleName} " +
+            android.util.Log.i(tag, "BEGIN id=$id route=$route provider=${provider.javaClass.simpleName} " +
                 "request=$fingerprint casting=$casting identicalActiveBefore=$overlapping")
             try {
                 val ok = provider.loadLinks(payload, casting, subtitleCallback, { link ->
@@ -1231,7 +1228,7 @@ open class StremioC(
                     if (remaining == 0) streamPlayTraceActive.remove(key)
                     else streamPlayTraceActive[key] = remaining
                 }
-                android.util.Log.d(tag, "END id=$id route=$route request=$fingerprint " +
+                android.util.Log.i(tag, "END id=$id route=$route request=$fingerprint " +
                     "elapsedMs=${SystemClock.elapsedRealtime() - started} links=${links.get()} result=$result")
             }
         }

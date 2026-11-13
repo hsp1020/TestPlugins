@@ -50,6 +50,21 @@ internal object ElevateJavaAllocationProfile {
         }
     }
 
+    /** The live device's process memory, independent of sampled allocations. */
+    private fun logHeap(phase: String, tag: String?) {
+        try {
+            val runtime = Runtime.getRuntime()
+            val info = android.os.Debug.MemoryInfo()
+            android.os.Debug.getMemoryInfo(info)
+            Log.i(TAG, "HEAP phase=$phase tag=$tag javaUsedKiB=" +
+                (runtime.totalMemory() - runtime.freeMemory()) / 1024L +
+                " nativeAllocatedKiB=" + android.os.Debug.getNativeHeapAllocatedSize() / 1024L +
+                " totalPssKiB=" + info.totalPss)
+        } catch (error: Exception) {
+            Log.w(TAG, "HEAP_UNAVAILABLE phase=$phase reason=" + error.javaClass.simpleName)
+        }
+    }
+
     fun start(context: Context): String {
         if (Build.VERSION.SDK_INT < 35) return "Requires Android 15 or newer"
         initialize(context)
@@ -75,6 +90,7 @@ internal object ElevateJavaAllocationProfile {
                 awaitingResult = true
                 state = "Recording requested (max 45 s). Reproduce, then Stop."
                 Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=45000")
+                logHeap("PROFILE_START", tag)
                 state
             } catch (error: Exception) {
                 state = "Request failed: " + error.javaClass.simpleName
@@ -92,6 +108,7 @@ internal object ElevateJavaAllocationProfile {
             current
         } ?: return statusText()
         return try {
+            logHeap("PROFILE_STOP", synchronized(lock) { requestTag })
             signal.cancel()
             synchronized(lock) { state }
         } catch (error: Exception) {
@@ -149,6 +166,7 @@ internal object ElevateJavaAllocationProfile {
             state = message
         }
         Log.i(TAG, "RESULT tag=" + tag + " " + message)
+        logHeap("PROFILE_RESULT", tag)
     }
 
     fun shutdown() {

@@ -14,9 +14,9 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import java.lang.ref.WeakReference
 
 /**
- * Opt-in player identity/lifecycle probe; never changes player or buffer settings.
+ * Player identity/lifecycle and heap snapshots; never changes player or buffer settings.
+ * INFO events appear in CloudStream's saved Logcat without ADB configuration.
  * Correlate VIEW_DESTROY with CloudStream's CS3ExoPlayer releasePlayer log.
- * Enable before reloading Elevate: adb shell setprop log.tag.ElevateMedia3Trace DEBUG
  */
 internal class ElevatePlaybackTrace(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -32,6 +32,27 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         var mediaHash: Int? = null
     }
     private val watched = LinkedHashMap<GeneratorPlayer, Snapshot>()
+    private var probeScheduled = false
+
+    private fun snapshotHeap(fragmentId: Int, phase: String) {
+        try {
+            val runtime = Runtime.getRuntime()
+            val memory = android.os.Debug.MemoryInfo()
+            android.os.Debug.getMemoryInfo(memory)
+            val usedKiB = (runtime.totalMemory() - runtime.freeMemory()) / 1024L
+            val nativeKiB = android.os.Debug.getNativeHeapAllocatedSize() / 1024L
+            Log.i(TAG, "HEAP fragment=$fragmentId phase=$phase " +
+                "javaUsedKiB=$usedKiB nativeAllocatedKiB=$nativeKiB totalPssKiB=${memory.totalPss}")
+        } catch (error: Exception) {
+            Log.i(TAG, "HEAP_UNAVAILABLE phase=$phase reason=${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun scheduleProbe() {
+        if (!running || watched.isEmpty() || probeScheduled) return
+        probeScheduled = true
+        main.post(probe)
+    }
 
     private fun observe(fragment: GeneratorPlayer, phase: String) {
         val entry = watched[fragment] ?: return
@@ -42,23 +63,26 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             entry.player = player?.let { WeakReference(it) }
             entry.playbackState = -1
             entry.mediaHash = null
-            Log.d(TAG, "PLAYER_BIND fragment=${System.identityHashCode(fragment)} phase=$phase " +
+            Log.i(TAG, "PLAYER_BIND fragment=${System.identityHashCode(fragment)} phase=$phase " +
                 "previous=$previous current=${entry.playerId}")
+            if (player != null) snapshotHeap(System.identityHashCode(fragment), "PLAYER_BIND")
         }
         val state = player?.playbackState ?: -1
         val media = player?.currentMediaItem?.mediaId?.hashCode()
         if (state != entry.playbackState || media != entry.mediaHash) {
             entry.playbackState = state
             entry.mediaHash = media
-            Log.d(TAG, "PLAYER_STATE fragment=${System.identityHashCode(fragment)} " +
+            Log.i(TAG, "PLAYER_STATE fragment=${System.identityHashCode(fragment)} " +
                 "player=${entry.playerId} state=$state mediaHash=$media phase=$phase")
         }
     }
 
     private val probe = object : Runnable {
         override fun run() {
-            if (!running) return
+            probeScheduled = false
+            if (!running || watched.isEmpty()) return
             watched.keys.toList().forEach { observe(it, "POLL") }
+            probeScheduled = true
             main.postDelayed(this, 750L)
         }
     }
@@ -69,6 +93,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         ) {
             if (fragment is GeneratorPlayer) {
                 watched.putIfAbsent(fragment, Snapshot())
+                scheduleProbe()
                 view.post { if (fragment.view === view) observe(fragment, "VIEW_CREATED") }
             }
         }
@@ -76,6 +101,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             if (fragment is GeneratorPlayer) {
                 watched.putIfAbsent(fragment, Snapshot())
                 observe(fragment, "RESUME")
+                scheduleProbe()
             }
         }
         override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
@@ -84,9 +110,18 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
             if (fragment is GeneratorPlayer) {
                 observe(fragment, "VIEW_DESTROY")
-                Log.d(TAG, "VIEW_DESTROY fragment=${System.identityHashCode(fragment)} " +
+                Log.i(TAG, "VIEW_DESTROY fragment=${System.identityHashCode(fragment)} " +
                     "lastPlayer=${watched[fragment]?.playerId} (release not proven)")
+                val fragmentId = System.identityHashCode(fragment)
+                snapshotHeap(fragmentId, "VIEW_DESTROY")
+                main.postDelayed({
+                    if (running) snapshotHeap(fragmentId, "AFTER_EXIT_5S")
+                }, 5_000L)
                 watched.remove(fragment)
+                if (watched.isEmpty()) {
+                    main.removeCallbacks(probe)
+                    probeScheduled = false
+                }
             }
         }
     }
@@ -106,19 +141,20 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             }
         }
         scan(activity.supportFragmentManager)
+        scheduleProbe()
     }
 
     fun start() {
-        if (!Log.isLoggable(TAG, Log.DEBUG)) return
         running = true
         application.registerActivityLifecycleCallbacks(this)
         PipLibraryNavigation.currentPlayerHost()?.let(::use)
-        main.post(probe)
+        scheduleProbe()
     }
     fun stop() {
         if (!running) return
         running = false
         main.removeCallbacks(probe)
+        probeScheduled = false
         application.unregisterActivityLifecycleCallbacks(this)
         unbind()
     }
@@ -126,6 +162,8 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         host = null
         watched.clear()
+        main.removeCallbacks(probe)
+        probeScheduled = false
     }
     override fun onActivityStarted(activity: Activity) {
         PipLibraryNavigation.playerHost(activity)?.let(::use)
