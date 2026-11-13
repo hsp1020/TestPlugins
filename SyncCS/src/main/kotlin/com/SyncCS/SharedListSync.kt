@@ -10,6 +10,17 @@ import org.json.JSONObject
 internal object SharedListSync {
     private data class ListValue(val kind: String, val items: List<String>)
 
+    // Compare the last path segment without allocating a substring per setting.
+    private fun stringCollectionKind(key: String): String? = when {
+        key == "seen_providers" || key.endsWith("/seen_providers") ||
+            key == "provider_order" || key.endsWith("/provider_order") -> "csv"
+        key == "stremio_addons" || key.endsWith("/stremio_addons") -> "lines"
+        key == "user_pinned_providers" || key.endsWith("/user_pinned_providers") ||
+            key == "search_pref_providers" || key.endsWith("/search_pref_providers") ||
+            key == "search_pref_tags" || key.endsWith("/search_pref_tags") -> "json"
+        else -> null
+    }
+
     private fun parse(key: String, raw: String): ListValue? {
         val wrapper = JSONObject(raw)
         when (wrapper.optString("type")) {
@@ -18,16 +29,16 @@ internal object SharedListSync {
                 return ListValue("set", (0 until array.length()).map { array.getString(it) })
             }
             "string" -> {
-                val name = key.substringAfterLast('/')
+                val kind = stringCollectionKind(key) ?: return null
                 val value = wrapper.getString("value")
-                return when (name) {
-                    "seen_providers", "provider_order" -> ListValue(
+                return when (kind) {
+                    "csv" -> ListValue(
                         "csv", value.split(',').map { it.trim() }.filter(String::isNotEmpty)
                     )
-                    "stremio_addons" -> ListValue(
+                    "lines" -> ListValue(
                         "lines", value.lines().map { it.trim() }.filter(String::isNotEmpty)
                     )
-                    "user_pinned_providers", "search_pref_providers", "search_pref_tags" -> {
+                    "json" -> {
                         val array = JSONArray(value)
                         ListValue("json", (0 until array.length()).map { array.getString(it) })
                     }
@@ -68,6 +79,16 @@ internal object SharedListSync {
         }
     }
 
-    fun isCollection(key: String, raw: String): Boolean =
-        runCatching { parse(key, raw) != null }.getOrDefault(false)
+    fun isCollection(key: String, raw: String): Boolean {
+        // A collection requires type "set" on any key, or type "string" on
+        // one of the recognized list keys. Escaped JSON can encode those
+        // types via unicode escapes; keep the old parser for all such inputs.
+        // This conservative rejection avoids JSONObject/JSONTokener for ordinary
+        // settings, even during a full 30k-key audit.
+        if ('\\' !in raw && !raw.contains("\"set\"") &&
+            (stringCollectionKind(key) == null || !raw.contains("\"string\""))) {
+            return false
+        }
+        return runCatching { parse(key, raw) != null }.getOrDefault(false)
+    }
 }

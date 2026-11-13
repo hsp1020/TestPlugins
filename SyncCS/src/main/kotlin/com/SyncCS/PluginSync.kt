@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /**
  * Add-on inventory reconciliation. Each manifest includes persistent tombstones.
- * Older v338 array manifests are accepted and upgraded on first write.
+ * Only the current object manifest format is supported; no legacy upgrade.
  * Online identity is name+repository (not release URL); local identity is name+filename.
  */
 internal object PluginSync {
@@ -32,9 +32,7 @@ internal object PluginSync {
     fun decode(raw: String?): State {
         val result = State()
         if (raw.isNullOrBlank()) return result
-        val root = if (raw.trimStart().startsWith("[")) {
-            JSONObject().put("items", JSONArray(raw))
-        } else JSONObject(raw)
+        val root = JSONObject(raw)
         val array = root.optJSONArray("items") ?: JSONArray()
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
@@ -129,7 +127,7 @@ internal object PluginSync {
                 }
                 previous == null && !initialized && remoteRaw == null &&
                     id !in remote.deleted -> {
-                    // One-time migration only when the server has no inventory at all.
+                    // Initial inventory bootstrap when the server has no manifest.
                     // A remotely stored empty manifest is an intentional empty set.
                     output.items.putIfAbsent(id, item)
                 }

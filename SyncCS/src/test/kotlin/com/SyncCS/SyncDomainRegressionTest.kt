@@ -13,6 +13,102 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class SyncDomainRegressionTest {
+
+    @Test fun collectionPrefilterMatchesExistingParserForAllTypesAndEscapes() {
+        // The existing parser is the behavioral oracle; only its allocation-heavy
+        // isCollection() caller changes. No list classification may regress.
+        val original = SharedListSync::class.java.getDeclaredMethod(
+            "parse", String::class.java, String::class.java)
+        original.isAccessible = true
+        val keys = listOf(
+            "p/Plugin/theme", "d/0/video_pos_dur/1", "seen_providers",
+            "s/provider_order", "d/stremio_addons", "p/Plugin/user_pinned_providers",
+            "p/Plugin/search_pref_providers", "p/Plugin/search_pref_tags",
+            "p/Plugin/not_seen_providers", "x/y/provider_order_suffix"
+        )
+        val raws = listOf(
+            """{"type":"bool","value":true}""",
+            """{"type":"int","value":8}""",
+            """{"type":"long","value":77}""",
+            """{"type":"float","value":1.25}""",
+            """{"type":"string","value":"ordinary"}""",
+            """{"type":"string","value":"set"}""",
+            """{"type":"set","value":["ko","en"]}""",
+            """{"value":["en"],"type":"set"}""",
+            """{"type":"set","value":[]}""",
+            """{"type":"\u0073et","value":["ko"]}""",
+            """{"type":"\u0073tring","value":"ko,en"}""",
+            """{"type":"string","value":"ko, en"}""",
+            """{"type":"string","value":"first\nsecond"}""",
+            """{"type":"string","value":"[\"first\",\"second\"]"}""",
+            """{"type":"string","value":"[invalid"}""",
+            """{"type":"set","value":[null,3]}""",
+            """{"type":"set","value":null}""",
+            """{"type":"bool","type":"set","value":["ko"]}""",
+            """{"type":"set","type":"bool","value":["ko"]}""",
+            """{"type":"string","value":"escaped \"set\""}""",
+            """{"value":2,"other":"set","type":"int"}""",
+            """{"type":"unexpected","value":"hello"}""",
+            """{"type":null,"value":"hello"}""",
+            """{}""", """[]""", """null""", """""", """not-json"""
+        )
+        for (key in keys) for (raw in raws) {
+            val expected = runCatching {
+                original.invoke(SharedListSync, key, raw) != null
+            }.getOrDefault(false)
+            assertEquals("Collection classification changed for $key: $raw",
+                expected, SharedListSync.isCollection(key, raw))
+        }
+        assertTrue(SharedListSync.isCollection("p/Plugin/arbitrary_set",
+            """{"type":"set","value":["a"]}"""))
+        assertFalse(SharedListSync.isCollection("p/Plugin/arbitrary_scalar",
+            """{"type":"string","value":"a,b"}"""))
+    }
+
+    @Test fun collectionThreeWayMergeRetainsSetAndStringListSemantics() {
+        fun encoded(type: String, value: Any): String =
+            JSONObject().put("type", type).put("value", value).toString()
+        val baseSet = encoded("set", JSONArray(listOf("a", "b")))
+        val localSet = encoded("set", JSONArray(listOf("a", "c")))
+        val remoteSet = encoded("set", JSONArray(listOf("a", "b", "d")))
+        val mergedSet = SharedListSync.merge("p/Plugin/any_set",
+            baseSet, localSet, remoteSet)!!
+        val setItems = JSONObject(mergedSet).getJSONArray("value")
+        assertEquals(listOf("a", "d", "c"),
+            (0 until setItems.length()).map { setItems.getString(it) })
+
+        for ((key, base, local, remote, expected) in listOf(
+            listOf("seen_providers", "a,b", "a,c", "a,b,d", "a,d,c"),
+            listOf("provider_order", "a,b", "a,c", "a,b,d", "a,d,c"),
+            listOf("stremio_addons", "a\nb", "a\nc", "a\nb\nd", "a\nd\nc"),
+            listOf("user_pinned_providers", """["a","b"]""",
+                """["a","c"]""", """["a","b","d"]""", """["a","d","c"]"""),
+            listOf("search_pref_providers", """["a","b"]""",
+                """["a","c"]""", """["a","b","d"]""", """["a","d","c"]"""),
+            listOf("search_pref_tags", """["a","b"]""",
+                """["a","c"]""", """["a","b","d"]""", """["a","d","c"]""")
+        )) {
+            val result = SharedListSync.merge("p/Test/$key",
+                encoded("string", base), encoded("string", local),
+                encoded("string", remote))!!
+            assertEquals("Merged list differs for $key", expected,
+                JSONObject(result).getString("value"))
+        }
+        assertNull(SharedListSync.merge("p/Test/unrelated_setting",
+            encoded("string", "a,b"), encoded("string", "a,c"),
+            encoded("string", "a,d")))
+    }
+
+    @Test fun pluginInventoryDoesNotConvertLegacyArrayManifests() {
+        assertThrows(org.json.JSONException::class.java) {
+            PluginSync.decode("""[{"type":"online","name":"legacy"}]""")
+        }
+        val current = JSONObject().put("format", 2)
+            .put("items", JSONArray().put(plugin("Plugin", 2, "https://example.org/test.cs3")))
+            .put("deleted", JSONArray()).toString()
+        assertEquals(1, PluginSync.decode(current).items.size)
+    }
+
     @Test fun sqliteBaselineStartsFreshAndUpdatesOnlyChangedKeys() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val config = SyncConfiguration(context)
