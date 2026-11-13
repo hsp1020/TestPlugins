@@ -914,21 +914,30 @@ class SyncSettingsFragment : DialogFragment() {
                         val verifiedCipher = withContext(Dispatchers.IO) {
                             SyncCipher.derive(phrase, "https://api.github.com", profile.id)
                         }
-                        val existingBackup = withContext(Dispatchers.IO) {
+                        val (existingBackup, oldFormat) = withContext(Dispatchers.IO) {
                             GithubAuthFlow.retry("backup-verification") {
-                                GithubBackupStore(accessToken, profile.login).current(verifiedCipher)
+                                try {
+                                    GithubBackupStore(accessToken, profile.login)
+                                        .current(verifiedCipher) to false
+                                } catch (_: GithubBackupStore.OldFormat) {
+                                    null to true
+                                }
                             }
                         }
 
                         val createFirst = if (existingBackup == null) {
                             suspendCancellableCoroutine<Boolean> { continuation ->
                                 val approval = AlertDialog.Builder(host)
-                                    .setTitle("Create initial GitHub backup?")
-                                    .setMessage("No completed cloud backup exists. " +
+                                    .setTitle(if (oldFormat) "Replace legacy backup with v3?"
+                                        else "Create initial GitHub backup?")
+                                    .setMessage((if (oldFormat)
+                                        "An old SyncCS v2 backup exists. It will NOT be read " +
+                                        "or migrated. This creates a NEW v3 backup from this " +
+                                        "device in a new Git commit. "
+                                        else "No completed cloud backup exists. ") +
                                         "Only continue on the SOURCE device whose settings " +
-                                        "and watch history you want as the new master. " +
-                                        "Existing device data may contain old or corrupted settings. " +
-                                        "Do not create an initial backup from an untrusted device.")
+                                        "and watch history are the intended new master. " +
+                                        "Other devices must reconnect to the new backup.")
                                     .setPositiveButton("Use this device as source") { _, _ ->
                                         if (continuation.isActive) continuation.resume(true)
                                     }
@@ -965,7 +974,7 @@ class SyncSettingsFragment : DialogFragment() {
                                 .putString("device_name", name)
                                 .remove("account_switch_blocked")
                                 .remove("github_pending_token").remove("github_pending_client")
-                            if (previous == null) {
+                            if (previous == null || oldFormat) {
                                 edit.remove("base").remove("remote_cursor")
                                     .remove("remote_versions").remove("plugin_baseline")
                                     .remove("profile_baseline").remove("profile_remote_snapshot")
@@ -976,7 +985,8 @@ class SyncSettingsFragment : DialogFragment() {
                                 }
                             }
                             check(edit.commit()) { "Could not store GitHub session." }
-                            if (previous == null) SyncBaselineStore.reset(host.applicationContext)
+                            if (previous == null || oldFormat)
+                                SyncBaselineStore.reset(host.applicationContext)
 
                             SyncAuthGuard.clearAfterLogin(config)
                         }

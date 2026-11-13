@@ -477,14 +477,20 @@ internal object SyncCoordinator {
 
             val remoteByKey = pull.entries.associateBy { it.key }
             val versionsStarted = android.os.SystemClock.elapsedRealtime()
-            val priorBaseline = SyncBaselineStore.snapshot(context, startedUser)
-            val versions = (if (pull.full) emptyMap() else priorBaseline?.versions.orEmpty())
+            val observedKeys = if (pull.full || needsLocalAudit()) null else
+                (remoteValues.keys + config.preferences.all.keys.asSequence()
+                    .filter { it.startsWith("modified/") }
+                    .map { it.removePrefix("modified/") }.toSet() +
+                    setOf("x/plugins", "x/profiles")).toSet()
+            var priorBaseline = SyncBaselineStore.snapshot(context, startedUser, observedKeys)
+            var versions = (if (pull.full) emptyMap() else priorBaseline?.versions.orEmpty())
                 .toMutableMap()
             for (entry in pull.entries) versions[entry.key] = entry.version
-            val base = priorBaseline?.hashes.orEmpty()
+            var base = priorBaseline?.hashes.orEmpty()
             Log.i("SyncCSAlloc", "BASE_READ_SQLITE initialized=" + (priorBaseline != null) +
                 " keys=" + base.size + " versionKeys=" + versions.size +
-                " full=" + pull.full + " entries=" + pull.entries.size +
+                " full=" + pull.full + " selected=" + (observedKeys != null) +
+                " entries=" + pull.entries.size +
                 " ms=" + (android.os.SystemClock.elapsedRealtime() - versionsStarted))
 
             // A synced device may propagate actual deletions automatically.
@@ -586,6 +592,15 @@ internal object SyncCoordinator {
             val periodicAuditDue = needsLocalAudit()
             val completeLocal = pull.full || firstRemoteRestore ||
                 rosterIdentitiesChanged || incomingHeaders || periodicAuditDue
+            if (completeLocal && priorBaseline?.selectedKeys != null) {
+                // Roster changes and scheduled full audits require a complete
+                // baseline, but ordinary partial passes never do.
+                priorBaseline = SyncBaselineStore.snapshot(context, startedUser)
+                base = priorBaseline?.hashes.orEmpty()
+                versions = (if (pull.full) emptyMap() else priorBaseline?.versions.orEmpty())
+                    .toMutableMap()
+                for (entry in pull.entries) versions[entry.key] = entry.version
+            }
 
             val local = if (completeLocal) {
                 ProfileIdentity.toRemote(SyncData.snapshot(context), profileMerge.target)

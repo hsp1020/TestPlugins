@@ -141,7 +141,16 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
                 return SyncBackend.PullResult(rows, null, false)
             }
         }
-        var snapshot = github.current(cipher)
+        val approvedSource = preferences.getBoolean("github_initial_backup_confirmed", false) &&
+            SyncBaselineStore.state(context, accountId) == null
+        // A v2 repository can be replaced ONLY on an explicitly approved
+        // fresh source device. No legacy decryption or data migration.
+        var snapshot = try {
+            github.current(cipher)
+        } catch (legacy: GithubBackupStore.OldFormat) {
+            if (!approvedSource) throw legacy
+            null
+        }
         if (snapshot == null) {
             val alreadyEnrolled = SyncBaselineStore.state(context, accountId) != null
             check(SyncSafety.canCreateFirstBackup(
@@ -155,7 +164,8 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             preserveUnlinkedDeviceState()
             val initial = localState()
             uploadAvailableArchives(initial.getValue("x/plugins"))
-            val initialRevision = github.initialize(cipher, initial, archives)
+            val initialRevision = github.initialize(cipher, initial, archives,
+                replaceLegacy = approvedSource)
             createdFreshBackup = true
             archives.clear()
             snapshot = github.current(cipher)

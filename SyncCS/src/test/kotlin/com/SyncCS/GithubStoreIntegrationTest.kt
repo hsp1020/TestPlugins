@@ -147,6 +147,29 @@ class GithubStoreIntegrationTest {
             }
         }
 
+        fun fileId(path: String): String? =
+            trees[commits.getValue(head).first]?.get(path)
+
+        fun blobContents(path: String): String? =
+            fileId(path)?.let { String(blobs.getValue(it), Charsets.UTF_8) }
+
+        fun corruptFile(path: String) {
+            val sha = fileId(path) ?: error("Missing path: $path")
+            blobs[sha] = "{}".toByteArray(Charsets.UTF_8)
+        }
+
+        fun installLegacyV2Manifest() {
+            val oldTree = trees.getValue(commits.getValue(head).first)
+            val manifestSha = sha()
+            blobs[manifestSha] = JSONObject().put("format", 2)
+                .put("complete", true).toString().toByteArray(Charsets.UTF_8)
+            val treeSha = sha()
+            trees[treeSha] = oldTree + ("synccs/manifest.json" to manifestSha)
+            val commitSha = sha()
+            commits[commitSha] = treeSha to head
+            head = commitSha
+        }
+
         fun corruptOneDataBlob() {
             val currentTree = trees[commits.getValue(head).first]!!
             val key = currentTree.entries.first {
@@ -482,6 +505,126 @@ class GithubStoreIntegrationTest {
             ProfileIdentity.nativePath("u/$uuidNew/video_pos_dur/example", merged.target))
         assertEquals("old progress", remote.values["u/$uuidOld/video_pos_dur/example"])
         assertEquals("new progress", remote.values["u/$uuidNew/video_pos_dur/example"])
+    }
+
+    @Test fun v3OverlayUpdatesOneKeyWithoutRewritingBaseShard() {
+        val api = FakeGit()
+        val store = store(api, "A")
+        val c = cipher()
+        val initial = (0 until 640).associate { "d/0/video_pos_dur/$it" to "old-$it" }
+        val revision = store.initialize(c, initial)
+        val fileIds = (0 until 16).map { api.fileId("synccs/data/" +
+            it.toString(16) + ".json") }
+        val edited = mapOf("d/0/video_pos_dur/3" to "new-3")
+        store.publishPartial(revision, 1, c, edited, emptySet())
+        assertEquals(fileIds, (0 until 16).map {
+            api.fileId("synccs/data/" + it.toString(16) + ".json")
+        })
+        assertNotNull((0 until 16).firstNotNullOfOrNull {
+            api.fileId("synccs/overlay/" + it.toString(16) + ".json")
+        })
+        assertEquals(initial + edited, store.current(c)!!.values)
+        assertEquals(edited.keys, store.incrementalSince(revision, c, 1)!!
+            .encryptedChanges.keys)
+    }
+
+    @Test fun v3OverlayCompactionAndTombstonesAreLogicalChangesOnly() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val initial = linkedMapOf<String, String>()
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var n = 0
+        while (initial.size < 145) {
+            val key = "d/0/video_pos_dur/compact-${n++}"
+            if ((digest.digest(key.toByteArray(Charsets.UTF_8))[0].toInt() and 255) ushr 4 == 0) {
+                initial[key] = "original"
+            }
+        }
+        val initialRevision = a.initialize(c, initial)
+        val modifications = initial.keys.take(130).associateWith { "updated" }
+        val newRevision = a.publishPartial(initialRevision, 1, c, modifications, emptySet())
+        assertEquals("{}", api.blobContents("synccs/overlay/0.json"))
+        assertEquals(initial + modifications, b.current(c)!!.values)
+        assertEquals(modifications.keys,
+            b.incrementalSince(initialRevision, c, 1)!!.encryptedChanges.keys)
+        val removed = initial.keys.first()
+        a.publishPartial(newRevision, 1, c, mapOf(removed to null), setOf(removed))
+        assertFalse(b.current(c)!!.values.containsKey(removed))
+        assertNull(b.incrementalSince(initialRevision, c, 1)!!.encryptedChanges[removed])
+    }
+
+    @Test fun v3CorruptedOverlayFailsClosed() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val initial = a.initialize(c, mapOf("d/0/video_pos_dur/1" to "one"))
+        a.publishPartial(initial, 1, c, mapOf("d/0/video_pos_dur/1" to "two"), emptySet())
+        val path = (0 until 16).map { "synccs/overlay/" + it.toString(16) + ".json" }
+            .first { api.fileId(it) != null }
+        api.corruptFile(path)
+        assertThrows(IllegalStateException::class.java) { a.current(c) }
+    }
+
+    @Test fun v3RollbackMasksOverlayMissingAtTargetRevision() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val first = a.initialize(c, mapOf("d/0/video_pos_dur/1" to "one"))
+        a.publishPartial(first, 1, c, mapOf("d/0/video_pos_dur/1" to "two"), emptySet())
+        val newer = a.current(c)!!
+        a.rollback(newer, first, c)
+        assertEquals("one", a.current(c)!!.values["d/0/video_pos_dur/1"])
+        assertEquals(newer.generation + 1, a.current(c)!!.generation)
+    }
+
+    @Test fun legacyV2RequiresExplicitFreshSourceInsteadOfMigration() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        api.installLegacyV2Manifest()
+        assertThrows(GithubBackupStore.OldFormat::class.java) { a.current(c) }
+        assertThrows(IllegalStateException::class.java) {
+            a.initialize(c, mapOf("d/0/search_history/test" to "new"))
+        }
+        a.initialize(c, mapOf("d/0/search_history/test" to "new"), replaceLegacy = true)
+        assertEquals(mapOf("d/0/search_history/test" to "new"), a.current(c)!!.values)
+    }
+
+    @Test fun streamedTreeParserRetainsOnlySyncCSBlobPaths() {
+        val store = store(FakeGit(), "A")
+        val tree = JSONObject().put("truncated", false).put("tree", JSONArray()
+            .put(JSONObject().put("path", "unrelated/large-file.bin")
+                .put("sha", "a".repeat(40)).put("type", "blob"))
+            .put(JSONObject().put("path", "synccs/data/0.json")
+                .put("sha", "b".repeat(40)).put("type", "blob"))
+            .put(JSONObject().put("path", "synccs/other-folder")
+                .put("sha", "c".repeat(40)).put("type", "tree")))
+        val parsed = store.parseTree(java.io.ByteArrayInputStream(
+            tree.toString().toByteArray(Charsets.UTF_8)))
+        assertFalse(parsed.getBoolean("truncated"))
+        assertEquals(1, parsed.getJSONArray("tree").length())
+        assertEquals("synccs/data/0.json",
+            parsed.getJSONArray("tree").getJSONObject(0).getString("path"))
+    }
+
+    @Test fun streamedBlobBodyIsIdenticalToExistingGithubBase64Json() {
+        val store = store(FakeGit(), "A")
+        for (bytes in listOf(byteArrayOf(), byteArrayOf(0), byteArrayOf(0, 1),
+            byteArrayOf(0, 1, 2), byteArrayOf(1, 2, 3, 4, -1),
+            ByteArray(131_071) { ((it * 31) and 255).toByte() })) {
+            val output = java.io.ByteArrayOutputStream()
+            store.writeBlobBody(bytes, output)
+            val expected = JSONObject()
+                .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                .put("encoding", "base64")
+            val actual = JSONObject(String(output.toByteArray(), Charsets.UTF_8))
+            assertEquals(expected.getString("content"), actual.getString("content"))
+            assertEquals(expected.getString("encoding"), actual.getString("encoding"))
+            assertEquals(expected.toString().toByteArray(Charsets.UTF_8).size,
+                output.toByteArray().size)
+        }
     }
 
 }

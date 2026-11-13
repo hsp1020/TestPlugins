@@ -17,7 +17,9 @@ internal object SyncBaselineStore {
     data class Snapshot(
         val state: State,
         val hashes: Map<String, String>,
-        val versions: Map<String, Long>
+        val versions: Map<String, Long>,
+        // null: complete baseline; non-null: only these keys may be modified.
+        val selectedKeys: Set<String>? = null
     )
     data class Changes(
         val hashUpserts: Int, val hashDeletes: Int,
@@ -57,20 +59,38 @@ internal object SyncBaselineStore {
             stored.generation == config.preferences.getInt("github_generation", 0)
     }
 
-    fun snapshot(context: Context, accountId: String): Snapshot? =
+    /**
+     * Incremental passes only materialize hashes and versions for observed keys.
+     * A null selection retains full-snapshot semantics for first pull and audit.
+     */
+    fun snapshot(context: Context, accountId: String, selectedKeys: Set<String>? = null): Snapshot? =
         Database(context).use { helper ->
             val db = helper.readableDatabase
             val committed = state(db)?.takeIf { it.accountId == accountId }
                 ?: return@use null
+            fun <V> select(table: String, column: String, map: MutableMap<String, V>,
+                           readValue: (android.database.Cursor) -> V) {
+                if (selectedKeys == null) {
+                    db.rawQuery("SELECT entry_key, $column FROM $table", null).use { cursor ->
+                        while (cursor.moveToNext()) map[cursor.getString(0)] = readValue(cursor)
+                    }
+                } else {
+                    // SQLite implementations may limit bound SQL parameters.
+                    for (chunk in selectedKeys.chunked(400)) {
+                        if (chunk.isEmpty()) continue
+                        val slots = List(chunk.size) { "?" }.joinToString(",")
+                        db.rawQuery("SELECT entry_key, $column FROM $table WHERE entry_key IN ($slots)",
+                            chunk.toTypedArray()).use { cursor ->
+                            while (cursor.moveToNext()) map[cursor.getString(0)] = readValue(cursor)
+                        }
+                    }
+                }
+            }
             val hashes = LinkedHashMap<String, String>()
-            db.rawQuery("SELECT entry_key, hash_value FROM hashes", null).use { cursor ->
-                while (cursor.moveToNext()) hashes[cursor.getString(0)] = cursor.getString(1)
-            }
+            select("hashes", "hash_value", hashes) { it.getString(1) }
             val versions = LinkedHashMap<String, Long>()
-            db.rawQuery("SELECT entry_key, version_value FROM versions", null).use { cursor ->
-                while (cursor.moveToNext()) versions[cursor.getString(0)] = cursor.getLong(1)
-            }
-            Snapshot(committed, hashes, versions)
+            select("versions", "version_value", versions) { it.getLong(1) }
+            Snapshot(committed, hashes, versions, selectedKeys)
         }
 
     /**
@@ -100,6 +120,12 @@ internal object SyncBaselineStore {
             }
             val oldHashes = previous?.hashes.orEmpty()
             val oldVersions = previous?.versions.orEmpty()
+            val selected = previous?.selectedKeys
+            if (selected != null) {
+                check(hashes.keys.all { it in selected } && versions.keys.all { it in selected }) {
+                    "Partial baseline contains an unselected key; refusing destructive write."
+                }
+            }
             db.compileStatement("INSERT OR REPLACE INTO hashes(entry_key, hash_value) VALUES(?, ?)").use { insert ->
                 for ((key, value) in hashes) {
                     if (oldHashes[key] == value) continue

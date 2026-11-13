@@ -68,6 +68,58 @@ class SyncDomainRegressionTest {
         }
     }
 
+    @Test fun sqlitePartialSnapshotDoesNotReadOrDeleteUnrelatedBaselineRows() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        SyncBaselineStore.reset(context)
+        try {
+            val hashes = (0 until 2000).associate { "d/item/$it" to "sha-$it" }
+            val versions = (0 until 2000).associate { "d/item/$it" to it.toLong() }
+            SyncBaselineStore.commit(context, "selective-account", null,
+                hashes, versions, "rev1", 1)
+            val selected = setOf("d/item/1", "d/item/2", "d/item/new")
+            val partial = SyncBaselineStore.snapshot(context, "selective-account", selected)!!
+            assertEquals(2, partial.hashes.size)
+            assertEquals(2, partial.versions.size)
+            assertEquals(selected, partial.selectedKeys)
+            val nextHashes = mapOf("d/item/1" to "changed",
+                "d/item/new" to "brand-new")
+            val nextVersions = mapOf("d/item/1" to 4L,
+                "d/item/new" to 1L)
+            val updates = SyncBaselineStore.commit(context, "selective-account",
+                partial, nextHashes, nextVersions, "rev2", 1)
+            assertEquals(2, updates.hashUpserts)
+            assertEquals(1, updates.hashDeletes)
+            assertEquals(2, updates.versionUpserts)
+            assertEquals(1, updates.versionDeletes)
+            val after = SyncBaselineStore.snapshot(context, "selective-account")!!
+            assertEquals(2000, after.hashes.size)
+            assertEquals(2000, after.versions.size)
+            assertEquals("sha-3", after.hashes["d/item/3"])
+            assertFalse(after.hashes.containsKey("d/item/2"))
+            assertEquals("brand-new", after.hashes["d/item/new"])
+        } finally {
+            SyncBaselineStore.reset(context)
+        }
+    }
+
+    @Test fun sqlitePartialSnapshotRejectsOutOfScopeDeletesAndUpserts() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        SyncBaselineStore.reset(context)
+        try {
+            val all = mapOf("d/a" to "hash-a", "d/b" to "hash-b")
+            SyncBaselineStore.commit(context, "scoped", null, all,
+                mapOf("d/a" to 1L, "d/b" to 1L), "rev1", 1)
+            val partial = SyncBaselineStore.snapshot(context, "scoped", setOf("d/a"))!!
+            assertThrows(IllegalStateException::class.java) {
+                SyncBaselineStore.commit(context, "scoped", partial,
+                    mapOf("d/b" to "unsafe"), partial.versions, "rev2", 1)
+            }
+            assertEquals(all, SyncBaselineStore.snapshot(context, "scoped")!!.hashes)
+        } finally {
+            SyncBaselineStore.reset(context)
+        }
+    }
+
     @Test fun sqliteBaselineCheckpointRestoresHashesVersionsAndRevision() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val backup = java.io.File(context.cacheDir, "synccs-sqlite-rollback-test.db")

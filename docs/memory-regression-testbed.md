@@ -23,9 +23,44 @@
 
 프로파일은 요청 기준 최대 90초간 수집하므로, 긴 테스트를 한 번에 녹화하지 말고 **시나리오별로 별도 시작·종료**하는 편이 원인 구분에 유리합니다. Perfetto 파일의 버퍼 초과·연결 끊김·클라이언트 오류가 있으면 해당 수집은 불완전한 자료입니다.
 
+## SyncCS v3 신규 백업·P0~P4 검증
+
+**기존 v2를 읽거나 마이그레이션하지 않습니다.** 기존 GitHub v2 백업이 있으면
+모든 기기를 동시에 기존 백업에 연결한 상태로 방치하지 말고, 먼저 **원본 A 기기**
+에서 SyncCS 계정에 다시 연결합니다. 구형 v2 발견 시 표시되는
+`Replace legacy backup with v3?` 확인창에서 현재 A의 설정을 새 기준으로
+지정합니다. 이 동작은 기존 Git 커밋 이력을 강제 삭제하지 않으며,
+**v3 최신 스냅샷을 새로운 Git CAS 커밋으로 생성**합니다.
+B 기기는 A의 신규 v3 동기화가 `Synced:`로 끝난 다음 연결해 전체 복원합니다.
+새 v3 백업이 생성되기 전에는 다른 기기의 자동 동기화를 재개하지 않습니다.
+
+| 순서 | 사용자 동작 | 로그·결과 판정 |
+| --- | --- | --- |
+| 1. 신규 원본 A | 구형 v2 교체 승인 → 최초 전체 동기화 | v3 백업 생성, `BASE_READ_SQLITE initialized=false full=true`, `BASE_WRITE_SQLITE` |
+| 2. 신규 기기 B | 동일 GitHub 계정에 신규 연결 → 전체 복원 | A와 동일한 설정·프로필·플러그인·라이브러리 |
+| 3. 변경 없음 | A에서 Sync now 재실행 | 새 Git commit 없이 `Synced:` |
+| 4. 일반 설정 | Java allocation profile 시작 → 설정 1개 변경 → 동기화 → 종료 | `BASE_READ_SQLITE selected=true`, `V3_OVERLAY`, `BASE_WRITE_SQLITE` |
+| 5. 변경 2개 | 독립 키 2개 변경 후 동일 측정 | 변경된 버킷만 업데이트, GitHub API 호출 및 할당량 |
+| 6. 삭제 | 목록 항목 제거 후 B에서 확인 | 명시적 삭제만 전파되고 tombstone 반영 |
+| 7. 전체 감사 | 1시간 정기 감사 또는 재시작 후 동기화 | 전체 기준 검증 유지, 신규 누락 항목 검출 |
+| 8. 충돌·복구 | A/B 교차 편집, 기기 종료 후 복구 | CAS 충돌 시 기존 원격 데이터 유지, 실패 시 로컬 저널 복구 |
+
+`SyncCSAlloc V3_OVERLAY`의 `changedShards`, `compacted`,
+`writeBytes`를 기록합니다. 설정 하나 변경에서 기존 대형 기본 샤드를
+다시 저장하지 않고 소형 오버레이를 갱신하는지 확인합니다.
+`BASE_READ_SQLITE selected=true`일 때 키가 수만 개가 아니라
+실제 관찰 대상에 국한되는지 확인합니다. 메모리 측정 대상은 **최초 전체
+복원이 아닌, 이후의 1~2개 변경 증분 동기화**입니다.
+
+자동화 테스트는 `GithubStoreIntegrationTest`의 100회 이상 커밋 비교,
+오버레이 압축·삭제·변조·rollback·CAS 테스트와
+`SyncDomainRegressionTest`의 부분 DB 읽기·쓰기를 포함합니다.
+실기기 검증 결과를 확인하기 전에는 Java 할당량 개선율이나 기능 무손상을
+확정하지 않습니다.
+
 ## SyncCS SQLite 증분 기준 데이터 검증
 
-- 업그레이드 후 `base`·`remote_versions`의 과거 JSON은 폐기하며 **읽기·마이그레이션을 수행하지 않습니다**. 최초 SyncCS 실행은 GitHub의 인증된 전체 스냅샷을 이용해 SQLite 기준 데이터를 새로 만듭니다.
+- 기존 로컬 `base`·`remote_versions` JSON은 폐기하며 **읽기·마이그레이션을 수행하지 않습니다**. GitHub v2도 신규 v3로 변환하지 않습니다. 사용자의 승인 후 원본 A에서 신규 v3 백업을 생성하고 B에서 전체 복원합니다.
 - 일반 설정 하나 변경 및 목록 항목 변경 테스트에서는 로그캣의 `SyncCSAlloc BASE_READ_SQLITE`/`BASE_WRITE_SQLITE`에서 `hashUpserts`, `hashDeletes`, `versionUpserts`, `versionDeletes`를 비교합니다. 변경된 행만 기록되는지 확인하고, Perfetto에서 `persistCommittedBaseline()` Java 할당량을 기존 약 54MiB/회 기준과 비교합니다.
 - 최초 전체 동기화 후에는 동일한 GitHub revision에서 HEAD-only 빠른 종료가 정상 작동해야 합니다. 다른 기기 수정, 원격 복구 generation 변경, SQLite/SharedPreferences revision 불일치가 발생하면 기존 증분 상태를 신뢰하지 않고 인증된 전체 조회 경로로 전환합니다.
 - 기준 데이터 해시·버전과 GitHub revision은 SQLite의 동일 트랜잭션으로 기록하며, 로컬 설정 복원용 `LocalSyncJournal`에는 SQLite 스냅샷도 포함됩니다. 실제 앱 종료/장애 복구와 A/B 변경·삭제는 별도 실기기 확인이 필요합니다.

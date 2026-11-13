@@ -1,6 +1,11 @@
 package com.SyncCS
 
 import android.util.Base64
+import android.util.Base64OutputStream
+import android.util.JsonReader
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -54,10 +59,13 @@ internal class GithubBackupStore(
     data class Snapshot(
         val revision: String, val tree: String, val branch: String,
         val generation: Int, val values: Map<String, String>, val encrypted: Map<String, String>,
-        val shardHashes: List<String>
+        val shardHashes: List<String>,
+        val overlayHashes: List<String> = List(16) { "" }
     )
     private val apiRoot = "https://api.github.com/repos/$owner/$repository"
     internal class ApiException(val code: Int, text: String) : IOException(text)
+    /** No v2-to-v3 migration: user must explicitly recreate the source backup. */
+    internal class OldFormat : IOException("GitHub SyncCS v2 backup requires explicit v3 reset from the source device.")
 
     @Volatile private var activeToken: String = token
 
@@ -70,85 +78,125 @@ internal class GithubBackupStore(
             }
         }, request)
 
+    /** Parse large Git tree responses without retaining the unrelated file tree. */
+    internal fun parseTree(input: InputStream): JSONObject {
+        val files = JSONArray()
+        var truncated = false
+        JsonReader(InputStreamReader(input, Charsets.UTF_8)).use { reader ->
+            reader.beginObject()
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "truncated" -> truncated = reader.nextBoolean()
+                    "tree" -> {
+                        reader.beginArray()
+                        while (reader.hasNext()) {
+                            var path = ""
+                            var sha = ""
+                            var kind = ""
+                            reader.beginObject()
+                            while (reader.hasNext()) {
+                                when (reader.nextName()) {
+                                    "path" -> path = reader.nextString()
+                                    "sha" -> sha = reader.nextString()
+                                    "type" -> kind = reader.nextString()
+                                    else -> reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
+                            if (path.startsWith("synccs/") && kind == "blob") {
+                                files.put(JSONObject().put("path", path)
+                                    .put("sha", sha).put("type", kind))
+                            }
+                        }
+                        reader.endArray()
+                    }
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+        }
+        return JSONObject().put("truncated", truncated).put("tree", files)
+    }
+
     private fun api(url: String, method: String = "GET", json: JSONObject? = null): JSONObject {
         require(url.startsWith("https://api.github.com/"))
         return authorized { currentToken ->
-        transport?.let { return@authorized it(url, method, json) }
-        val traceStarted = android.os.SystemClock.elapsedRealtime()
-        var responseStatus = -1
-        var responseSize = -1
-        var requestSize = 0
-        var readMs = 0L
-        var parseMs = 0L
-        var phase = "connect"
-        val apiCategory = when {
-            url.contains("/git/blobs/") -> "blob"
-            url.contains("/git/trees/") -> "tree"
-            url.contains("/git/commits/") -> "commit"
-            url.contains("/git/ref/") || url.contains("/git/refs") -> "ref"
-            url.contains("/compare/") -> "compare"
-            url == apiRoot -> "repo"
-            url.endsWith("/git/blobs") -> "blob-create"
-            url.endsWith("/git/trees") -> "tree-create"
-            url.endsWith("/git/commits") -> "commit-create"
-            else -> "other"
-        }
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.requestMethod = method
-        conn.instanceFollowRedirects = false
-        conn.connectTimeout = 12000
-        conn.readTimeout = 25000
-        conn.setRequestProperty("Authorization", "Bearer $currentToken")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        conn.setRequestProperty("User-Agent", "SyncCS-Backup")
-        try {
-            if (json != null) {
-                phase = "write"
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json")
-                val requestBytes = json.toString().toByteArray(Charsets.UTF_8)
-                requestSize = requestBytes.size
-                conn.outputStream.use { it.write(requestBytes) }
+            transport?.let { return@authorized it(url, method, json) }
+            val traceStarted = android.os.SystemClock.elapsedRealtime()
+            var responseStatus = -1
+            var responseSize = -1
+            var requestSize = 0
+            var parseMs = 0L
+            var phase = "connect"
+            val apiCategory = when {
+                url.contains("/git/blobs/") -> "blob"
+                url.contains("/git/trees/") -> "tree"
+                url.contains("/git/commits/") -> "commit"
+                url.contains("/git/ref/") || url.contains("/git/refs") -> "ref"
+                url.contains("/compare/") -> "compare"
+                url == apiRoot -> "repo"
+                url.endsWith("/git/blobs") -> "blob-create"
+                url.endsWith("/git/trees") -> "tree-create"
+                url.endsWith("/git/commits") -> "commit-create"
+                else -> "other"
             }
-            phase = "response-code"
-            val status = conn.responseCode
-            responseStatus = status
-            phase = "read"
-            val readStarted = android.os.SystemClock.elapsedRealtime()
-            val response = (if (status in 200..299) conn.inputStream else conn.errorStream)
-                ?.use { it.readBytes() } ?: ByteArray(0)
-            readMs = android.os.SystemClock.elapsedRealtime() - readStarted
-            responseSize = response.size
-            if (status !in 200..299) {
-                val stage = when {
-                    url == apiRoot -> "repository-access"
-                    url.contains("/git/ref/heads/") -> "remote-head"
-                    url.contains("/git/trees/") -> "tree-read"
-                    url.contains("/git/blobs/") -> "blob-read"
-                    url.endsWith("/user/repos") -> "repository-create"
-                    url.contains("/git/refs") -> "ref-write"
-                    else -> "backup-api"
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = method
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 12000
+            conn.readTimeout = 25000
+            conn.setRequestProperty("Authorization", "Bearer $currentToken")
+            conn.setRequestProperty("Accept", "application/vnd.github+json")
+            conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            conn.setRequestProperty("User-Agent", "SyncCS-Backup")
+            try {
+                if (json != null) {
+                    phase = "write"
+                    conn.doOutput = true
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    val body = json.toString()
+                    // Request body is written through OutputStreamWriter.
+                    // Avoid allocating a second UTF-8 array solely for logging.
+                    requestSize = -1
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
                 }
-                throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
+                phase = "response-code"
+                val status = conn.responseCode
+                responseStatus = status
+                responseSize = conn.contentLength
+                if (status !in 200..299) {
+                    val stage = when {
+                        url == apiRoot -> "repository-access"
+                        url.contains("/git/ref/heads/") -> "remote-head"
+                        url.contains("/git/trees/") -> "tree-read"
+                        url.contains("/git/blobs/") -> "blob-read"
+                        url.endsWith("/user/repos") -> "repository-create"
+                        url.contains("/git/refs") -> "ref-write"
+                        else -> "backup-api"
+                    }
+                    throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
+                }
+                phase = "parse"
+                val parseStarted = android.os.SystemClock.elapsedRealtime()
+                val result = conn.inputStream.use { input ->
+                    if (url.contains("/git/trees/") && url.contains("recursive=1"))
+                        parseTree(input)
+                    else JSONObject(InputStreamReader(input, Charsets.UTF_8).use { it.readText() })
+                }
+                parseMs = android.os.SystemClock.elapsedRealtime() - parseStarted
+                phase = "completed"
+                result
+            } finally {
+                conn.disconnect()
+                android.util.Log.i("SyncCSAlloc", "GITHUB_API route=" + apiCategory +
+                    " method=" + method + " status=" + responseStatus +
+                    " requestBytes=" + requestSize + " responseBytes=" + responseSize +
+                    " phase=" + phase + " parseMs=" + parseMs +
+                    " totalMs=" + (android.os.SystemClock.elapsedRealtime() - traceStarted))
             }
-            phase = "parse"
-            val parseStarted = android.os.SystemClock.elapsedRealtime()
-            val parsed = if (response.isEmpty()) JSONObject()
-                else JSONObject(String(response, Charsets.UTF_8))
-            parseMs = android.os.SystemClock.elapsedRealtime() - parseStarted
-            phase = "completed"
-            parsed
-        } finally {
-            conn.disconnect()
-            android.util.Log.i("SyncCSAlloc", "GITHUB_API route=" + apiCategory +
-                " method=" + method + " status=" + responseStatus +
-                " requestBytes=" + requestSize + " responseBytes=" + responseSize +
-                " phase=" + phase + " readMs=" + readMs + " parseMs=" + parseMs +
-                " totalMs=" + (android.os.SystemClock.elapsedRealtime() - traceStarted))
-        }
         }
     }
+
     private fun get(path: String): JSONObject = api(apiRoot + path)
     private fun write(path: String, method: String, body: JSONObject): JSONObject =
         api(apiRoot + path, method, body)
@@ -194,39 +242,188 @@ internal class GithubBackupStore(
         return tree to result
     }
 
+    /**
+     * GitHub raw Blob representation avoids a second Base64 JSON object.
+     * The injectable test transport retains the JSON form for offline tests.
+     */
     private fun blob(sha: String): ByteArray {
         check(sha.matches(Regex("[0-9a-f]{40}")))
-        val result = get("/git/blobs/$sha")
-        check(result.getString("encoding") == "base64")
-        return Base64.decode(result.getString("content"), Base64.DEFAULT)
+        if (transport != null) {
+            val result = get("/git/blobs/$sha")
+            check(result.getString("encoding") == "base64")
+            return Base64.decode(result.getString("content"), Base64.DEFAULT)
+        }
+        return authorized { currentToken ->
+            val conn = URL("$apiRoot/git/blobs/$sha").openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 12000
+            conn.readTimeout = 25000
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("Authorization", "Bearer $currentToken")
+            conn.setRequestProperty("Accept", "application/vnd.github.raw+json")
+            conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            conn.setRequestProperty("User-Agent", "SyncCS-Backup")
+            try {
+                val status = conn.responseCode
+                if (status !in 200..299) throw ApiException(status,
+                    "GitHub raw Blob HTTP $status (stage=blob-read)")
+                val bytes = conn.inputStream.use { it.readBytes() }
+                // Gracefully handle providers that still return the JSON
+                // representation despite a raw Accept header.
+                if (conn.contentType?.contains("json", true) == true &&
+                    bytes.firstOrNull()?.toInt() == '{'.code) {
+                    val envelope = JSONObject(String(bytes, Charsets.UTF_8))
+                    if (envelope.optString("encoding") == "base64")
+                        Base64.decode(envelope.getString("content"), Base64.DEFAULT)
+                    else bytes
+                } else bytes
+            } finally {
+                conn.disconnect()
+            }
+        }
     }
 
-    private fun createBlob(bytes: ByteArray): String =
-        write("/git/blobs", "POST", JSONObject()
+    private val blobPrefix = "{\"content\":\"".toByteArray(Charsets.US_ASCII)
+    private val blobSuffix = "\",\"encoding\":\"base64\"}".toByteArray(Charsets.US_ASCII)
+
+    internal fun writeBlobBody(bytes: ByteArray, output: java.io.OutputStream) {
+        output.write(blobPrefix)
+        // NO_CLOSE permits writing the closing JSON suffix after Base64 finalization.
+        val base64 = Base64OutputStream(output, Base64.NO_WRAP or Base64.NO_CLOSE)
+        base64.write(bytes)
+        base64.close()
+        output.write(blobSuffix)
+    }
+
+    private fun createBlob(bytes: ByteArray): String {
+        if (transport != null) return write("/git/blobs", "POST", JSONObject()
             .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
             .put("encoding", "base64")).getString("sha")
+        return authorized { currentToken ->
+            val conn = URL("$apiRoot/git/blobs").openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 12000
+            conn.readTimeout = 25000
+            conn.setRequestProperty("Authorization", "Bearer $currentToken")
+            conn.setRequestProperty("Accept", "application/vnd.github+json")
+            conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            conn.setRequestProperty("User-Agent", "SyncCS-Backup")
+            conn.setRequestProperty("Content-Type", "application/json")
+            val encodedSize = ((bytes.size.toLong() + 2L) / 3L) * 4L
+            conn.setFixedLengthStreamingMode(blobPrefix.size.toLong() +
+                encodedSize + blobSuffix.size)
+            try {
+                conn.outputStream.use { output -> writeBlobBody(bytes, output) }
+                val status = conn.responseCode
+                if (status !in 200..299)
+                    throw ApiException(status, "GitHub Blob upload HTTP $status")
+                JSONObject(InputStreamReader(conn.inputStream, Charsets.UTF_8).use {
+                    it.readText()
+                }).getString("sha")
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
 
     private fun bucket(key: String): Int =
         (MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))[0]
             .toInt() and 255) ushr 4
     private fun shard(index: Int): String = "synccs/data/" + index.toString(16) + ".json"
 
-    private fun sealedManifest(cipher: SyncCipher, generation: Int,
-                               shardHashes: List<String>, deltaHash: String? = null): ByteArray {
-        check(shardHashes.size == 16 && shardHashes.all {
-            it.matches(Regex("[0-9a-f]{64}"))
+    private fun overlayPath(index: Int): String =
+        "synccs/overlay/" + index.toString(16) + ".json"
+
+    private data class Root(val generation: Int, val hashes: List<String>,
+                            val overlays: List<String>)
+
+    private fun sealedManifest(
+        cipher: SyncCipher, generation: Int, shardHashes: List<String>,
+        overlayHashes: List<String>, deltaHash: String? = null
+    ): ByteArray {
+        check(shardHashes.size == 16 && shardHashes.all { it.matches(Regex("[0-9a-f]{64}")) })
+        check(overlayHashes.size == 16 && overlayHashes.all {
+            it.isEmpty() || it.matches(Regex("[0-9a-f]{64}"))
         })
-        val canonical = shardHashes.joinToString("|")
-        val manifest = JSONObject().put("format", 2).put("complete", true)
+        val sealText = shardHashes.joinToString("|") + ":" + overlayHashes.joinToString("|")
+        val manifest = JSONObject().put("format", 3).put("complete", true)
             .put("generation", generation)
             .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
             .put("shards", JSONArray(shardHashes))
-            .put("rootSeal", cipher.encrypt("synccs/data-root", canonical))
+            .put("overlays", JSONArray(overlayHashes))
+            .put("rootSeal", cipher.encrypt("synccs/data-root-v3", sealText))
         if (deltaHash != null) {
             manifest.put("deltaHash", deltaHash)
                 .put("deltaSeal", cipher.encrypt("synccs/delta-root-v1", deltaHash))
         }
         return manifest.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private fun verifiedRoot(manifest: JSONObject, cipher: SyncCipher): Root {
+        val format = manifest.optInt("format")
+        if (format == 2) throw OldFormat()
+        check(format == 3) { "Unsupported or damaged SyncCS backup format" }
+        check(manifest.getBoolean("complete")) { "Incomplete authenticated v3 backup" }
+        check(cipher.decrypt("synccs/check", manifest.getString("verification"))
+            == "synccs-github-v1") { "Invalid backup passphrase" }
+        val hashes = manifest.getJSONArray("shards").let { a ->
+            check(a.length() == 16)
+            (0 until 16).map(a::getString)
+        }
+        val overlays = manifest.getJSONArray("overlays").let { a ->
+            check(a.length() == 16)
+            (0 until 16).map(a::getString)
+        }
+        check(hashes.all { it.matches(Regex("[0-9a-f]{64}")) } &&
+            overlays.all { it.isEmpty() || it.matches(Regex("[0-9a-f]{64}")) })
+        val sealed = hashes.joinToString("|") + ":" + overlays.joinToString("|")
+        check(cipher.decrypt("synccs/data-root-v3", manifest.getString("rootSeal")) == sealed) {
+            "GitHub v3 authenticated root mismatch"
+        }
+        return Root(manifest.getInt("generation"), hashes, overlays)
+    }
+
+    private fun rootAt(files: Map<String, String>, cipher: SyncCipher): Root {
+        val sha = files["synccs/manifest.json"] ?: error("Missing v3 backup root")
+        return verifiedRoot(JSONObject(String(blob(sha), Charsets.UTF_8)), cipher)
+    }
+
+    private fun checkedRows(
+        files: Map<String, String>, path: String, expected: String, index: Int
+    ): JSONObject {
+        val sha = files[path] ?: error("Missing verified GitHub data $path")
+        val bytes = blob(sha)
+        check(SyncBackend.digestBytes(bytes) == expected) {
+            "GitHub v3 shard/overlay digest mismatch: $path"
+        }
+        val rows = JSONObject(String(bytes, Charsets.UTF_8))
+        for (key in rows.keys()) check(bucket(key) == index) {
+            "Invalid GitHub v3 bucket assignment"
+        }
+        return rows
+    }
+
+    /** Resolve one logical bucket; tombstones mask base values. */
+    private fun mergedBucket(
+        files: Map<String, String>, root: Root, index: Int
+    ): LinkedHashMap<String, String> {
+        val base = checkedRows(files, shard(index), root.hashes[index], index)
+        val result = linkedMapOf<String, String>()
+        for (key in base.keys()) {
+            check(!base.isNull(key)) { "Null base ciphertext" }
+            result[key] = base.getString(key)
+        }
+        val overlayHash = root.overlays[index]
+        if (overlayHash.isNotEmpty()) {
+            val overlay = checkedRows(files, overlayPath(index), overlayHash, index)
+            for (key in overlay.keys()) {
+                if (overlay.isNull(key)) result.remove(key)
+                else result[key] = overlay.getString(key)
+            }
+        }
+        return result
     }
 
     private fun readAt(rev: String, branch: String, cipher: SyncCipher): Snapshot? {
@@ -237,65 +434,39 @@ internal class GithubBackupStore(
             }
             return null
         }
-        val manifest = JSONObject(String(blob(manifestSha), Charsets.UTF_8))
-        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete")) {
-            "Unsupported or incomplete backup manifest; refusing unsafe sync."
-        }
-        check(cipher.decrypt("synccs/check", manifest.getString("verification"))
-            == "synccs-github-v1") { "Invalid recovery passphrase." }
-        val expectedHashes = manifest.getJSONArray("shards")
-        check(expectedHashes.length() == 16) { "Incomplete authenticated backup root." }
-        val canonical = (0 until 16).map { expectedHashes.getString(it) }
-        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal"))
-            == canonical.joinToString("|")) { "Backup root authentication failed." }
-        // Keep the complete authenticated snapshot; only parallelize independent
-        // shard reads. Nothing becomes visible until ALL 16 shards are verified.
-        val began = System.nanoTime()
+        val root = rootAt(entries, cipher)
         val workers = Executors.newFixedThreadPool(4) { task ->
-            Thread(task, "SyncCS-GitHub-shard").apply { isDaemon = true }
+            Thread(task, "SyncCS-GitHub-v3-shard").apply { isDaemon = true }
         }
-
         val jobs = (0 until 16).map { i ->
             workers.submit(Callable {
-                val bytes = blob(entries[shard(i)]
-                    ?: throw IOException("Corrupted backup: missing shard " + shard(i)))
-                check(SyncBackend.digestBytes(bytes) == canonical[i]) {
-                    "Backup shard $i does not match its authenticated manifest."
-                }
-                val part = JSONObject(String(bytes, Charsets.UTF_8))
-                val sealed = linkedMapOf<String, String>()
-                val plain = linkedMapOf<String, String>()
-                for (key in part.keys()) {
-                    check(bucket(key) == i) { "Invalid backup shard." }
-                    val ciphertext = part.getString(key)
-                    sealed[key] = ciphertext
-                    plain[key] = cipher.decrypt(key, ciphertext)
-                }
-                sealed to plain
+                val ciphertext = mergedBucket(entries, root, i)
+                val plaintext = linkedMapOf<String, String>()
+                for ((key, encrypted) in ciphertext)
+                    plaintext[key] = cipher.decrypt(key, encrypted)
+                ciphertext to plaintext
             })
         }
         val encrypted = linkedMapOf<String, String>()
         val values = linkedMapOf<String, String>()
         try {
             for (job in jobs) {
-                val part = try {
+                val (sealed, plain) = try {
                     job.get()
-                } catch (error: ExecutionException) {
-                    throw (error.cause ?: error)
+                } catch (failure: ExecutionException) {
+                    throw (failure.cause ?: failure)
                 }
-                for ((key, value) in part.first) {
-                    check(!encrypted.containsKey(key)) { "Duplicate backup key." }
-                    encrypted[key] = value
+                for ((key, ciphertext) in sealed) {
+                    check(encrypted.put(key, ciphertext) == null) { "Duplicate backup key" }
                 }
-                values.putAll(part.second)
+                values.putAll(plain)
             }
         } finally {
             jobs.forEach { if (!it.isDone) it.cancel(true) }
             workers.shutdownNow()
         }
-
-        return Snapshot(rev, tree, branch, manifest.getInt("generation"), values,
-            encrypted, canonical)
+        return Snapshot(rev, tree, branch, root.generation, values,
+            encrypted, root.hashes, root.overlays)
     }
 
 
@@ -314,118 +485,48 @@ internal class GithubBackupStore(
             .toByteArray(Charsets.UTF_8)
     }
 
-    private fun readJournal(rev: String, cipher: SyncCipher): Pair<Int, Map<String, String?>>? {
-        val (_, files) = index(rev)
-        val manifestId = files["synccs/manifest.json"] ?: return null
-        val manifest = JSONObject(String(blob(manifestId), Charsets.UTF_8))
-        if (!manifest.has("deltaHash")) return null
-        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete"))
-        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
-            "synccs-github-v1") { "Untrusted incremental manifest" }
-        val shards = manifest.getJSONArray("shards")
-        check(shards.length() == 16)
-        val hashes = (0 until 16).map { shards.getString(it) }
-        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
-            hashes.joinToString("|")) { "Incremental root verification failed" }
-        val expected = manifest.getString("deltaHash")
-        check(expected.matches(Regex("[0-9a-f]{64}")) &&
-            cipher.decrypt("synccs/delta-root-v1", manifest.getString("deltaSeal")) == expected) {
-            "Untrusted incremental journal"
-        }
-        val journalId = files["synccs/delta.enc"] ?: error("Missing sealed change journal")
-        val bytes = blob(journalId)
-        check(SyncBackend.digestBytes(bytes) == expected) { "Incremental journal hash mismatch" }
-        val payload = JSONObject(cipher.decrypt("synccs/delta-journal-v1",
-            String(bytes, Charsets.UTF_8)))
-        check(payload.getInt("format") == 1)
-        val rows = payload.getJSONObject("entries")
-        check(rows.length() <= 1000) { "Incremental journal exceeds safe size" }
-        val changes = linkedMapOf<String, String?>()
-        for (key in rows.keys()) {
-            check(key.isNotBlank() && key.length <= 512)
-            changes[key] = if (rows.isNull(key)) null else rows.getString(key)
-        }
-        return manifest.getInt("generation") to changes
-    }
-
-    /** SHA-256 digests are sealed with the account's AES key in each full root. */
-    private data class VerifiedRoot(val generation: Int, val hashes: List<String>)
-
-    private fun verifiedRoot(files: Map<String, String>, cipher: SyncCipher): VerifiedRoot {
-        val manifestId = files["synccs/manifest.json"] ?: error("Missing backup root")
-        val manifest = JSONObject(String(blob(manifestId), Charsets.UTF_8))
-        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete")) {
-            "Incomplete GitHub backup root"
-        }
-        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
-            "synccs-github-v1") { "Untrusted GitHub backup root" }
-        val shardArray = manifest.getJSONArray("shards")
-        check(shardArray.length() == 16) { "Incomplete shard manifest" }
-        val hashes = (0 until 16).map { shardArray.getString(it) }
-        check(hashes.all { it.matches(Regex("[0-9a-f]{64}")) })
-        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
-            hashes.joinToString("|")) { "Backup root authentication failed" }
-        return VerifiedRoot(manifest.getInt("generation"), hashes)
-    }
-
     /**
-     * Use authenticated snapshots at TWO Git revisions, not one network request
-     * per intervening commit. This works even if thousands of commits accumulated,
-     * and works across older backups without per-commit journals.
-     *
-     * Only the changed shards are retrieved; unchanged ciphertext remains
-     * verbatim in Git. A missing or altered shard fails closed.
+     * A/B comparison uses authenticated logical buckets at two Git revisions.
+     * Compaction may change ciphertext layout, but never creates phantom
+     * additions/deletions. No intervening history replay is necessary.
      */
     fun incrementalSince(base: String, cipher: SyncCipher, generation: Int): Incremental? {
         if (!base.matches(Regex("[0-9a-f]{40}")) || generation <= 0) return null
         val branch = ensurePrivateRepository()
         val head = revision(branch)
         if (head == base) return Incremental(head, generation, emptyMap())
-        // GitHub's "ahead" status establishes base as an ancestor of HEAD.
-        // Any restore that changes the authenticated generation must fall back.
         val comparison = get("/compare/$base...$head?per_page=1")
         if (comparison.optString("status") != "ahead") return null
-
-        val (_, baseFiles) = index(base)
-        val (_, headFiles) = index(head)
-        val oldRoot = verifiedRoot(baseFiles, cipher)
-        val newRoot = verifiedRoot(headFiles, cipher)
-        if (oldRoot.generation != generation || newRoot.generation != generation)
+        val (_, beforeFiles) = index(base)
+        val (_, afterFiles) = index(head)
+        val beforeRoot = rootAt(beforeFiles, cipher)
+        val afterRoot = rootAt(afterFiles, cipher)
+        if (beforeRoot.generation != generation || afterRoot.generation != generation)
             return null
-
         val result = linkedMapOf<String, String?>()
-        var alteredShards = 0
-        for (bucketIndex in 0 until 16) {
-            if (oldRoot.hashes[bucketIndex] == newRoot.hashes[bucketIndex]) continue
-            alteredShards++
-            val path = shard(bucketIndex)
-            val oldData = blob(baseFiles[path] ?: error("Missing base shard $bucketIndex"))
-            val newData = blob(headFiles[path] ?: error("Missing head shard $bucketIndex"))
-            check(SyncBackend.digestBytes(oldData) == oldRoot.hashes[bucketIndex] &&
-                SyncBackend.digestBytes(newData) == newRoot.hashes[bucketIndex]) {
-                "Altered GitHub backup shard; incremental sync blocked."
-            }
-            val oldEntries = JSONObject(String(oldData, Charsets.UTF_8))
-            val newEntries = JSONObject(String(newData, Charsets.UTF_8))
-            for (key in (oldEntries.keys().asSequence().toSet() +
-                    newEntries.keys().asSequence().toSet())) {
-                check(bucket(key) == bucketIndex) { "Invalid authenticated shard assignment" }
-                val previous = if (oldEntries.has(key)) oldEntries.getString(key) else null
-                val current = if (newEntries.has(key)) newEntries.getString(key) else null
-                if (previous != current) {
-                    if (current != null) cipher.decrypt(key, current)
-                    result[key] = current
+        for (bucket in 0 until 16) {
+            if (beforeRoot.hashes[bucket] == afterRoot.hashes[bucket] &&
+                beforeRoot.overlays[bucket] == afterRoot.overlays[bucket]) continue
+            val previous = mergedBucket(beforeFiles, beforeRoot, bucket)
+            val current = mergedBucket(afterFiles, afterRoot, bucket)
+            for (key in previous.keys + current.keys) {
+                val oldCipher = previous[key]
+                val newCipher = current[key]
+                if (oldCipher != newCipher) {
+                    // Re-encryption alone is not a logical edit.
+                    val oldValue = oldCipher?.let { cipher.decrypt(key, it) }
+                    val newValue = newCipher?.let { cipher.decrypt(key, it) }
+                    if (oldValue != newValue) result[key] = newCipher
                 }
             }
         }
         SyncSafety.validateChanges(result.size)
-
         return Incremental(head, generation, result)
     }
 
     /**
-     * Update only changed verified shards, preserving the rest verbatim.
-     * CAS and the sealed complete snapshot remain authoritative.
+     * Publish only a small v3 overlay. If a bucket's overlay grows too large,
+     * compact that bucket in the same CAS commit as the new manifest.
      */
     fun publishPartial(
         expectedRevision: String, expectedGeneration: Int, cipher: SyncCipher,
@@ -436,94 +537,91 @@ internal class GithubBackupStore(
         if (revision(branch) != expectedRevision)
             throw IOException("Sync conflict: remote revision changed.")
         val (tree, existing) = index(expectedRevision)
-        val manifest = JSONObject(String(blob(existing["synccs/manifest.json"]
-            ?: error("Missing verified GitHub manifest")), Charsets.UTF_8))
-        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete"))
-        val generation = manifest.getInt("generation")
-        check(SyncSafety.acceptGeneration(expectedGeneration, generation, true)) {
-            "Backup recovery generation changed; re-link this device before uploading."
+        val root = rootAt(existing, cipher)
+        check(root.generation == expectedGeneration) {
+            "Backup recovery generation changed; re-link before uploading"
         }
-        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
-            "synccs-github-v1")
-        val list = manifest.getJSONArray("shards")
-        check(list.length() == 16)
-        val hashes = (0 until 16).map { list.getString(it) }.toMutableList()
-        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
-            hashes.joinToString("|")) { "Backup root authentication failed." }
         SyncSafety.validateChanges(requested.size)
-        val shardStarted = android.os.SystemClock.elapsedRealtime()
-        var shardReadBytes = 0L
-        var shardWriteBytes = 0L
-        var shardParseMs = 0L
-        var shardSerializeMs = 0L
-        var shardChangedCount = 0
+        val started = android.os.SystemClock.elapsedRealtime()
+        val hashes = root.hashes.toMutableList()
+        val overlays = root.overlays.toMutableList()
         val patches = linkedMapOf<String, ByteArray>()
         val changed = linkedMapOf<String, String?>()
         val nestedDeletes = linkedSetOf<String>()
-        for (bucket in requested.keys.map(::bucket).distinct()) {
-            val path = shard(bucket)
-            val bytes = blob(existing[path] ?: error("Missing GitHub shard $bucket"))
-            check(SyncBackend.digestBytes(bytes) == hashes[bucket]) {
-                "Backup shard $bucket failed verification"
-            }
-            shardReadBytes += bytes.size
-            val shardParseStarted = android.os.SystemClock.elapsedRealtime()
-            val rows = JSONObject(String(bytes, Charsets.UTF_8))
-            shardParseMs += android.os.SystemClock.elapsedRealtime() - shardParseStarted
+        var writeBytes = 0L
+        var changedShards = 0
+        var compactedShards = 0
+        val touched = requested.keys.map(::bucket).distinct()
+        for (index in touched) {
+            val visible = mergedBucket(existing, root, index)
+            val delta = if (root.overlays[index].isEmpty()) JSONObject()
+                else checkedRows(existing, overlayPath(index), root.overlays[index], index)
             var altered = false
-            for ((key, value) in requested) {
-                if (bucket(key) != bucket) continue
-                val previous = if (rows.has(key)) cipher.decrypt(key, rows.getString(key)) else null
-                if (previous == value) continue
+            for ((key, raw) in requested) {
+                if (bucket(key) != index) continue
+                val previous = visible[key]?.let { cipher.decrypt(key, it) }
+                if (previous == raw) continue
                 if (key == "x/plugins") {
-                    val old = PluginSync.decode(previous)
-                    val next = PluginSync.decode(value)
-                    nestedDeletes.addAll((old.items.keys - next.items.keys)
+                    val before = PluginSync.decode(previous)
+                    val after = PluginSync.decode(raw)
+                    nestedDeletes.addAll((before.items.keys - after.items.keys)
                         .map { "x/plugins/$it" })
                 } else if (key == "x/profiles") {
-                    val old = ProfileSync.decode(previous)
-                    val next = ProfileSync.decode(value)
-                    nestedDeletes.addAll((old.items.keys - next.items.keys)
+                    val before = ProfileSync.decode(previous)
+                    val after = ProfileSync.decode(raw)
+                    nestedDeletes.addAll((before.items.keys - after.items.keys)
                         .map { "x/profiles/$it" })
                 }
-                if (value == null) {
-                    if (previous != null) rows.remove(key)
-                } else rows.put(key, cipher.encrypt(key, value))
-                changed[key] = value
+                if (raw == null) {
+                    visible.remove(key)
+                    delta.put(key, JSONObject.NULL)
+                } else {
+                    val encrypted = cipher.encrypt(key, raw)
+                    visible[key] = encrypted
+                    delta.put(key, encrypted)
+                }
+                changed[key] = raw
                 altered = true
             }
-            if (altered) {
-                val shardSerializeStarted = android.os.SystemClock.elapsedRealtime()
-                val data = rows.toString().toByteArray(Charsets.UTF_8)
-                shardSerializeMs += android.os.SystemClock.elapsedRealtime() - shardSerializeStarted
-                shardChangedCount++
-                shardWriteBytes += data.size
-                patches[path] = data
-                hashes[bucket] = SyncBackend.digestBytes(data)
+            if (!altered) continue
+            val serialized = delta.toString().toByteArray(Charsets.UTF_8)
+            // Bounding both entries and bytes avoids accumulating unbounded
+            // encrypted changes while retaining small normal deltas.
+            if (delta.length() > 128 || serialized.size > 64 * 1024) {
+                val full = JSONObject()
+                for ((key, ciphertext) in visible) full.put(key, ciphertext)
+                val baseBytes = full.toString().toByteArray(Charsets.UTF_8)
+                val emptyOverlay = "{}".toByteArray(Charsets.UTF_8)
+                patches[shard(index)] = baseBytes
+                patches[overlayPath(index)] = emptyOverlay
+                hashes[index] = SyncBackend.digestBytes(baseBytes)
+                overlays[index] = SyncBackend.digestBytes(emptyOverlay)
+                writeBytes += baseBytes.size + emptyOverlay.size
+                compactedShards++
+            } else {
+                patches[overlayPath(index)] = serialized
+                overlays[index] = SyncBackend.digestBytes(serialized)
+                writeBytes += serialized.size
             }
+            changedShards++
         }
-        android.util.Log.i("SyncCSAlloc", "SHARD_EDIT requestedKeys=" + requested.size +
-            " modifiedKeys=" + changed.size + " touchedShards=" +
-            requested.keys.map(::bucket).distinct().size +
-            " changedShards=" + shardChangedCount +
-            " readBytes=" + shardReadBytes + " writeBytes=" + shardWriteBytes +
-            " parseMs=" + shardParseMs + " serializeMs=" + shardSerializeMs +
-            " totalMs=" + (android.os.SystemClock.elapsedRealtime() - shardStarted))
         val deletes = changed.filterValues { it == null }.keys + nestedDeletes
         check(deletes.all { it in approvedDeletes }) {
             "Unverified deletion detected; refusing to publish."
         }
         SyncSafety.validateDeletes(deletes, approvedDeletes, 0)
         val newArchives = archiveChanges(existing, archives)
-
-        if (patches.isEmpty() && newArchives.isEmpty()) {
-            return expectedRevision
-        }
+        android.util.Log.i("SyncCSAlloc", "V3_OVERLAY requestedKeys=" + requested.size +
+            " modifiedKeys=" + changed.size + " touchedShards=" + touched.size +
+            " changedShards=" + changedShards + " compacted=" + compactedShards +
+            " writeBytes=" + writeBytes + " totalMs=" +
+            (android.os.SystemClock.elapsedRealtime() - started))
+        if (patches.isEmpty() && newArchives.isEmpty()) return expectedRevision
         patches.putAll(newArchives)
-        val delta = if (changed.size <= 1000) changeJournal(cipher, changed) else null
-        if (delta != null) patches["synccs/delta.enc"] = delta
-        patches["synccs/manifest.json"] = sealedManifest(cipher, generation, hashes,
-            delta?.let(SyncBackend::digestBytes))
+        val journal = if (changed.size <= 1000) changeJournal(cipher, changed) else null
+        if (journal != null) patches["synccs/delta.enc"] = journal
+        patches["synccs/manifest.json"] = sealedManifest(cipher, root.generation,
+            hashes, overlays, journal?.let(SyncBackend::digestBytes))
         patches["synccs/audit.enc"] = auditBlob(existing, cipher, changed.keys.toList(), deletes)
         return commit(expectedRevision, tree, branch, patches)
     }
@@ -748,14 +846,28 @@ internal class GithubBackupStore(
         return next
     }
 
-    /** One atomic first backup; an interrupted attempt cannot look complete. */
-    fun initialize(cipher: SyncCipher, initial: Map<String, String>,
-                   archives: Map<String, ByteArray> = emptyMap()): String {
+    /**
+     * Create one complete v3 source snapshot. A legacy v2 backup may be replaced
+     * only on explicit source-device approval; its contents are never imported.
+     * Historical Git commits remain available without force pushing.
+     */
+    fun initialize(
+        cipher: SyncCipher, initial: Map<String, String>,
+        archives: Map<String, ByteArray> = emptyMap(), replaceLegacy: Boolean = false
+    ): String {
         val branch = ensurePrivateRepository()
         val old = revision(branch)
         val (tree, entries) = index(old)
-        check(entries.keys.none { it.startsWith("synccs/") }) {
-            "A GitHub backup already exists; never silently overwrite it."
+        val manifestSha = entries["synccs/manifest.json"]
+        if (manifestSha != null) {
+            check(replaceLegacy) { "A GitHub backup already exists; source approval required." }
+            val priorFormat = JSONObject(String(blob(manifestSha), Charsets.UTF_8))
+                .optInt("format")
+            check(priorFormat == 2) {
+                "Only a legacy v2 snapshot may be replaced by approved v3 initialization."
+            }
+        } else check(entries.keys.none { it.startsWith("synccs/") }) {
+            "Incomplete existing SyncCS backup must not be overwritten."
         }
         val changes = linkedMapOf<String, ByteArray>()
         val hashes = mutableListOf<String>()
@@ -769,94 +881,83 @@ internal class GithubBackupStore(
             hashes.add(SyncBackend.digestBytes(bytes))
         }
         changes.putAll(archiveChanges(entries, archives))
-        changes["synccs/audit.enc"] = auditBlob(entries, cipher,
-            initial.keys.sorted(), emptySet())
-        changes["synccs/manifest.json"] = sealedManifest(cipher, 1, hashes)
+        changes["synccs/audit.enc"] = auditBlob(if (replaceLegacy) emptyMap() else entries,
+            cipher, initial.keys.sorted(), emptySet())
+        changes["synccs/manifest.json"] = sealedManifest(cipher, 1,
+            hashes, List(16) { "" })
         return commit(old, tree, branch, changes)
     }
 
     /**
-     * Strict CAS; no force pushes. Unexpected key disappearance is never accepted
-     * as a delete, and mass updates are blocked before writing any Git objects.
+     * Full restore uses the same verified v3 incremental publisher, so that
+     * deletes, nested profile/plugin removals, and CAS share one code path.
      */
     fun update(
         previous: Snapshot, cipher: SyncCipher, target: Map<String, String>,
         explicitDeletes: Set<String>, archives: Map<String, ByteArray> = emptyMap()
     ): String {
-        if (revision(previous.branch) != previous.revision) {
-            throw IOException("Sync conflict: remote revision changed.")
-        }
-        val deleted = previous.values.keys - target.keys
-        SyncSafety.validateDeletes(deleted, explicitDeletes, previous.values.size)
-        val logicalDeletions = deleted + nestedDeletions(previous.values, target)
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
-        val newArchives = archiveChanges(index(previous.revision).second, archives)
-        if (changed.isEmpty() && newArchives.isEmpty()) {
-            return previous.revision
-        }
-        SyncSafety.validateChanges(changed.size)
-        val changes = linkedMapOf<String, ByteArray>()
-        val hashes = previous.shardHashes.toMutableList()
-        for (i in changed.map(::bucket).distinct()) {
-            val part = JSONObject()
-            for ((key, value) in target) {
-                if (bucket(key) != i) continue
-                val existing = previous.encrypted[key]
-                part.put(key, if (existing != null && previous.values[key] == value)
-                    existing else cipher.encrypt(key, value))
-            }
-            val bytes = part.toString().toByteArray(Charsets.UTF_8)
-            changes[shard(i)] = bytes
-            hashes[i] = SyncBackend.digestBytes(bytes)
-        }
-        val delta = if (changed.size <= 1000) changeJournal(cipher,
-            changed.associateWith { target[it] }) else null
-        if (delta != null) changes["synccs/delta.enc"] = delta
-        changes["synccs/manifest.json"] = sealedManifest(cipher,
-            previous.generation, hashes, delta?.let(SyncBackend::digestBytes))
-        val (_, existing) = index(previous.revision)
-        changes.putAll(newArchives)
-        changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, logicalDeletions)
-        return commit(previous.revision, previous.tree, previous.branch, changes)
+        val deleted = previous.values.keys - target.keys
+        SyncSafety.validateDeletes(deleted, explicitDeletes, previous.values.size)
+        val changes = changed.associateWith { target[it] }
+        return publishPartial(previous.revision, previous.generation, cipher,
+            changes, explicitDeletes, archives)
     }
 
-    /** Only for an explicit user-approved recovery. Rejects concurrent writes. */
+    /** Restore a v3 logical snapshot in a new CAS commit and generation. */
     fun rollback(current: Snapshot, targetRevision: String, cipher: SyncCipher): String {
         check(revision(current.branch) == current.revision) {
             "Sync conflict: backup changed before recovery."
         }
         val old = readAt(targetRevision, current.branch, cipher)
-            ?: error("Recovery revision does not contain a complete backup")
+            ?: error("Recovery revision does not contain a complete v3 backup")
         val (_, oldFiles) = index(targetRevision)
+        val (_, currentFiles) = index(current.revision)
         val paths = JSONArray()
-        for ((path, hash) in oldFiles) {
-            if (path.startsWith("synccs/data/")) {
-                paths.put(JSONObject().put("path", path).put("mode", "100644")
-                    .put("type", "blob").put("sha", hash))
+        val restoredOverlays = old.overlayHashes.toMutableList()
+        for (i in 0 until 16) {
+            val path = shard(i)
+            val sha = oldFiles[path] ?: error("Missing recovery shard $path")
+            paths.put(JSONObject().put("path", path).put("mode", "100644")
+                .put("type", "blob").put("sha", sha))
+            val deltaPath = overlayPath(i)
+            if (old.overlayHashes[i].isNotEmpty()) {
+                val overlaySha = oldFiles[deltaPath] ?: error("Missing recovery overlay")
+                paths.put(JSONObject().put("path", deltaPath).put("mode", "100644")
+                    .put("type", "blob").put("sha", overlaySha))
+            } else if (currentFiles.containsKey(deltaPath)) {
+                // Git trees inherit paths from base_tree. Explicitly mask an
+                // overlay that exists only in the current (newer) revision.
+                val empty = "{}".toByteArray(Charsets.UTF_8)
+                paths.put(JSONObject().put("path", deltaPath).put("mode", "100644")
+                    .put("type", "blob").put("sha", createBlob(empty)))
+                restoredOverlays[i] = SyncBackend.digestBytes(empty)
             }
         }
-        val manifest = sealedManifest(cipher, current.generation + 1, old.shardHashes)
+        val manifest = sealedManifest(cipher, current.generation + 1,
+            old.shardHashes, restoredOverlays)
         paths.put(JSONObject().put("path", "synccs/manifest.json")
             .put("mode", "100644").put("type", "blob")
             .put("sha", createBlob(manifest)))
-        val newTree = write("/git/trees", "POST", JSONObject()
+        val nextTree = write("/git/trees", "POST", JSONObject()
             .put("base_tree", current.tree).put("tree", paths)).getString("sha")
         val next = write("/git/commits", "POST", JSONObject()
-            .put("message", "SyncCS recovered snapshot · " +
+            .put("message", "SyncCS recovered v3 snapshot · " +
                 deviceName.take(50).replace("\n", " ") + " · " + deviceId.take(8))
-            .put("tree", newTree).put("parents", JSONArray().put(current.revision)))
-            .getString("sha")
+            .put("tree", nextTree)
+            .put("parents", JSONArray().put(current.revision))).getString("sha")
         try {
             write(branchEndpoint(current.branch), "PATCH",
                 JSONObject().put("sha", next).put("force", false))
-        } catch (e: ApiException) {
-            if (e.code == 409 || e.code == 422)
-                throw IOException("Sync conflict: backup changed during recovery.", e)
-            throw e
+        } catch (error: ApiException) {
+            if (error.code == 409 || error.code == 422)
+                throw IOException("Sync conflict: backup changed during recovery.", error)
+            throw error
         }
         return next
     }
+
 }
 
 internal object GithubDeviceCode {

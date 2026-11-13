@@ -588,19 +588,22 @@ internal object SyncData {
 
 internal object PluginInventory {
     private const val MAX_FILE = 20 * 1024 * 1024
+    // One buffer is sufficient; synchronized ownership prevents concurrent
+    // plugin scans from modifying bytes while another SHA-256 is in progress.
+    private val digestGuard = Any()
+    private val digestBuffer = ByteArray(64 * 1024)
 
-    /** Verify .cs3 content without allocating whole extension packages in Java heap. */
-    private fun sha256(file: File): String {
+    /** Verify actual .cs3 bytes on every scan; only the scratch array is reused. */
+    private fun sha256(file: File): String = synchronized(digestGuard) {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
             while (true) {
-                val count = input.read(buffer)
+                val count = input.read(digestBuffer)
                 if (count < 0) break
-                digest.update(buffer, 0, count)
+                digest.update(digestBuffer, 0, count)
             }
         }
-        return SyncBackend.digestHex(digest.digest())
+        SyncBackend.digestHex(digest.digest())
     }
 
     private suspend fun ensureLoaded(context: Context, name: String, path: String, url: String? = null): Boolean {
