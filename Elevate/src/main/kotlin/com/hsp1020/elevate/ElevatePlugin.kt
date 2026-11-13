@@ -168,7 +168,20 @@ class ElevatePlugin : Plugin() {
             Application.getProcessName() else application.applicationInfo.processName
         val processType = if (processName == application.packageName) "MAIN" else "SECONDARY"
         val previousKey = prefs.getString("logged_process", null)
-        if (previousKey == processKey) {
+        // Java system properties are process-wide, including across plugin class loaders.
+        // Saved preferences alone may contain an older PID after a hot plugin reload.
+        val marker = "${application.packageName}.ElevateExitHistory.processKey"
+        val alreadyLoggedHere = synchronized(System.getProperties()) {
+            if (System.getProperty(marker) == processKey) true
+            else {
+                System.setProperty(marker, processKey)
+                false
+            }
+        }
+        if (alreadyLoggedHere || previousKey == processKey) {
+            if (previousKey != processKey) {
+                prefs.edit().putString("logged_process", processKey).apply()
+            }
             Log.i("ElevateExitHistory", "PROCESS_REUSE pid=$pid process=$processName " +
                 "processType=$processType reason=PLUGIN_RELOAD_SAME_PID")
             return
