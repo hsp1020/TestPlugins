@@ -32,6 +32,12 @@ class SyncDomainRegressionTest {
             """{"type":"long","value":77}""",
             """{"type":"float","value":1.25}""",
             """{"type":"string","value":"ordinary"}""",
+            """{"type":'set',"value":["ko","en"]}""",
+            """{'type':'set','value':['ko','en']}""",
+            """{type:set,value:["ko","en"]}""",
+            """{"type":'string',"value":"a,b"}""",
+            """{'type':'string','value':'a,b'}""",
+            """{type:string,value:"a,b"}""",
             """{"type":"string","value":"set"}""",
             """{"type":"set","value":["ko","en"]}""",
             """{"value":["en"],"type":"set"}""",
@@ -61,6 +67,12 @@ class SyncDomainRegressionTest {
         }
         assertTrue(SharedListSync.isCollection("p/Plugin/arbitrary_set",
             """{"type":"set","value":["a"]}"""))
+        assertTrue(SharedListSync.isCollection("p/Plugin/arbitrary_set",
+            """{"type":'set',"value":["a"]}"""))
+        assertTrue(SharedListSync.isCollection("p/Plugin/arbitrary_set",
+            """{'type':'set','value':['a']}"""))
+        assertTrue(SharedListSync.isCollection("p/Plugin/seen_providers",
+            """{"type":'string',"value":"a,b"}"""))
         assertFalse(SharedListSync.isCollection("p/Plugin/arbitrary_scalar",
             """{"type":"string","value":"a,b"}"""))
     }

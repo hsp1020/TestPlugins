@@ -80,13 +80,11 @@ internal object SharedListSync {
     }
 
     fun isCollection(key: String, raw: String): Boolean {
-        // A collection requires type "set" on any key, or type "string" on
-        // one of the recognized list keys. Escaped JSON can encode those
-        // types via unicode escapes; keep the old parser for all such inputs.
-        // This conservative rejection avoids JSONObject/JSONTokener for ordinary
-        // settings, even during a full 30k-key audit.
-        if ('\\' !in raw && !raw.contains("\"set\"") &&
-            (stringCollectionKind(key) == null || !raw.contains("\"string\""))) {
+        // Android's JSONTokener also accepts single-quoted and unquoted type
+        // values. Reject only when neither type can occur anywhere in the raw
+        // input; escape sequences always fall through to the original parser.
+        if ('\\' !in raw && !raw.contains("set") &&
+            (stringCollectionKind(key) == null || !raw.contains("string"))) {
             return false
         }
         return runCatching { parse(key, raw) != null }.getOrDefault(false)
