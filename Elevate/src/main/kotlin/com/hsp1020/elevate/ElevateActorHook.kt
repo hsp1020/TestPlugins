@@ -27,7 +27,6 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.ui.ViewHolderState
@@ -46,7 +45,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.util.WeakHashMap
 
@@ -65,8 +63,6 @@ internal class ElevateActorHook(private val appContext: Application) :
     private data class CastResult(val actors: List<ActorData>,
         val people: List<ElevateActorPersonRef>?)
     private data class Cached(val at: Long, val result: CastResult)
-    private val tmdbCache = LinkedHashMap<String, Cached>()
-    private val tmdbFlights = mutableMapOf<String, Deferred<CastResult?>>()
     private val anilistCache = LinkedHashMap<String, Cached>()
     private val anilistFlights = mutableMapOf<String, Deferred<CastResult?>>()
 
@@ -134,78 +130,50 @@ internal class ElevateActorHook(private val appContext: Application) :
         val apiKey = ElevateIdResolver.tmdbApiKey()
         trace("TMDB_PRECHECK", "raw=$raw id=$id movie=$movie apiKeyPresent=${!apiKey.isNullOrBlank()}")
         if (id == null || apiKey == null) return null
-        val language = getCurrentLocale(appContext)
-        val key = "${if (movie) "movie" else "tv"}:$id:$language:${apiKey.hashCode()}"
-        val now = System.currentTimeMillis()
-        val task = synchronized(tmdbCache) {
-            tmdbCache[key]?.takeIf { now - it.at in 0 until 43_200_000L }
-                ?.let { trace("TMDB_CACHE_HIT", "key=$key actors=${it.result.actors.size}"); return it.result }
-            tmdbFlights[key] ?: io.async(start = CoroutineStart.LAZY) {
-                trace("TMDB_REQUEST_START", "type=${if (movie) "movie" else "tv"} id=$id")
-                val found = try {
-                    withTimeoutOrNull(15_000L) {
-                        val kind = if (movie) "movie" else "tv"
-                        val res = app.get("https://api.themoviedb.org/3/$kind/$id/credits",
-                            params = mapOf("api_key" to apiKey, "language" to language), timeout = 12L)
-                        trace("TMDB_HTTP", "id=$id status=${res.code} bytes=${res.text.length}")
-                        val json = JSONObject(res.text)
-                        val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
-                        val crew = json.optJSONArray("crew")
-                        if (crew != null) for (i in 0 until crew.length()) {
-                            val obj = crew.optJSONObject(i) ?: continue
-                            val job = obj.optString("job")
-                            if (job != "Director" && job != "Writer") continue
-                            val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
-                            val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
-                            val photo = obj.optString("profile_path")
-                                .takeIf { it.startsWith("/") }
-                                ?.let { "https://image.tmdb.org/t/p/w185$it" }
-                            val existing = pairs.indexOfFirst { it.second.id == personId }
-                            if (existing >= 0) {
-                                val roles = listOfNotNull(pairs[existing].first.roleString, job)
-                                    .flatMap { it.split(", ") }.distinct().joinToString(", ")
-                                pairs[existing] = ActorData(Actor(name, photo), roleString = roles) to
-                                    ElevateActorPersonRef(personId, name, photo, true)
-                            } else pairs += ActorData(Actor(name, photo), roleString = job) to
-                                ElevateActorPersonRef(personId, name, photo, true)
-                        }
-                        val cast = json.optJSONArray("cast")
-                        if (cast != null) for (i in 0 until cast.length()) {
-                            val obj = cast.optJSONObject(i) ?: continue
-                            val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
-                            val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
-                            val photo = obj.optString("profile_path")
-                                .takeIf { it.startsWith("/") }
-                                ?.let { "https://image.tmdb.org/t/p/w185$it" }
-                            pairs += ActorData(Actor(name, photo),
-                                roleString = obj.optString("character").takeIf(String::isNotBlank)) to
-                                ElevateActorPersonRef(personId, name, photo, false)
-                        }
-                        trace("TMDB_PARSED", "id=$id crew=${crew?.length() ?: 0} cast=${cast?.length() ?: 0} valid=${pairs.size}")
-                        pairs.takeIf { it.isNotEmpty() }?.let { rows ->
-                            CastResult(rows.map { it.first }, rows.map { it.second })
-                        }
-                    }
-                } catch (cancelled: CancellationException) { throw cancelled }
-                  catch (e: Exception) { trace("TMDB_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}"); null }
-                trace("TMDB_RESULT", "id=$id actors=${found?.actors?.size ?: 0} timeoutOrEmpty=${found == null}")
-                if (found != null) synchronized(tmdbCache) {
-                    tmdbCache[key] = Cached(System.currentTimeMillis(), found)
-                    if (tmdbCache.size > 64) tmdbCache.remove(tmdbCache.keys.first())
-                }
-                found
-            }.also { flight ->
-                tmdbFlights[key] = flight
-                flight.invokeOnCompletion {
-                    synchronized(tmdbCache) {
-                        if (tmdbFlights[key] === flight) tmdbFlights.remove(key)
-                    }
-                }
+        return try {
+            val json = ElevateTmdbMetadata.credits(id, movie, getCurrentLocale(appContext))
+                ?: return null
+            val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
+            val crew = json.optJSONArray("crew")
+            if (crew != null) for (i in 0 until crew.length()) {
+                val obj = crew.optJSONObject(i) ?: continue
+                val job = obj.optString("job")
+                if (job != "Director" && job != "Writer") continue
+                val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
+                val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
+                val photo = obj.optString("profile_path")
+                    .takeIf { it.startsWith("/") }
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                val existing = pairs.indexOfFirst { it.second.id == personId }
+                if (existing >= 0) {
+                    val roles = listOfNotNull(pairs[existing].first.roleString, job)
+                        .flatMap { it.split(", ") }.distinct().joinToString(", ")
+                    pairs[existing] = ActorData(Actor(name, photo), roleString = roles) to
+                        ElevateActorPersonRef(personId, name, photo, true)
+                } else pairs += ActorData(Actor(name, photo), roleString = job) to
+                    ElevateActorPersonRef(personId, name, photo, true)
             }
+            val cast = json.optJSONArray("cast")
+            if (cast != null) for (i in 0 until cast.length()) {
+                val obj = cast.optJSONObject(i) ?: continue
+                val personId = obj.optInt("id").takeIf { it > 0 } ?: continue
+                val name = obj.optString("name").takeIf(String::isNotBlank) ?: continue
+                val photo = obj.optString("profile_path")
+                    .takeIf { it.startsWith("/") }
+                    ?.let { "https://image.tmdb.org/t/p/w185$it" }
+                pairs += ActorData(Actor(name, photo),
+                    roleString = obj.optString("character").takeIf(String::isNotBlank)) to
+                    ElevateActorPersonRef(personId, name, photo, false)
+            }
+            trace("TMDB_PARSED", "id=$id valid=${pairs.size}")
+            pairs.takeIf { it.isNotEmpty() }?.let { rows ->
+                CastResult(rows.map { it.first }, rows.map { it.second })
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (e: Exception) {
+            trace("TMDB_ERROR", "id=$id error=${e.javaClass.simpleName}:${e.message}")
+            null
         }
-        trace("TMDB_FLIGHT", "key=$key active=${tmdbFlights.containsKey(key)}")
-        task.start()
-        return task.await()
     }
 
     /** Provider actors remain available only after Elevate API resolution has failed. */
@@ -690,7 +658,6 @@ internal class ElevateActorHook(private val appContext: Application) :
         detach()
         main.cancel()
         io.cancel()
-        synchronized(tmdbCache) { tmdbCache.clear() }
         synchronized(anilistCache) { anilistCache.clear() }
     }
     override fun onActivityResumed(activity: Activity) {

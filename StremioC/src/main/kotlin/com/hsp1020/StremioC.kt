@@ -4276,7 +4276,8 @@ open class StremioC(
     )
 
     private data class ProviderArtInfo(
-        @JsonProperty("logo") val logo: String? = null
+        @JsonProperty("logo") val logo: String? = null,
+        @JsonProperty("originalLanguage") val originalLanguage: String? = null
     )
 
     private data class AioPerson(
@@ -5235,6 +5236,11 @@ open class StremioC(
                     }.toString()
                 }
 
+                sequenceOf(detailedEntry.original_language, detailedEntry.providerArt?.originalLanguage,
+                    this@CatalogEntry.original_language, this@CatalogEntry.providerArt?.originalLanguage)
+                    .mapNotNull { it?.trim()?.lowercase()?.takeIf { code ->
+                        code.matches(Regex("[a-z]{2,3}")) && code != "und"
+                    } }.firstOrNull()?.let { syncData["original_language"] = it }
                 syncData["watch_progress_allowed"] = StremioC.isWatchProgressAllowed(provider.mainUrl).toString()
                 syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && finalKitsuId != null).toString()
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)

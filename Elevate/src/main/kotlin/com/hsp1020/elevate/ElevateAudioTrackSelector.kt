@@ -16,7 +16,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.C
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import com.lagradost.cloudstream3.CommonActivity
@@ -30,16 +29,12 @@ import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.utils.SubtitleHelper
-import com.lagradost.cloudstream3.utils.DataStore.getKey
-import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
-import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.Locale
 
@@ -76,13 +71,16 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     }
     private var lastInstance: Int? = null
     private var lastProvider: String? = null
-    private var isAnime = false
     private var selected = false
     private var started = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var animeJob: Job? = null
-    private var awaitingAnime = false
-    private var pendingTrackParameters: TrackSelectionParameters? = null
+    private var originJob: Job? = null
+    private var originAttempted = false
+    private var originLanguage: String? = null
+    private var lookupTmdb: String? = null
+    private var lookupImdb: String? = null
+    private var lookupMovie = false
+    private var sourceVersion = 0
     private var lastEpisodeId: Int? = null
 
 
@@ -114,7 +112,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
         player = next
         selected = false
-        pendingTrackParameters = null
         if (next != null && active != null) {
             next.addListener(audioListener)
             select(next.currentTracks)
@@ -167,12 +164,12 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         scan(next.supportFragmentManager)
     }
 
-    private fun animeFlag(episode: ResultEpisode?): Boolean? {
-        val data = episode?.data?.takeIf { it.trimStart().startsWith("{") } ?: return null
-        return runCatching {
-            JSONObject(data).takeIf { it.has("isAnime") && !it.isNull("isAnime") }
-                ?.getBoolean("isAnime")
-        }.getOrNull()
+    private fun normalizedLanguage(value: String?): String? {
+        val code = value?.trim()?.replace('_', '-')?.lowercase(Locale.ROOT) ?: return null
+        return code.takeIf {
+            it.matches(Regex("[a-z]{2,3}(-[a-z]{2})?")) &&
+                it.substringBefore('-') !in setOf("und", "zxx")
+        }?.substringBefore('-')
     }
 
     private fun watch(candidate: Fragment) {
@@ -217,140 +214,127 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val generator = state.generatorState ?: return
         val response = generator.response
         val offline = generator.meta as? ExtractorUri
-        if (response == null && offline == null) {
-            return
-        }
+        if (response == null && offline == null) return
         val name = response?.apiName.orEmpty()
         val episode = generator.meta as? ResultEpisode
         val episodeId = episode?.id ?: offline?.id
         if (lastInstance == state.instance && lastProvider == name &&
             lastEpisodeId == episodeId) return
-        animeJob?.cancel()
-        animeJob = null
-        awaitingAnime = false
-        pendingTrackParameters = null
+        originJob?.cancel()
+        originJob = null
+        sourceVersion++
         lastInstance = state.instance
         lastProvider = name
         lastEpisodeId = episodeId
         selected = false
-        val flag = animeFlag(episode)
-        val tags = response?.tags.orEmpty().map { it.trim().lowercase(Locale.ROOT) }.toSet()
-        isAnime = (flag ?: ((episode?.tvType ?: offline?.tvType ?: response?.type) in setOf(
-            TvType.Anime, TvType.AnimeMovie, TvType.OVA
-        ))) || "anime" in tags || ("animation" in tags && "japanese" in tags)
-
-        val savedAnime = if (offline != null && response == null)
-            ElevateOfflineMedia.anime(application, offline.parentId) else null
-        if (savedAnime == true) isAnime = true
-        val onlineIds = if (!isAnime && response != null && offline == null)
-            ElevateMediaIdentity.collect(response, episode?.data) else null
-        val detectOnline = onlineIds?.let {
-            it.simkl != null || it.imdb != null || it.tmdb != null
-        } == true
-        val detectOffline = offline != null && response == null &&
-            !isAnime && savedAnime == null
-        if (detectOffline || detectOnline) {
-            // Defer fallback-language selection until existing Simkl ID mapping resolves.
-            // The same pending-track guard protects manual choices during offline detection.
-            awaitingAnime = true
-            val expectedFragment = fragment
-            val expectedInstance = state.instance
-            animeJob = scope.launch {
-                val detected = if (detectOffline) {
-                    val header = withContext(Dispatchers.IO) {
-                        application.getKey<DownloadObjects.DownloadHeaderCached>(
-                            DOWNLOAD_HEADER_CACHE, offline!!.parentId.toString()
-                        )
-                    }
-                    header?.let { ElevateSkipRepository.isDownloadedAnime(it, offline!!) }
-                } else {
-                    val movie = (episode?.tvType ?: response?.type) in setOf(TvType.Movie, TvType.AnimeMovie)
-                    kotlinx.coroutines.withTimeoutOrNull(8_000L) {
-                        onlineIds?.let { ElevateMediaIdentity.simklMapping(it, movie) }
-                            ?.segment?.let { it == "anime" }
-                    }
-                }
-                if (fragment !== expectedFragment || lastInstance != expectedInstance ||
-                    lastEpisodeId != episodeId) return@launch
-                awaitingAnime = false
-                if (detected != null) isAnime = detected
-                val current = player
-                if (current != null) {
-                    if (pendingTrackParameters != null &&
-                        pendingTrackParameters != current.trackSelectionParameters) {
-                        // Do not override a manual track change while metadata was loading.
-                        selected = true
-                        current.removeListener(audioListener)
-                    } else {
-                        select(current.currentTracks)
-                    }
-                }
-                pendingTrackParameters = null
-            }
-        }
-        val activePlayer = player
-        if (activePlayer != null) {
-            select(activePlayer.currentTracks)
-        } else {
-            refreshPlayer()
-        }
+        originAttempted = false
+        val offlineIdentity = if (offline != null && response == null)
+            ElevateOfflineMedia.identity(application, offline.parentId) else null
+        originLanguage = normalizedLanguage(response?.syncData?.get("original_language"))
+            ?: normalizedLanguage(runCatching {
+                JSONObject(episode?.data.orEmpty()).optString("original_language")
+            }.getOrNull())
+            ?: normalizedLanguage(offline?.parentId?.let {
+                ElevateOfflineMedia.originalLanguage(application, it)
+            })
+        val ids = ElevateMediaIdentity.collect(response, episode?.data)
+        lookupTmdb = offlineIdentity?.tmdb ?: ids.tmdb
+        lookupImdb = offlineIdentity?.imdb ?: ids.imdb
+        val type = episode?.tvType ?: offline?.tvType ?: response?.type
+        val declaredMovie = runCatching {
+            JSONObject(response?.url.orEmpty()).optString("type") == "movie"
+        }.getOrDefault(false)
+        lookupMovie = offlineIdentity?.movie ?: (type in setOf(TvType.Movie, TvType.AnimeMovie) || declaredMovie)
+        player?.let { select(it.currentTracks) } ?: refreshPlayer()
     }
 
     private fun select(tracks: Tracks) {
         val current = player ?: return
-        if (selected) {
-            return
-        }
+        if (selected) return
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        if (groups.isEmpty()) {
-            return
-        }
-        if (awaitingAnime) {
-            if (pendingTrackParameters == null) {
-                pendingTrackParameters = current.trackSelectionParameters
-            }
-            return
-        }
+        if (groups.isEmpty()) return
         val appLanguage = fragment?.context?.resources?.configuration?.let {
             ConfigurationCompat.getLocales(it).get(0)?.language
-        }
-        val languages = listOfNotNull(appLanguage, if (isAnime) "ja" else "en",
-            "en".takeIf { isAnime }).map { it.lowercase(Locale.ROOT) }.distinct()
-        val match = languages.firstNotNullOfOrNull { language ->
-            groups.firstNotNullOfOrNull { group ->
+        }?.let(::normalizedLanguage)
+        fun match(language: String?): Pair<Tracks.Group, Int>? {
+            val wanted = language ?: return null
+            return groups.firstNotNullOfOrNull { group ->
                 (0 until group.length).firstOrNull { i ->
                     val raw = group.getTrackFormat(i).language?.trim().orEmpty()
                     val code = SubtitleHelper.fromCodeToLangTagIETF(raw)
                         ?: SubtitleHelper.fromCodeToLangTagIETF(
-                            raw.replace('_', '-').substringBefore('-')
-                        )
+                            raw.replace('_', '-').substringBefore('-'))
                     group.isTrackSupported(i) &&
-                        code?.substringBefore('-')?.equals(language, ignoreCase = true) == true
+                        code?.substringBefore('-')?.equals(wanted, ignoreCase = true) == true
                 }?.let { group to it }
             }
         }
-        if (match == null) {
+        val appMatch = match(appLanguage)
+        if (appMatch != null) {
+            choose(current, appMatch)
             return
         }
+        val available = groups.sumOf { group ->
+            (0 until group.length).count { group.isTrackSupported(it) }
+        }
+        if (originLanguage == null && !originAttempted && available > 1 &&
+            (lookupTmdb != null || lookupImdb != null)) {
+            originAttempted = true
+            val version = sourceVersion
+            val sourcePlayer = current
+            val initialParameters = current.trackSelectionParameters
+            val tmdb = lookupTmdb
+            val imdb = lookupImdb
+            val movie = lookupMovie
+            originJob = scope.launch {
+                val resolved = try {
+                    val tmdbId = tmdb ?: imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
+                    tmdbId?.let {
+                        ElevateTmdbMetadata.originalLanguage(it, movie,
+                            com.lagradost.cloudstream3.ui.settings.getCurrentLocale(application),
+                            includeCredits = ElevateFeaturePrefs.enabled(application,
+                                ElevateFeature.ACTOR_INFORMATION))
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                  catch (_: Exception) { null }
+                if (sourceVersion != version) return@launch
+                originJob = null
+                originLanguage = normalizedLanguage(resolved)
+                val activePlayer = player ?: return@launch
+                if (activePlayer === sourcePlayer &&
+                    activePlayer.trackSelectionParameters != initialParameters) {
+                    // Never override an audio track manually chosen while metadata was loading.
+                    selected = true
+                    activePlayer.removeListener(audioListener)
+                    return@launch
+                }
+                select(activePlayer.currentTracks)
+            }
+            return
+        }
+        if (originJob != null) return
+        val fallback = match(originLanguage) ?: match("en") ?: return
+        choose(current, fallback)
+    }
+
+    private fun choose(current: Media3Player, match: Pair<Tracks.Group, Int>) {
         selected = true
         current.removeListener(audioListener)
         val (group, index) = match
         current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
-        main.postDelayed({
-            if (player === current) {
-            }
-        }, 250L)
     }
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
         main.removeCallbacks(attachRetry)
         attachAttempts = 0
-        animeJob?.cancel()
-        animeJob = null
-        awaitingAnime = false
-        pendingTrackParameters = null
+        originJob?.cancel()
+        originJob = null
+        originAttempted = false
+        originLanguage = null
+        lookupTmdb = null
+        lookupImdb = null
         observedRoot?.removeOnLayoutChangeListener(rootLayout)
         observedRoot = null
         removeObserver?.invoke()

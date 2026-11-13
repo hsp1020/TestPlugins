@@ -75,7 +75,7 @@ internal enum class ElevateFeature(
     SUBTITLE_LANGUAGE_NAMES("Playback & Subtitles", "Subtitle Language Names",
         "Localize online subtitle languages and group matching tracks using CloudStream's native language names."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
-        "Select app-language audio, then Japanese for anime or English for other titles."),
+        "Select app-language audio, then the title's original language, then English. Keep the default if none match."),
     SKIP("Playback & Subtitles", "Unified Skip Intervals",
         "Provide skip segments using native timestamps, AniSkip, Anime Skip, IntroDb and TheIntroDB. Configure automatic skipping separately below."),
     PIP_LIBRARY_BROWSE("Playback & Subtitles", "Browse Library in PiP",

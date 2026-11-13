@@ -50,6 +50,12 @@ internal object ElevateOfflineMedia {
     fun putAnime(ctx: Context, parentId: Int, flag: Boolean) {
         prefs(ctx).edit().putBoolean("anime:$parentId", flag).apply()
     }
+    fun originalLanguage(ctx: Context, parentId: Int?): String? = parentId?.let {
+        prefs(ctx).getString("original_language:$it", null)
+    }
+    fun putOriginalLanguage(ctx: Context, parentId: Int, language: String) {
+        prefs(ctx).edit().putString("original_language:$parentId", language).apply()
+    }
 
     fun identity(ctx: Context, parentId: Int?): ElevateSkipRepository.Identity? {
         val raw = prefs(ctx).getString("identity:${parentId ?: return null}", null) ?: return null
@@ -143,22 +149,20 @@ internal class ElevateDownloadMetadataCapture(private val application: Applicati
     fun stop() = scope.cancel()
 
     private suspend fun capture(item: DownloadObjects.DownloadQueueItem) {
-        val needAnime = ElevateFeaturePrefs.enabled(application, ElevateFeature.AUDIO_TRACKS)
+        val needAudio = ElevateFeaturePrefs.enabled(application, ElevateFeature.AUDIO_TRACKS)
         val needSkip = ElevateFeaturePrefs.enabled(application, ElevateFeature.SKIP)
-        if (!needAnime && !needSkip) return
+        if (!needAudio && !needSkip) return
         val episode = item.episode
         val parent = item.resultId
-        val animeTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
-        val direct = runCatching {
-            val j = JSONObject(episode.data)
-            if (j.has("isAnime") && !j.isNull("isAnime")) j.getBoolean("isAnime") else null
-        }.getOrNull()
-        val knownAnime = direct ?: if (item.resultType in animeTypes ||
-            episode.tvType in animeTypes) true else null
-
-        if (needAnime && knownAnime != null)
-            ElevateOfflineMedia.putAnime(application, parent, knownAnime)
-        if (!needSkip && (knownAnime != null || !needAnime)) return
+        val knownAnime = if (needSkip) {
+            val animeTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+            val direct = runCatching {
+                val j = JSONObject(episode.data)
+                if (j.has("isAnime") && !j.isNull("isAnime")) j.getBoolean("isAnime") else null
+            }.getOrNull()
+            direct ?: if (item.resultType in animeTypes || episode.tvType in animeTypes) true else null
+        } else null
+        if (needSkip && knownAnime != null) ElevateOfflineMedia.putAnime(application, parent, knownAnime)
         val response = try {
             withTimeoutOrNull(8_000L) {
                 APIHolder.getApiFromNameNull(item.apiName)?.load(item.resultUrl)
@@ -174,8 +178,10 @@ internal class ElevateDownloadMetadataCapture(private val application: Applicati
             ?: response.duration?.toLong()?.times(60_000L)
                 ?.takeIf { it in 60_000L..86_400_000L }
             ?: 0L
+        if (needAudio) response.syncData["original_language"]?.trim()?.takeIf(String::isNotBlank)
+            ?.let { ElevateOfflineMedia.putOriginalLanguage(application, parent, it) }
         val identity = ElevateSkipRepository.identity(response, episode, duration)
-        if (needAnime && knownAnime == null && identity.anime) {
+        if (needSkip && knownAnime == null && identity.anime) {
             ElevateOfflineMedia.putAnime(application, parent, true)
         }
         if (listOf(identity.imdb, identity.tmdb, identity.mal,

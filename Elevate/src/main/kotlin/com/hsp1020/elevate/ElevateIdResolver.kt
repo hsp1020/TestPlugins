@@ -294,9 +294,14 @@ internal object ElevateIdResolver {
                             trace("IMDB_TMDB_HTTP", "imdb=$imdb code=${res.code} bytes=${res.text.length}")
                             val rows = JSONObject(res.text).optJSONArray(
                                 if (movie) "movie_results" else "tv_results")
-                            (0 until (rows?.length() ?: 0)).mapNotNull {
-                                rows?.optJSONObject(it)?.optInt("id")?.takeIf { id -> id > 0 }
-                            }.distinct().singleOrNull()?.toString()
+                            val unique = (0 until (rows?.length() ?: 0)).mapNotNull {
+                                rows?.optJSONObject(it)?.takeIf { row -> row.optInt("id") > 0 }
+                            }.distinctBy { it.optInt("id") }.singleOrNull()
+                            unique?.let { row ->
+                                ElevateTmdbMetadata.rememberOriginalLanguage(
+                                    row.optInt("id").toString(), movie, row.optString("original_language"))
+                                row.optInt("id").toString()
+                            }
                         }
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
