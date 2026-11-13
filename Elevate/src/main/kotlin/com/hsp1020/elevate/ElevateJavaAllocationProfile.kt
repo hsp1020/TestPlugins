@@ -61,9 +61,9 @@ internal object ElevateJavaAllocationProfile {
             val params = Bundle().apply {
                 // AndroidX Profiling.HeapProfileRequestBuilder's platform parameter keys.
                 putBoolean("KEY_TRACK_JAVA_ALLOCATIONS", true)
-                putInt("KEY_DURATION_MS", 60_000)
-                putInt("KEY_SIZE_KB", 8_192)
-                putLong("KEY_SAMPLING_INTERVAL_BYTES", 16_384L)
+                putInt("KEY_DURATION_MS", 45_000)
+                putInt("KEY_SIZE_KB", 65_536)
+                putLong("KEY_SAMPLING_INTERVAL_BYTES", 262_144L)
             }
             try {
                 manager.requestProfiling(
@@ -73,8 +73,8 @@ internal object ElevateJavaAllocationProfile {
                 stopSignal = signal
                 requestTag = tag
                 awaitingResult = true
-                state = "Recording requested (max 60 s). Reproduce, then Stop."
-                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=16384")
+                state = "Recording requested (max 45 s). Reproduce, then Stop."
+                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=45000")
                 state
             } catch (error: Exception) {
                 state = "Request failed: " + error.javaClass.simpleName
@@ -134,7 +134,7 @@ internal object ElevateJavaAllocationProfile {
                     temp.delete()
                 }
                 profiles(context).drop(4).forEach { it.delete() }
-                "Saved " + target.name + " (" + target.length() / 1024L + " KiB)"
+                "Saved " + target.name + " (" + target.length() / 1024L + " KiB; completeness unverified)"
             }
         } catch (error: Exception) {
             Log.e(TAG, "Result processing failed tag=" + tag, error)
