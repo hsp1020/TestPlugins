@@ -3,6 +3,7 @@ package com.SyncCS
 import android.util.Base64
 import android.util.Base64OutputStream
 import android.util.JsonReader
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -267,7 +268,12 @@ internal class GithubBackupStore(
                 val status = conn.responseCode
                 if (status !in 200..299) throw ApiException(status,
                     "GitHub raw Blob HTTP $status (stage=blob-read)")
-                val bytes = conn.inputStream.use { it.readBytes() }
+                val bytes = conn.inputStream.use { input ->
+                    val length = if (conn.contentEncoding.isNullOrBlank() ||
+                        conn.contentEncoding.equals("identity", ignoreCase = true))
+                        conn.contentLengthLong else -1L
+                    readBlobResponse(input, length)
+                }
                 // Gracefully handle providers that still return the JSON
                 // representation despite a raw Accept header.
                 if (conn.contentType?.contains("json", true) == true &&
@@ -281,6 +287,30 @@ internal class GithubBackupStore(
                 conn.disconnect()
             }
         }
+    }
+
+    /** Read a known-length raw Blob into one array; preserve streaming fallback. */
+    private fun readBlobResponse(input: InputStream, contentLength: Long): ByteArray {
+        if (contentLength <= 0L || contentLength > 32L * 1024 * 1024)
+            return input.readBytes()
+        val bytes = ByteArray(contentLength.toInt())
+        var offset = 0
+        while (offset < bytes.size) {
+            val read = input.read(bytes, offset, bytes.size - offset)
+            if (read < 0) throw IOException("Truncated GitHub Blob response")
+            if (read == 0) {
+                val single = input.read()
+                if (single < 0) throw IOException("Truncated GitHub Blob response")
+                bytes[offset++] = single.toByte()
+            } else offset += read
+        }
+        val extra = input.read()
+        if (extra < 0) return bytes
+        val expanded = ByteArrayOutputStream(bytes.size + 1)
+        expanded.write(bytes)
+        expanded.write(extra)
+        input.copyTo(expanded)
+        return expanded.toByteArray()
     }
 
     private val blobPrefix = "{\"content\":\"".toByteArray(Charsets.US_ASCII)
@@ -328,9 +358,21 @@ internal class GithubBackupStore(
         }
     }
 
-    private fun bucket(key: String): Int =
-        (MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))[0]
-            .toInt() and 255) ushr 4
+    private class BucketHashState {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val output = ByteArray(32)
+    }
+    private companion object {
+        val bucketHashState = object : ThreadLocal<BucketHashState>() {
+            override fun initialValue() = BucketHashState()
+        }
+    }
+    private fun bucket(key: String): Int {
+        val state = bucketHashState.get()
+        state.digest.update(key.toByteArray(Charsets.UTF_8))
+        state.digest.digest(state.output, 0, state.output.size)
+        return (state.output[0].toInt() and 255) ushr 4
+    }
     private fun shard(index: Int): String = "synccs/data/" + index.toString(16) + ".json"
 
     private fun overlayPath(index: Int): String =
@@ -407,7 +449,8 @@ internal class GithubBackupStore(
 
     /** Resolve one logical bucket; tombstones mask base values. */
     private fun mergedBucket(
-        files: Map<String, String>, root: Root, index: Int
+        files: Map<String, String>, root: Root, index: Int,
+        onVerifiedOverlay: ((JSONObject) -> Unit)? = null
     ): LinkedHashMap<String, String> {
         val base = checkedRows(files, shard(index), root.hashes[index], index)
         val result = linkedMapOf<String, String>()
@@ -418,6 +461,7 @@ internal class GithubBackupStore(
         val overlayHash = root.overlays[index]
         if (overlayHash.isNotEmpty()) {
             val overlay = checkedRows(files, overlayPath(index), overlayHash, index)
+            onVerifiedOverlay?.invoke(overlay)
             for (key in overlay.keys()) {
                 if (overlay.isNull(key)) result.remove(key)
                 else result[key] = overlay.getString(key)
@@ -553,9 +597,9 @@ internal class GithubBackupStore(
         var compactedShards = 0
         val touched = requested.keys.map(::bucket).distinct()
         for (index in touched) {
-            val visible = mergedBucket(existing, root, index)
-            val delta = if (root.overlays[index].isEmpty()) JSONObject()
-                else checkedRows(existing, overlayPath(index), root.overlays[index], index)
+            var verifiedOverlay: JSONObject? = null
+            val visible = mergedBucket(existing, root, index) { verifiedOverlay = it }
+            val delta = verifiedOverlay ?: JSONObject()
             var altered = false
             for ((key, raw) in requested) {
                 if (bucket(key) != index) continue
