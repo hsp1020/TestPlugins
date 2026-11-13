@@ -1722,6 +1722,16 @@ class YoutubeProvider(
         return Triple(channel, views, date)
     }
 
+    /** Inspect the nested JSON without constructing Map.toString() output. */
+    private fun containsReelWatchEndpoint(value: Any?): Boolean = when (value) {
+        null -> false
+        is Map<*, *> -> value.any { (key, nested) ->
+            containsReelWatchEndpoint(key) || containsReelWatchEndpoint(nested)
+        }
+        is Collection<*> -> value.any { containsReelWatchEndpoint(it) }
+        else -> value.toString().contains("reelWatchEndpoint")
+    }
+
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
@@ -1939,8 +1949,8 @@ class YoutubeProvider(
                     if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
                 }
                 val isShorts = lockup.getMapKey("content")
-                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
-                    .contains("reelWatchEndpoint")
+                    ?.containsKey("shortsLockupViewModel") == true ||
+                    containsReelWatchEndpoint(lockup)
                 val finalTitle: String
                 val poster: String
 
@@ -2577,7 +2587,6 @@ class YoutubeProvider(
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        YouTubeMapTrace.arm("home")
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -2803,7 +2812,6 @@ class YoutubeProvider(
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        YouTubeMapTrace.arm("search")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
             return newSearchResponseList(emptyList(), false)
@@ -3423,7 +3431,6 @@ class YoutubeProvider(
         url: String, direct: Boolean, channelTargetPages: Int = 2,
         channelExpansionTab: String? = null
     ): LoadResponse {
-        YouTubeMapTrace.arm("page")
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -4327,7 +4334,6 @@ class YoutubeProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        YouTubeMapTrace.arm("links")
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val isShort = data.contains("/shorts/")
 
