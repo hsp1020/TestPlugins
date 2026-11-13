@@ -167,6 +167,27 @@ class YoutubeProvider(
 
         // Short-lived channel tab snapshots avoid repeating all continuation requests on re-entry.
         private const val CHANNEL_TAB_REUSE_MS = 2 * 60_000L
+        private const val CHANNEL_HEADER_REUSE_MS = 30 * 60_000L
+        private data class CachedChannelHeader(
+            val title: String,
+            val poster: String?,
+            val description: String,
+            val subscriberCount: String,
+            val videoCount: String,
+            val videosTitle: String?,
+            val shortsTitle: String?,
+            val apiKey: String?,
+            val clientVersion: String,
+            val visitorData: String?,
+            val savedAtMs: Long
+        )
+        private val channelHeaderCache = Collections.synchronizedMap(
+            object : LinkedHashMap<String, CachedChannelHeader>(12, 0.75f, true) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<String, CachedChannelHeader>?
+                ): Boolean = size > 12
+            }
+        )
         private data class CachedChannelTab(
             val episodes: List<Episode>,
             val savedAtMs: Long,
@@ -3623,14 +3644,39 @@ class YoutubeProvider(
                 }
 
                 val channelUrl = "$cleanUrl/videos"
-                
-                val response = withContext(Dispatchers.IO) {
-                    app.get(channelUrl, interceptor = ytInterceptor)
-                }
+                val maxPagesLimit = channelPageLimit()
+                val pageTarget = channelTargetPages.coerceIn(1, maxPagesLimit.coerceAtLeast(1))
+                val headerKey = "${normalizedChannelUrl(cleanUrl)}|$lang"
+                // Expansion reuses metadata only when both tab caches are still valid
+                // for the current channel, language, and sort order.
+                val cachedHeader = if (channelExpansionTab == "videos" || channelExpansionTab == "shorts") {
+                    val now = System.currentTimeMillis()
+                    val tabsValid = synchronized(channelTabCache) {
+                        listOf("videos", "shorts").all { tab ->
+                            val cached = channelTabCache[channelCacheKey(cleanUrl, tab, lang, maxPagesLimit)]
+                            cached != null && cached.episodes.isNotEmpty() &&
+                                (now - cached.savedAtMs) in 0L..(
+                                    if (cached.nextToken.isNullOrBlank()) CHANNEL_TAB_REUSE_MS
+                                    else CHANNEL_HEADER_REUSE_MS
+                                )
+                        }
+                    }
+                    if (tabsValid) synchronized(channelHeaderCache) {
+                        channelHeaderCache[headerKey]?.takeIf {
+                            !it.apiKey.isNullOrBlank() &&
+                                (now - it.savedAtMs) in 0L..CHANNEL_HEADER_REUSE_MS
+                        }
+                    } else null
+                } else null
 
-                val html = response.text
-                val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
-                rememberChannelSortLabels(cleanUrl, data)
+                val response = if (cachedHeader == null) withContext(Dispatchers.IO) {
+                    app.get(channelUrl, interceptor = ytInterceptor)
+                } else null
+                val html = response?.text.orEmpty()
+                val data = if (response != null) {
+                    extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
+                } else null
+                if (data != null) rememberChannelSortLabels(cleanUrl, data)
                 val channelTabs = (safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs")
                     ?: safeGet(data, "contents", "singleColumnBrowseResultsRenderer", "tabs")) as? List<*>
                 fun channelTabTitle(suffix: String): String? = channelTabs?.firstNotNullOfOrNull { tab ->
@@ -3640,17 +3686,16 @@ class YoutubeProvider(
                         (safeGet(tab, "tabRenderer", "title") as? String)?.takeIf { it.isNotBlank() }
                     } else null
                 }
-                val videosTitle = channelTabTitle("/videos")
-                val shortsTitle = channelTabTitle("/shorts")
+                val videosTitle = cachedHeader?.videosTitle ?: channelTabTitle("/videos")
+                val shortsTitle = cachedHeader?.shortsTitle ?: channelTabTitle("/shorts")
 
-                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                val maxPagesLimit = channelPageLimit()
-                val pageTarget = channelTargetPages.coerceIn(1, maxPagesLimit.coerceAtLeast(1))
+                val apiKey = cachedHeader?.apiKey ?: YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                val clientVersion = cachedHeader?.clientVersion
+                    ?: YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                val visitorData = cachedHeader?.visitorData ?: YoutubeUtils.findConfig(html, "VISITOR_DATA")
 
-                var channelDescription = channelDescriptionFromData(data)
-                if (channelDescription.isBlank()) {
+                var channelDescription = cachedHeader?.description ?: channelDescriptionFromData(data)
+                if (cachedHeader == null && channelDescription.isBlank()) {
                     try {
                         val aboutResponse = withContext(Dispatchers.IO) {
                             app.get("$cleanUrl/about", interceptor = ytInterceptor)
@@ -3669,29 +3714,29 @@ class YoutubeProvider(
                     }
                 }
                 if (channelDescription.isBlank()) {
-                    channelDescription = response.document
-                        .selectFirst("meta[property=og:description]")?.attr("content").orEmpty()
+                    channelDescription = response?.document
+                        ?.selectFirst("meta[property=og:description]")?.attr("content").orEmpty()
                 }
                 
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
-                val title = extractTitle(safeGet(header, "title") as? Map<*, *>)
+                val title = cachedHeader?.title ?: extractTitle(safeGet(header, "title") as? Map<*, *>)
                     ?: extractTitle(safeGet(header, "pageTitle") as? Map<*, *>)
                     ?: safeGet(header, "content", "pageHeaderViewModel", "title", "dynamicTextViewModel", "text", "content") as? String
-                    ?: response.document.selectFirst("meta[property=og:title]")?.attr("content")
+                    ?: response?.document?.selectFirst("meta[property=og:title]")?.attr("content")
                     ?: "YouTube Channel"
 
-                val poster = YoutubeUtils.getBestThumbnail(safeGet(header, "avatar"))
+                val poster = cachedHeader?.poster ?: YoutubeUtils.getBestThumbnail(safeGet(header, "avatar"))
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
-                    ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: response?.document?.selectFirst("meta[property=og:image]")?.attr("content")
 
                 if (channelDescription.isBlank()) {
                     channelDescription = "\u200b"
                 }
 
-                var subscriberCount = ""
-                var videoCount = ""
+                var subscriberCount = cachedHeader?.subscriberCount.orEmpty()
+                var videoCount = cachedHeader?.videoCount.orEmpty()
                 val metaParts = mutableListOf<String>()
 
                 val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
@@ -3707,7 +3752,7 @@ class YoutubeProvider(
                     }
                 }
 
-                if (metaParts.isNotEmpty()) {
+                if (cachedHeader == null && metaParts.isNotEmpty()) {
                     if (metaParts.size >= 3) {
                         subscriberCount = metaParts[metaParts.size - 2]
                         videoCount = metaParts[metaParts.size - 1]
@@ -3715,7 +3760,7 @@ class YoutubeProvider(
                         subscriberCount = metaParts[0]
                         videoCount = metaParts[1]
                     }
-                } else {
+                } else if (cachedHeader == null) {
                     subscriberCount = getText(safeGet(header, "subscriberCountText"))
                     videoCount = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
                 }
@@ -3761,7 +3806,7 @@ class YoutubeProvider(
                     try {
                         if (snapshot == null) {
                         // The channel header already fetched and parsed /videos.
-                        var tabData = if (tabUrl == channelUrl) data else {
+                        var tabData = if (tabUrl == channelUrl && data != null) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
                             extractYtInitialData(tabHtml) ?: run {
                                 Log.w("YouTubeChannel", "event=CHANNEL_ERROR tab=$tabName page=1 reason=initial_data_missing")
@@ -3984,6 +4029,14 @@ class YoutubeProvider(
                     val videosDeferred = async { fetchTab("$cleanUrl/videos") }
                     val shortsDeferred = async { fetchTab("$cleanUrl/shorts") }
                     Pair(videosDeferred.await(), shortsDeferred.await())
+                }
+                // Keep only the small header fields, not HTML, DOM or the JSON tree.
+                if (cachedHeader == null && data != null) synchronized(channelHeaderCache) {
+                    channelHeaderCache[headerKey] = CachedChannelHeader(
+                        title, poster, channelDescription, subscriberCount, videoCount,
+                        videosTitle, shortsTitle, apiKey, clientVersion, visitorData,
+                        System.currentTimeMillis()
+                    )
                 }
 
                 val videosEpisodes = pair.first
