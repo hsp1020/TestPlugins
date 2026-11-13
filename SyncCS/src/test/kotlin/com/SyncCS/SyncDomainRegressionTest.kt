@@ -23,6 +23,8 @@ class SyncDomainRegressionTest {
             val legacy = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(bytes).joinToString("") { "%02x".format(it) }
             assertEquals(legacy, SyncBackend.digestBytes(bytes))
+            val directHash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            assertEquals(legacy, SyncBackend.digestHex(directHash))
         }
     }
 

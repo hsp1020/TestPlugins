@@ -145,8 +145,10 @@ internal class SyncBackend private constructor() {
     companion object {
         fun digest(data: String): String =
             digestBytes(data.toByteArray(Charsets.UTF_8))
-        fun digestBytes(bytes: ByteArray): String {
-            val hash = MessageDigest.getInstance("SHA-256").digest(bytes)
+        fun digestBytes(bytes: ByteArray): String =
+            digestHex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+        fun digestHex(hash: ByteArray): String {
             val digits = "0123456789abcdef"
             val result = CharArray(hash.size * 2)
             for (i in hash.indices) {

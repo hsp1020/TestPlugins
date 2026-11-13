@@ -11,6 +11,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity
 import java.lang.ref.WeakReference
 
 /**
@@ -33,6 +34,8 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     }
     private val watched = LinkedHashMap<GeneratorPlayer, Snapshot>()
     private var probeScheduled = false
+    private val stoppedActivities = HashMap<Int, Long>()
+    private var stopSequence = 0L
 
     private fun snapshotHeap(fragmentId: Int, phase: String) {
         try {
@@ -156,6 +159,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         main.removeCallbacks(probe)
         probeScheduled = false
         application.unregisterActivityLifecycleCallbacks(this)
+        stoppedActivities.clear()
         unbind()
     }
     private fun unbind() {
@@ -169,13 +173,33 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityResumed(activity: Activity) {
+        stoppedActivities.remove(System.identityHashCode(activity))
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
+        stoppedActivities.remove(System.identityHashCode(activity))
+        if (host === activity || activity is DownloadedPlayerActivity) {
+            Log.i(TAG, "ACTIVITY_DESTROY activity=${System.identityHashCode(activity)}")
+            snapshotHeap(System.identityHashCode(activity), "ACTIVITY_DESTROY")
+        }
         if (host === activity) unbind()
     }
     override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
     override fun onActivityPaused(activity: Activity) = Unit
-    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) {
+        if (host !== activity && activity !is DownloadedPlayerActivity) return
+        val activityId = System.identityHashCode(activity)
+        val token = ++stopSequence
+        stoppedActivities[activityId] = token
+        Log.i(TAG, "ACTIVITY_STOP activity=$activityId playerFragments=${watched.size} " +
+            "pip=${activity.isInPictureInPictureMode}")
+        snapshotHeap(activityId, "ACTIVITY_STOP")
+        main.postDelayed({
+            if (running && stoppedActivities[activityId] == token) {
+                stoppedActivities.remove(activityId)
+                snapshotHeap(activityId, "AFTER_ACTIVITY_STOP_5S")
+            }
+        }, 5_000L)
+    }
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 }

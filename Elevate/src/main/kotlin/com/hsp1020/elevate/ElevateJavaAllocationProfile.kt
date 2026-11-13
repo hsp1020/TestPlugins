@@ -19,6 +19,7 @@ import java.util.function.Consumer
 internal object ElevateJavaAllocationProfile {
     private const val TAG = "ElevateJavaAlloc"
     private const val PREFIX = "elevate-java-alloc-"
+    private const val DURATION_MS = 90_000
     private val lock = Any()
     private val callbackExecutor = Executor { task ->
         Thread(task, "ElevateJavaAllocResult").start()
@@ -76,7 +77,7 @@ internal object ElevateJavaAllocationProfile {
             val params = Bundle().apply {
                 // AndroidX Profiling.HeapProfileRequestBuilder's platform parameter keys.
                 putBoolean("KEY_TRACK_JAVA_ALLOCATIONS", true)
-                putInt("KEY_DURATION_MS", 45_000)
+                putInt("KEY_DURATION_MS", DURATION_MS)
                 putInt("KEY_SIZE_KB", 65_536)
                 putLong("KEY_SAMPLING_INTERVAL_BYTES", 262_144L)
             }
@@ -88,8 +89,8 @@ internal object ElevateJavaAllocationProfile {
                 stopSignal = signal
                 requestTag = tag
                 awaitingResult = true
-                state = "Recording requested (max 45 s). Reproduce, then Stop."
-                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=45000")
+                state = "Recording requested (max 90 s). Reproduce, then Stop."
+                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=" + DURATION_MS)
                 logHeap("PROFILE_START", tag)
                 state
             } catch (error: Exception) {

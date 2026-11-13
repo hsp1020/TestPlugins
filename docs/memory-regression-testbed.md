@@ -16,12 +16,12 @@
 | --- | --- | --- | --- |
 | 0. 시작 기준점 | 홈에서 20초간 대기 후 Java allocation profile Start | `ElevateJavaAlloc HEAP phase=PROFILE_START` | Java 사용 힙·Native 할당 힙·PSS 기록 |
 | 1. StreamPlay 요청 | 같은 작품·회차의 소스 검색, 재진입, 빠른 재조회 | `StremioSPTrace BEGIN/END`, `identicalActiveBefore` | 동일 제공자 객체·전체 payload·casting 값이 같은 실행이 실제로 겹쳤을 때만 중복 후보 |
-| 2. Media3 MKV 재생 | 영상 재생 → 다른 소스로 전환 → 재생 종료 → 같은 과정을 3회 반복 | `ElevateMedia3Trace PLAYER_BIND/PLAYER_STATE/VIEW_DESTROY/HEAP`, `CS3ExoPlayer` | 플레이어 ID·소스 전환·최종 종료 흐름 대조, 종료 5초 뒤의 Java/Native/PSS 비교 |
+| 2. Media3 MKV 재생 | 영상 재생 → 다른 소스로 전환 → 재생 종료 → 같은 과정을 3회 반복 | `ElevateMedia3Trace PLAYER_BIND/PLAYER_STATE/VIEW_DESTROY/ACTIVITY_STOP/HEAP`, `CS3ExoPlayer` | 플레이어 ID·소스 전환·최종 종료 흐름 대조, Activity 중단 5초 뒤의 Java/Native/PSS 비교 |
 | 3. Media3 PiP | 재생 → PiP → 복귀 → 최종 종료 | 동일한 Media3 로그 | PiP 중 의도된 플레이어 유지는 정상; 최종 종료 후 해제 기록과 메모리 스냅샷 비교 |
 | 4. Coil 포스터 | 배우창 → 추천목록 → 라이브러리 → 홈에서 포스터 스크롤·되돌아오기 | `ElevateCoilTrace PREFETCH/DISPLAY/CACHE_PROBE_HIT/LOAD_RESULT/SHARED_INFLIGHT` | 동일 URL의 크기·Scale·캐시 출처 비교; 불필요한 재디코딩 의심 시 Perfetto `StaticImageDecoder.decode`와 대조 |
 | 5. 종료 비교 | 테스트 종료 후 홈으로 복귀, 프로파일 Stop | `ElevateJavaAlloc HEAP phase=PROFILE_STOP/PROFILE_RESULT`, `ElevateMedia3Trace HEAP phase=AFTER_EXIT_5S` | 시작 상태와 종료 후 Java 사용 힙·Native 힙·PSS 비교, 비정상적인 반복 증가 여부 검토 |
 
-프로파일은 최대 45초간 수집하므로, 긴 테스트를 한 번에 녹화하지 말고 **시나리오별로 별도 시작·종료**하는 편이 원인 구분에 유리합니다. Perfetto 파일의 버퍼 초과·연결 끊김·클라이언트 오류가 있으면 해당 수집은 불완전한 자료입니다.
+프로파일은 요청 기준 최대 90초간 수집하므로, 긴 테스트를 한 번에 녹화하지 말고 **시나리오별로 별도 시작·종료**하는 편이 원인 구분에 유리합니다. Perfetto 파일의 버퍼 초과·연결 끊김·클라이언트 오류가 있으면 해당 수집은 불완전한 자료입니다.
 
 ## SyncCS 실기기 확인
 
@@ -33,8 +33,9 @@
 
 - `javaUsedKiB`: 스냅샷 시점의 Java 힙 사용량. `nativeAllocatedKiB`: Native 힙 할당량. `totalPssKiB`: 프로세스 PSS.
 - 이 값은 **강제 GC 없이** 읽으므로 스냅샷 1~2개의 증가만으로 누수를 판정하지 않습니다. 같은 화면 상태에서 3회 이상 비교하고, 필요하면 별도 retained-heap/HPROF 분석을 수행합니다.
+- 90초는 Android에 요청하는 수집 시간입니다. Android가 지원 범위에 따라 기간을 조정할 수 있으므로 Perfetto의 실제 타임스탬프를 확인합니다.
 - `ElevateJavaAlloc`의 `.perfetto-trace`는 **누적 할당 호출 스택**입니다. 사용 중인 힙의 누수/잔존 객체를 직접 입증하는 HPROF 덤프가 아닙니다.
-- `ElevateMedia3Trace VIEW_DESTROY`는 화면 종료 이벤트입니다. 실제 `ExoPlayer.release()` 호출이 보장된다는 뜻은 아닙니다. CloudStream의 `CS3ExoPlayer` 로그, 재진입 때의 플레이어 ID, 종료 후 메모리 변화를 함께 검토합니다.
+- `ElevateMedia3Trace VIEW_DESTROY`는 Fragment 화면 제거 이벤트입니다. `DownloadedPlayerActivity`의 뒤로가기는 Activity를 파괴하지 않고 백그라운드로 보낼 수 있으므로 `ACTIVITY_STOP` 및 `AFTER_ACTIVITY_STOP_5S`도 수집합니다. 실제 `ExoPlayer.release()` 호출 여부는 코어의 `CS3ExoPlayer` 로그로 별도 확인합니다.
 - Coil의 `LOAD_RESULT source=DISK`만으로 중복 디코딩이 확정되는 것은 아닙니다. 같은 URL과 서로 다른 요청 크기를 구분하고 Perfetto의 실제 디코더 할당 스택과 교차 확인합니다.
 - 로그의 URL은 원문 대신 간단한 해시로 기록합니다. 같은 해시가 동일한 URL임을 수학적으로 보장하지는 않습니다.
 

@@ -645,8 +645,7 @@ internal class GithubBackupStore(
         val (_, files) = index(snapshot.revision)
         val entry = files[archivePath(hash)] ?: throw IOException("Plugin archive unavailable: $hash")
         val bytes = blob(entry)
-        val actual = MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString("") { "%02x".format(it) }
+        val actual = SyncBackend.digestBytes(bytes)
         check(actual == hash) { "Plugin archive hash mismatch" }
         return bytes
     }
@@ -657,8 +656,7 @@ internal class GithubBackupStore(
         val changes = linkedMapOf<String, ByteArray>()
         for ((hash, bytes) in archives) {
             val path = archivePath(hash)
-            val actual = MessageDigest.getInstance("SHA-256").digest(bytes)
-                .joinToString("") { "%02x".format(it) }
+            val actual = SyncBackend.digestBytes(bytes)
             check(actual == hash && bytes.isNotEmpty() && bytes.size <= 20 * 1024 * 1024)
             if (path !in existing) changes[path] = bytes
         }

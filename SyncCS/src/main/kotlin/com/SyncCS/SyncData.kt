@@ -592,7 +592,7 @@ internal object PluginInventory {
     /** Verify .cs3 content without allocating whole extension packages in Java heap. */
     private fun sha256(file: File): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered(64 * 1024).use { input ->
+        file.inputStream().use { input ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
                 val count = input.read(buffer)
@@ -600,7 +600,7 @@ internal object PluginInventory {
                 digest.update(buffer, 0, count)
             }
         }
-        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+        return SyncBackend.digestHex(digest.digest())
     }
 
     private suspend fun ensureLoaded(context: Context, name: String, path: String, url: String? = null): Boolean {
