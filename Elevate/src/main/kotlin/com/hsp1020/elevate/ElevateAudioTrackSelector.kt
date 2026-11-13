@@ -79,6 +79,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var originLanguage: String? = null
     private var lookupTmdb: String? = null
     private var lookupImdb: String? = null
+    private var lookupSimkl: String? = null
     private var lookupMovie = false
     private var sourceVersion = 0
     private var lastEpisodeId: Int? = null
@@ -240,6 +241,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val ids = ElevateMediaIdentity.collect(response, episode?.data)
         lookupTmdb = offlineIdentity?.tmdb ?: ids.tmdb
         lookupImdb = offlineIdentity?.imdb ?: ids.imdb
+        lookupSimkl = offlineIdentity?.simkl ?: ids.simkl
         val type = episode?.tvType ?: offline?.tvType ?: response?.type
         val declaredMovie = runCatching {
             JSONObject(response?.url.orEmpty()).optString("type") == "movie"
@@ -278,17 +280,24 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             (0 until group.length).count { group.isTrackSupported(it) }
         }
         if (originLanguage == null && !originAttempted && available > 1 &&
-            (lookupTmdb != null || lookupImdb != null)) {
+            (lookupTmdb != null || lookupImdb != null || lookupSimkl != null)) {
             originAttempted = true
             val version = sourceVersion
             val sourcePlayer = current
             val initialParameters = current.trackSelectionParameters
             val tmdb = lookupTmdb
             val imdb = lookupImdb
+            val simkl = lookupSimkl
             val movie = lookupMovie
             originJob = scope.launch {
                 val resolved = try {
-                    val tmdbId = tmdb ?: imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
+                    val direct = tmdb ?: imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
+                    val mapped = if (direct == null && simkl != null)
+                        ElevateMediaIdentity.simklMapping(
+                            ElevateMediaIdentity.Ids(simkl = simkl), movie) else null
+                    val tmdbId = direct ?: mapped?.tmdb ?: mapped?.imdb?.let {
+                        ElevateIdResolver.tmdbForImdb(it, movie)
+                    }
                     tmdbId?.let {
                         ElevateTmdbMetadata.originalLanguage(it, movie,
                             com.lagradost.cloudstream3.ui.settings.getCurrentLocale(application),
@@ -335,6 +344,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         originLanguage = null
         lookupTmdb = null
         lookupImdb = null
+        lookupSimkl = null
         observedRoot?.removeOnLayoutChangeListener(rootLayout)
         observedRoot = null
         removeObserver?.invoke()
