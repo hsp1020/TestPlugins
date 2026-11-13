@@ -115,9 +115,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     }
 
     private fun checkGeneration(snapshot: GithubBackupStore.Snapshot) {
-        val expected = preferences.getInt("github_generation", 0)
-        val enrolled = preferences.contains("github_base_revision") ||
-            preferences.contains("base")
+        val enrolledState = SyncBaselineStore.state(context, accountId)
+        val expected = enrolledState?.generation ?: 0
+        val enrolled = enrolledState != null
         if (!SyncSafety.acceptGeneration(expected, snapshot.generation, enrolled)) {
             throw IOException("Backup recovery generation changed. This device must be re-linked " +
                 "before uploading changes; no local data was published.")
@@ -126,9 +126,10 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
 
     override fun pull(previousCursor: Long?): SyncBackend.PullResult {
         val cipher = cipher()
-        val baseRevision = preferences.getString("github_base_revision", null)
-        val generation = preferences.getInt("github_generation", 0)
-        if (baseRevision != null && preferences.contains("base") && generation > 0) {
+        val current = SyncBaselineStore.isCurrent(context, config)
+        val baseRevision = if (current) preferences.getString("github_base_revision", null) else null
+        val generation = if (current) preferences.getInt("github_generation", 0) else 0
+        if (baseRevision != null && generation > 0) {
             val delta = github.incrementalSince(baseRevision, cipher, generation)
             if (delta != null) {
                 verifiedState = delta.revision to delta.generation
@@ -142,8 +143,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         }
         var snapshot = github.current(cipher)
         if (snapshot == null) {
-            val alreadyEnrolled = preferences.contains("github_base_revision") ||
-                preferences.contains("base")
+            val alreadyEnrolled = SyncBaselineStore.state(context, accountId) != null
             check(SyncSafety.canCreateFirstBackup(
                 preferences.getBoolean("github_initial_backup_confirmed", false),
                 alreadyEnrolled)) {
@@ -171,11 +171,11 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         // First enrollment requires a complete verified restore, including
         // all missing plugin archives. Already linked devices may synchronize
         // independent preferences while binary installation is deferred.
-        val firstEnrollment = !preferences.contains("base") &&
-            !preferences.contains("github_base_revision") && !createdFreshBackup
+        val firstEnrollment = SyncBaselineStore.state(context, accountId) == null &&
+            !createdFreshBackup
         val localPluginIds = PluginSync.decode(PluginInventory.snapshot(context)).items
-        val previouslySyncedPlugins = PluginSync.decode(
-            preferences.getString("plugin_baseline", null)).items
+        val previouslySyncedPlugins = if (firstEnrollment) emptyMap()
+            else PluginSync.decode(preferences.getString("plugin_baseline", null)).items
         val removedLocally = previouslySyncedPlugins.keys - localPluginIds.keys
         val remotePluginIds = PluginSync.decode(snapshot.values["x/plugins"]).items
         var deferredArchives = 0

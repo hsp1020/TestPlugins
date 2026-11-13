@@ -13,6 +13,87 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class SyncDomainRegressionTest {
+    @Test fun sqliteBaselineStartsFreshAndUpdatesOnlyChangedKeys() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        SyncBaselineStore.reset(context)
+        try {
+            // The retired 30k-key JSON preferences must never be imported.
+            config.preferences.edit().putString("base", """{"legacy":"old"}""")
+                .putString("remote_versions", """{"legacy":2}""").commit()
+            assertNull(SyncBaselineStore.snapshot(context, "sqlite-test"))
+
+            val hashes = (0 until 2000).associate { "d/key/$it" to "sha-$it" }
+            val revisions = (0 until 2000).associate { "d/key/$it" to 1L }
+            val first = SyncBaselineStore.commit(context, "sqlite-test", null,
+                hashes, revisions, "git1", 1)
+            assertEquals(2000, first.hashUpserts)
+            assertEquals(2000, first.versionUpserts)
+
+            config.preferences.edit().putString("github_account_id", "sqlite-test")
+                .putString("github_base_revision", "git1")
+                .putInt("github_generation", 1).commit()
+            assertTrue(SyncBaselineStore.isCurrent(context, config))
+
+            val previous = SyncBaselineStore.snapshot(context, "sqlite-test")!!
+            val updatedHashes = previous.hashes.toMutableMap().apply {
+                put("d/key/0", "updated")
+                remove("d/key/1")
+            }
+            val updatedVersions = previous.versions.toMutableMap().apply {
+                put("d/key/0", 2L)
+                remove("d/key/1")
+            }
+            val changed = SyncBaselineStore.commit(context, "sqlite-test", previous,
+                updatedHashes, updatedVersions, "git2", 1)
+            assertEquals(1, changed.hashUpserts)
+            assertEquals(1, changed.hashDeletes)
+            assertEquals(1, changed.versionUpserts)
+            assertEquals(1, changed.versionDeletes)
+
+            // SharedPreferences/SQLite mismatch after an interrupted write:
+            // never allow delta pull or HEAD-only fast return.
+            assertFalse(SyncBaselineStore.isCurrent(context, config))
+            config.preferences.edit().putString("github_base_revision", "git2").commit()
+            assertTrue(SyncBaselineStore.isCurrent(context, config))
+            val actual = SyncBaselineStore.snapshot(context, "sqlite-test")!!
+            assertEquals(updatedHashes, actual.hashes)
+            assertEquals(updatedVersions, actual.versions)
+            assertNull(SyncBaselineStore.snapshot(context, "unrelated-account"))
+        } finally {
+            SyncBaselineStore.reset(context)
+            config.preferences.edit().remove("base").remove("remote_versions")
+                .remove("github_account_id").remove("github_base_revision")
+                .remove("github_generation").commit()
+        }
+    }
+
+    @Test fun sqliteBaselineCheckpointRestoresHashesVersionsAndRevision() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val backup = java.io.File(context.cacheDir, "synccs-sqlite-rollback-test.db")
+        backup.delete()
+        SyncBaselineStore.reset(context)
+        try {
+            val beforeHash = mapOf("a" to "hash1", "b" to "hash2")
+            val beforeVersions = mapOf("a" to 1L, "b" to 2L)
+            SyncBaselineStore.commit(context, "sqlite-rollback", null,
+                beforeHash, beforeVersions, "rev1", 1)
+            SyncBaselineStore.backupTo(context, backup)
+            val before = SyncBaselineStore.snapshot(context, "sqlite-rollback")!!
+            SyncBaselineStore.commit(context, "sqlite-rollback", before,
+                mapOf("a" to "different"), mapOf("a" to 9L), "rev2", 2)
+            SyncBaselineStore.restoreFrom(context, backup)
+            val restored = SyncBaselineStore.snapshot(context, "sqlite-rollback")!!
+            assertEquals("rev1", restored.state.revision)
+            assertEquals(1, restored.state.generation)
+            assertEquals(beforeHash, restored.hashes)
+            assertEquals(beforeVersions, restored.versions)
+        } finally {
+            backup.delete()
+            SyncBaselineStore.reset(context)
+        }
+    }
+
     @Test fun sha256HexOptimizationMatchesLegacyForAllByteValues() {
         val inputs = listOf(
             byteArrayOf(), byteArrayOf(0, -1, 1, -128, 127),
@@ -664,8 +745,11 @@ class SyncDomainRegressionTest {
                 "github_refresh_expires_at", "sync_transport", "secret")) {
             assertFalse(LocalSyncJournal.canRestoreJournalKey(key))
         }
-        for (key in listOf("base", "remote_cursor", "profile_baseline",
-                "plugin_baseline", "remote_versions", "pending_plugins")) {
+        for (key in listOf("base", "remote_versions")) {
+            assertFalse(LocalSyncJournal.canRestoreJournalKey(key))
+        }
+        for (key in listOf("remote_cursor", "profile_baseline",
+                "plugin_baseline", "pending_plugins")) {
             assertTrue(LocalSyncJournal.canRestoreJournalKey(key))
         }
     }

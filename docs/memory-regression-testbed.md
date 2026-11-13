@@ -23,6 +23,13 @@
 
 프로파일은 요청 기준 최대 90초간 수집하므로, 긴 테스트를 한 번에 녹화하지 말고 **시나리오별로 별도 시작·종료**하는 편이 원인 구분에 유리합니다. Perfetto 파일의 버퍼 초과·연결 끊김·클라이언트 오류가 있으면 해당 수집은 불완전한 자료입니다.
 
+## SyncCS SQLite 증분 기준 데이터 검증
+
+- 업그레이드 후 `base`·`remote_versions`의 과거 JSON은 폐기하며 **읽기·마이그레이션을 수행하지 않습니다**. 최초 SyncCS 실행은 GitHub의 인증된 전체 스냅샷을 이용해 SQLite 기준 데이터를 새로 만듭니다.
+- 일반 설정 하나 변경 및 목록 항목 변경 테스트에서는 로그캣의 `SyncCSAlloc BASE_READ_SQLITE`/`BASE_WRITE_SQLITE`에서 `hashUpserts`, `hashDeletes`, `versionUpserts`, `versionDeletes`를 비교합니다. 변경된 행만 기록되는지 확인하고, Perfetto에서 `persistCommittedBaseline()` Java 할당량을 기존 약 54MiB/회 기준과 비교합니다.
+- 최초 전체 동기화 후에는 동일한 GitHub revision에서 HEAD-only 빠른 종료가 정상 작동해야 합니다. 다른 기기 수정, 원격 복구 generation 변경, SQLite/SharedPreferences revision 불일치가 발생하면 기존 증분 상태를 신뢰하지 않고 인증된 전체 조회 경로로 전환합니다.
+- 기준 데이터 해시·버전과 GitHub revision은 SQLite의 동일 트랜잭션으로 기록하며, 로컬 설정 복원용 `LocalSyncJournal`에는 SQLite 스냅샷도 포함됩니다. 실제 앱 종료/장애 복구와 A/B 변경·삭제는 별도 실기기 확인이 필요합니다.
+
 ## SyncCS 실기기 확인
 
 - **기기 1대에서 수행 가능:** 동일 설정 연속 동기화, 목록 추가·삭제, 변경 후 재동기화, GitHub 연결 일시 오류 후 재시도. 테스트 전 설정 백업을 확보합니다.

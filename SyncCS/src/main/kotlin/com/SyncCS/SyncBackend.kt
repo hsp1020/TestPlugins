@@ -19,7 +19,7 @@ internal data class RemoteEntry(
     val updatedAt: String, val device: String, val version: Long
 )
 
-internal class SyncConfiguration(context: Context) {
+internal class SyncConfiguration(private val context: Context) {
     val preferences = context.applicationContext.getSharedPreferences(
         "SyncCS_Private", Context.MODE_PRIVATE)
     var deviceName: String
@@ -63,6 +63,8 @@ internal class SyncConfiguration(context: Context) {
             "github_auth_diagnostic_history"
         )) editor.remove(key)
         check(editor.commit())
+        // Local SQLite baselines belong to this GitHub account, not to CloudStream.
+        SyncBaselineStore.reset(context)
     }
 }
 

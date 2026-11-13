@@ -22,9 +22,9 @@ internal object LocalSyncJournal {
     fun pending(context: Context) = live(context).isDirectory
 
     private val transactionKeys = listOf(
-        "base", "profile_baseline", "profile_remote_snapshot",
+        "profile_baseline", "profile_remote_snapshot",
         "plugin_baseline", "plugin_remote_snapshot", "pending_plugins",
-        "remote_cursor", "remote_versions", "list_baselines",
+        "remote_cursor", "list_baselines",
         "github_base_revision", "github_generation", "pending_conflicts",
         "github_local_restore_pause",
         "sync_transport", "github_token", "github_login", "github_account_id",
@@ -73,6 +73,9 @@ internal object LocalSyncJournal {
             if (canRestoreJournalKey(key)) editor.remove(key)
         }
         for (key in snapshot.keys()) {
+            // An interrupted checkpoint from the retired JSON format is not
+            // converted into the new SQLite baseline.
+            if (key == "base" || key == "remote_versions") continue
             check(key in transactionKeys)
             if (!canRestoreJournalKey(key)) continue
             val item = snapshot.getJSONObject(key)
@@ -180,6 +183,7 @@ internal object LocalSyncJournal {
                 .put("profiles", profiles).put("plugins", plugins)
                 .put("privateSyncState", privateMetadata(context))
                 .put("nativeAddonBackups", nativeBackupValues(context))
+            SyncBaselineStore.backupTo(context, File(temp, "baseline.db"))
             File(temp, "snapshot.enc").writeText(
                 LocalVault.encrypt(meta.toString().toByteArray(Charsets.UTF_8)),
                 Charsets.UTF_8)
@@ -320,6 +324,14 @@ internal object LocalSyncJournal {
             "Profile roster verification failed after rollback."
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
+        val baselineSnapshot = File(dir, "baseline.db")
+        if (baselineSnapshot.isFile) {
+            SyncBaselineStore.restoreFrom(context, baselineSnapshot)
+        } else {
+            // Legacy journal from before SQLite: recover local state, then
+            // require a fresh authenticated full sync. No JSON migration.
+            SyncBaselineStore.reset(context)
+        }
         finish(context)
 
     }

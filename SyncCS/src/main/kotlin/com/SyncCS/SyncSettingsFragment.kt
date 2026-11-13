@@ -317,7 +317,7 @@ class SyncSettingsFragment : DialogFragment() {
         } else if (config.active()) {
             val runtime = SyncCoordinator.lastStatus
             if (runtime == "Not connected") {
-                if (config.preferences.contains("github_base_revision"))
+                if (SyncBaselineStore.isCurrent(requireContext(), config))
                     "Connected · GitHub backup linked"
                 else "Connected · Initial synchronization pending"
             } else runtime
@@ -723,6 +723,9 @@ class SyncSettingsFragment : DialogFragment() {
                                 val current = store.current(cipher)
                                     ?: error("No current GitHub backup.")
                                 val newRevision = store.rollback(current, selected.id, cipher)
+                                // This revision starts a new recovery generation.
+                                // Old local baselines cannot be used for CAS deltas.
+                                SyncBaselineStore.reset(host.applicationContext)
                                 val editor = config.preferences.edit()
                                     .putInt("github_generation", current.generation + 1)
                                     .putString("github_base_revision", newRevision)
@@ -973,6 +976,7 @@ class SyncSettingsFragment : DialogFragment() {
                                 }
                             }
                             check(edit.commit()) { "Could not store GitHub session." }
+                            if (previous == null) SyncBaselineStore.reset(host.applicationContext)
 
                             SyncAuthGuard.clearAfterLogin(config)
                         }

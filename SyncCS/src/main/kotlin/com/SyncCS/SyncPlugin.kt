@@ -263,7 +263,8 @@ class SyncPlugin : Plugin() {
                         val current = config(context).preferences.getString("github_base_revision", null)
                         val headAttempt = runCatching { GithubSyncAdapter(context).remoteHead() }
                         val head = headAttempt.getOrNull()
-                        if (current != null && head == current) {
+                        if (current != null && head == current &&
+                            SyncBaselineStore.isCurrent(context, config(context))) {
                             continue
                         }
                     }
@@ -394,7 +395,11 @@ class SyncPlugin : Plugin() {
     override fun load(context: Context) {
 
 
-        config(context).preferences.edit().putString("active_instance", owner).commit()
+        // Discard the old local JSON baselines; re-sync from GitHub into SQLite.
+        // Do not migrate or interpret their contents.
+        check(config(context).preferences.edit()
+            .putString("active_instance", owner)
+            .remove("base").remove("remote_versions").commit())
         val session = config(context)
 
         ready = SyncRuntime.refreshLoadedState()

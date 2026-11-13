@@ -66,28 +66,6 @@ internal object SyncCoordinator {
             "/result_subscribed_state_data/" in key
         )
 
-    // Cache only the last verified revision's immutable baseline. Source text
-    // comparison invalidates it on another plugin instance, rollback or relink.
-    @Volatile private var cachedBaseline: Pair<String, Map<String, String>>? = null
-    private fun baseline(context: Context): Map<String, String> {
-        val readStarted = android.os.SystemClock.elapsedRealtime()
-        val raw = SyncConfiguration(context).preferences.getString("base", "{}") ?: "{}"
-        val cached = cachedBaseline
-        if (cached != null && cached.first == raw) {
-            Log.i("SyncCSAlloc", "BASE_READ cached=true keys=" + cached.second.size +
-                " storedChars=" + raw.length +
-                " ms=" + (android.os.SystemClock.elapsedRealtime() - readStarted))
-            return cached.second
-        }
-        val json = JSONObject(raw)
-        val parsed = json.keys().asSequence().associateWith { json.getString(it) }.toMap()
-        cachedBaseline = raw to parsed
-        Log.i("SyncCSAlloc", "BASE_READ cached=false keys=" + parsed.size +
-            " storedChars=" + raw.length +
-            " ms=" + (android.os.SystemClock.elapsedRealtime() - readStarted))
-        return parsed
-    }
-
     fun markChanged(context: Context, path: String) {
         if (applying) return
         val config = SyncConfiguration(context)
@@ -145,7 +123,7 @@ internal object SyncCoordinator {
         // journals were handled above, so clean restarts need only a HEAD check.
         val pendingPlugins = config.preferences.contains("pending_plugins")
         val restoreActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
-        if (!needsLocalAudit() && config.preferences.contains("base") &&
+        if (!needsLocalAudit() && SyncBaselineStore.isCurrent(context, config) &&
             (!pendingPlugins || restoreActivity == null) &&
             config.preferences.all.keys.none { it.startsWith("modified/") }) {
             val known = config.preferences.getString("github_base_revision", null)
@@ -356,9 +334,15 @@ internal object SyncCoordinator {
         return true
     }
 
-    /** All baseline and remote revision fields commit together after CAS publication. */
+    /**
+     * Persist the Git cursor and list ancestry first, then atomically update
+     * the SQLite hash/version rows and their matching cursor. A crash between
+     * stores invalidates the incremental fast path and forces an authenticated
+     * full pull; old JSON baselines are never imported.
+     */
     private fun persistCommittedBaseline(
-        config: SyncConfiguration,
+        context: Context, config: SyncConfiguration,
+        previous: SyncBaselineStore.Snapshot?,
         next: Map<String, String>, versions: Map<String, Long>,
         priorLists: JSONObject, completeLocal: Boolean,
         previousListCipher: String?,
@@ -367,73 +351,44 @@ internal object SyncCoordinator {
         upload: Map<String, String?>, remoteCursor: Long?,
         githubRevision: String, githubGeneration: Int, serverPluginManifest: String?
     ) {
-    val persistStarted = android.os.SystemClock.elapsedRealtime()
-    val priorBaseRaw = config.preferences.getString("base", null)
-    val priorVersionsRaw = config.preferences.getString("remote_versions", null)
-    val baseStarted = android.os.SystemClock.elapsedRealtime()
-    val baseJson = JSONObject()
-    for ((key, hash) in next) baseJson.put(key, hash)
-    val baseRaw = baseJson.toString()
-    val baseMs = android.os.SystemClock.elapsedRealtime() - baseStarted
-    val versionsStarted = android.os.SystemClock.elapsedRealtime()
-    val revisionJson = JSONObject()
-    versions.forEach { (key, version) -> revisionJson.put(key, version) }
-    val versionsRaw = revisionJson.toString()
-    val versionsMs = android.os.SystemClock.elapsedRealtime() - versionsStarted
-    val copyStarted = android.os.SystemClock.elapsedRealtime()
-    val listBaselineJson = if (completeLocal) JSONObject()
-        else JSONObject(priorLists.toString())
-    val listCopyMs = android.os.SystemClock.elapsedRealtime() - copyStarted
-    val updateStarted = android.os.SystemClock.elapsedRealtime()
-    val keysToRecord = if (completeLocal) local.keys + apply.keys
-        else (marked + remoteKeys + apply.keys + upload.keys)
-    for (key in keysToRecord) {
-        val raw = if (apply.containsKey(key)) apply[key] else local[key]
-        if (raw != null && SharedListSync.isCollection(key, raw)) {
-            listBaselineJson.put(key, raw)
-        } else listBaselineJson.remove(key)
-    }
-    val updateMs = android.os.SystemClock.elapsedRealtime() - updateStarted
-    val encryptStarted = android.os.SystemClock.elapsedRealtime()
-    // Reuse validated ciphertext only when the effective collection ancestry
-    // is unchanged. Full audits and first-time/recovery snapshots still re-encrypt.
-    val listCipher = if (!completeLocal && previousListCipher != null &&
-        sameListBaselines(priorLists, listBaselineJson)) previousListCipher
-    else LocalVault.encrypt(listBaselineJson.toString().toByteArray(Charsets.UTF_8))
-    val encryptMs = android.os.SystemClock.elapsedRealtime() - encryptStarted
-    val persisted = config.preferences.edit()
-        .putString("base", baseRaw)
-        .putString("remote_versions", versionsRaw)
-        .putString("list_baselines", listCipher)
-    if (remoteCursor != null) persisted.putLong("remote_cursor", remoteCursor)
-    else persisted.remove("remote_cursor")
-
-    persisted.putString("github_base_revision", githubRevision)
-        .putInt("github_generation", githubGeneration)
-    if (serverPluginManifest != null) {
-        persisted.putString("plugin_remote_snapshot", serverPluginManifest)
-    } else {
-        persisted.remove("plugin_remote_snapshot")
-    }
-    check(persisted.commit())
-    cachedBaseline = baseRaw to next
-    Log.i("SyncCSAlloc", "BASE_WRITE full=" + completeLocal +
-        " keys=" + next.size + " versions=" + versions.size +
-        " priorListKeys=" + priorLists.length() +
-        " newListKeys=" + listBaselineJson.length() +
-        " touchedListKeys=" + keysToRecord.size +
-        " marked=" + marked.size + " apply=" + apply.size +
-        " upload=" + upload.size + " remoteKeys=" + remoteKeys.size +
-        " baseUnchanged=" + (priorBaseRaw == baseRaw) +
-        " versionsUnchanged=" + (priorVersionsRaw == versionsRaw) +
-        " listCipherReused=" + (previousListCipher != null && listCipher === previousListCipher) +
-        " baseChars=" + baseRaw.length + " versionsChars=" + versionsRaw.length +
-        " listCipherChars=" + listCipher.length +
-        " baseMs=" + baseMs + " versionsMs=" + versionsMs +
-        " listCopyMs=" + listCopyMs + " listUpdateMs=" + updateMs +
-        " listEncryptMs=" + encryptMs +
-        " totalMs=" + (android.os.SystemClock.elapsedRealtime() - persistStarted))
-
+        val started = android.os.SystemClock.elapsedRealtime()
+        val listBaselineJson = if (completeLocal) JSONObject()
+            else JSONObject(priorLists.toString())
+        val keysToRecord = if (completeLocal) local.keys + apply.keys
+            else (marked + remoteKeys + apply.keys + upload.keys)
+        for (key in keysToRecord) {
+            val raw = if (apply.containsKey(key)) apply[key] else local[key]
+            if (raw != null && SharedListSync.isCollection(key, raw)) {
+                listBaselineJson.put(key, raw)
+            } else listBaselineJson.remove(key)
+        }
+        val reuseListCipher = !completeLocal && previousListCipher != null &&
+            sameListBaselines(priorLists, listBaselineJson)
+        val listCipher = if (reuseListCipher) previousListCipher!!
+            else LocalVault.encrypt(listBaselineJson.toString().toByteArray(Charsets.UTF_8))
+        val editor = config.preferences.edit()
+            .remove("base").remove("remote_versions")
+            .putString("list_baselines", listCipher)
+        if (remoteCursor != null) editor.putLong("remote_cursor", remoteCursor)
+        else editor.remove("remote_cursor")
+        editor.putString("github_base_revision", githubRevision)
+            .putInt("github_generation", githubGeneration)
+        if (serverPluginManifest != null) editor.putString("plugin_remote_snapshot", serverPluginManifest)
+        else editor.remove("plugin_remote_snapshot")
+        check(editor.commit())
+        val accountId = config.preferences.getString("github_account_id", null)
+            ?: error("Missing GitHub account for verified SQLite baseline")
+        val changes = SyncBaselineStore.commit(context, accountId, previous,
+            next, versions, githubRevision, githubGeneration)
+        Log.i("SyncCSAlloc", "BASE_WRITE_SQLITE full=" + completeLocal +
+            " keys=" + next.size + " versions=" + versions.size +
+            " hashUpserts=" + changes.hashUpserts +
+            " hashDeletes=" + changes.hashDeletes +
+            " versionUpserts=" + changes.versionUpserts +
+            " versionDeletes=" + changes.versionDeletes +
+            " listKeys=" + listBaselineJson.length() +
+            " listCipherReused=" + reuseListCipher +
+            " totalMs=" + (android.os.SystemClock.elapsedRealtime() - started))
     }
 
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
@@ -505,8 +460,9 @@ internal object SyncCoordinator {
             }
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
+            val freshBaseline = SyncBaselineStore.state(context, startedUser) == null
             val firstRemoteRestore = SyncSafety.firstRemoteRestore(
-                config.preferences.contains("base"),
+                !freshBaseline,
                 (backend as GithubSyncAdapter).createdFreshBackup,
                 config.preferences.getBoolean("github_initial_backup_confirmed", false),
                 remoteValues.keys.any {
@@ -521,19 +477,18 @@ internal object SyncCoordinator {
 
             val remoteByKey = pull.entries.associateBy { it.key }
             val versionsStarted = android.os.SystemClock.elapsedRealtime()
-            val versions = mutableMapOf<String, Long>()
-            if (!pull.full) {
-                val old = JSONObject(config.preferences.getString("remote_versions", "{}") ?: "{}")
-                for (key in old.keys()) versions[key] = old.getLong(key)
-            }
+            val priorBaseline = SyncBaselineStore.snapshot(context, startedUser)
+            val versions = (if (pull.full) emptyMap() else priorBaseline?.versions.orEmpty())
+                .toMutableMap()
             for (entry in pull.entries) versions[entry.key] = entry.version
-            Log.i("SyncCSAlloc", "VERSIONS_READ full=" + pull.full +
-                " entries=" + pull.entries.size + " versionKeys=" + versions.size +
+            val base = priorBaseline?.hashes.orEmpty()
+            Log.i("SyncCSAlloc", "BASE_READ_SQLITE initialized=" + (priorBaseline != null) +
+                " keys=" + base.size + " versionKeys=" + versions.size +
+                " full=" + pull.full + " entries=" + pull.entries.size +
                 " ms=" + (android.os.SystemClock.elapsedRealtime() - versionsStarted))
 
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
-            val base = baseline(context)
             val verifiedRemovals = verifiedDeletionPaths(context, config, base)
             // The final Git commit checks membership against this verified set.
             (backend as GithubSyncAdapter).allowVerifiedDeletions(verifiedRemovals)
@@ -545,7 +500,8 @@ internal object SyncCoordinator {
                 if (stored.startsWith("{")) return stored
                 return String(LocalVault.decrypt(stored), Charsets.UTF_8)
             }
-            val previousProfiles = protectedProfileValue("profile_baseline")
+            val previousProfiles = if (freshBaseline) null
+                else protectedProfileValue("profile_baseline")
             val profileServer = if (pull.full || remoteValues.containsKey("x/profiles")) {
                 remoteValues["x/profiles"]
             } else protectedProfileValue("profile_remote_snapshot")
@@ -643,7 +599,8 @@ internal object SyncCoordinator {
             val currentPlugins = PluginInventory.snapshot(context)
             stageTo("comparing changed settings")
             val listReadStarted = android.os.SystemClock.elapsedRealtime()
-            val savedLists = config.preferences.getString("list_baselines", null)
+            val savedLists = if (priorBaseline == null) null
+                else config.preferences.getString("list_baselines", null)
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
@@ -679,7 +636,8 @@ internal object SyncCoordinator {
             }
 
             stageTo("checking plugin installation and deletions")
-            val inventoryBase = config.preferences.getString("plugin_baseline", null)
+            val inventoryBase = if (freshBaseline) null
+                else config.preferences.getString("plugin_baseline", null)
             var pluginsOnServer = if (pull.full || remoteValues.containsKey("x/plugins")) {
                 remoteValues["x/plugins"]
             } else config.preferences.getString("plugin_remote_snapshot", null)
@@ -832,7 +790,7 @@ internal object SyncCoordinator {
             verifyAccount()
             val (githubRevision, githubGeneration) =
                 (backend as GithubSyncAdapter).verifiedRevision()
-            persistCommittedBaseline(config, next, versions, priorLists,
+            persistCommittedBaseline(context, config, priorBaseline, next, versions, priorLists,
                 completeLocal, savedLists, local, apply, marked, remoteValues.keys,
                 upload, pull.cursor, githubRevision, githubGeneration, serverPluginManifest)
 
