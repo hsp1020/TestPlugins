@@ -65,10 +65,12 @@ internal object ElevateWatchHistoryRules {
         return mapOf(found.groupValues[1] to id.toString())
     }
 
-    fun selectedSeason(seasons: List<Int>, index: Int?, episodeBased: Boolean): Int? {
+    fun selectedSeason(seasons: List<Int>, index: Int?, episodeBased: Boolean,
+        allowSingleZeroAnime: Boolean = false): Int? {
         val selected = if (seasons.isNotEmpty()) index?.let { seasons.getOrNull(it) }
             else if (!episodeBased) 1 else null
-        return selected?.takeIf { it > 0 }
+        return selected?.takeIf { it > 0 ||
+            (it == 0 && episodeBased && allowSingleZeroAnime && seasons.size == 1) }
     }
 
     /** Keep IDs found in this season even when another season shares them. */

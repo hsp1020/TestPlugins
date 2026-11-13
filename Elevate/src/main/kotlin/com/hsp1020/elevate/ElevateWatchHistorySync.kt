@@ -1230,10 +1230,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             // list arrives, the old season-only guard prevents ID remapping and
             // MAL/AniList/Kitsu tracker setup until the user changes seasons.
             val chosen = ElevateWatchHistoryRules.selectedSeason(
-                seasonNumbers, selectionIndex, episodeBased
+                seasonNumbers, selectionIndex, episodeBased,
+                allowSingleZeroAnime = animePage && responseSeasons.isEmpty()
             ) ?: if (seasonNumbers.isEmpty() && episodeBased)
                 responseSeasons.singleOrNull() else null
-            if (chosen == null || chosen <= 0) return
+            if (chosen == null || chosen < 0) return
             val inputs = SeasonInput(chosen, seasonNumbers.toList(), rawSyncs.toMap(),
                 mediaIds, seasonEpisodeIds[chosen].orEmpty())
             if (inputs == resolvedSeasonInputs) return

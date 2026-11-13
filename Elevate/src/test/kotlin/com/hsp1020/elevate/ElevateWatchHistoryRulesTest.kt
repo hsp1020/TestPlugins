@@ -19,6 +19,17 @@ class ElevateWatchHistoryRulesTest {
         }
     }
 
+    @Test fun singleAnimeZeroSeasonRequiresOneExplicitSelectedSeason() {
+        val rules = ElevateWatchHistoryRules
+        assertEquals(0, rules.selectedSeason(listOf(0), 0, true, allowSingleZeroAnime = true))
+        assertNull(rules.selectedSeason(listOf(0), 0, true))
+        assertNull(rules.selectedSeason(listOf(0), 0, false, allowSingleZeroAnime = true))
+        assertNull(rules.selectedSeason(listOf(0), null, true, allowSingleZeroAnime = true))
+        assertNull(rules.selectedSeason(listOf(0), 1, true, allowSingleZeroAnime = true))
+        assertNull(rules.selectedSeason(listOf(0, 1), 0, true, allowSingleZeroAnime = true))
+        assertEquals(1, rules.selectedSeason(listOf(0, 1), 1, true, allowSingleZeroAnime = true))
+    }
+
     @Test fun localizationAndSpecialSeasonNeverDependOnEnglishWordSeason() {
         for (label in listOf("Season S", "시즌 S", "シーズン S", "S", " s ", "Temporada S")) {
             assertTrue(ElevateWatchHistoryRules.specialSeasonLabel(label))
