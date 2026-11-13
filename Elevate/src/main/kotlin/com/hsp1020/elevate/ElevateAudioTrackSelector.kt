@@ -80,6 +80,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var lookupTmdb: String? = null
     private var lookupImdb: String? = null
     private var lookupSimkl: String? = null
+    private var lookupAnimeIds = emptyList<Pair<String, String>>()
     private var lookupMovie = false
     private var sourceVersion = 0
     private var lastEpisodeId: Int? = null
@@ -242,6 +243,11 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         lookupTmdb = offlineIdentity?.tmdb ?: ids.tmdb
         lookupImdb = offlineIdentity?.imdb ?: ids.imdb
         lookupSimkl = offlineIdentity?.simkl ?: ids.simkl
+        lookupAnimeIds = listOfNotNull(
+            (offlineIdentity?.mal ?: ids.mal)?.let { "mal" to it },
+            (offlineIdentity?.anilist ?: ids.anilist)?.let { "anilist" to it },
+            (offlineIdentity?.kitsu ?: ids.kitsu)?.let { "kitsu" to it }
+        )
         val type = episode?.tvType ?: offline?.tvType ?: response?.type
         val declaredMovie = runCatching {
             JSONObject(response?.url.orEmpty()).optString("type") == "movie"
@@ -280,7 +286,8 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             (0 until group.length).count { group.isTrackSupported(it) }
         }
         if (originLanguage == null && !originAttempted && available > 1 &&
-            (lookupTmdb != null || lookupImdb != null || lookupSimkl != null)) {
+            (lookupTmdb != null || lookupImdb != null || lookupSimkl != null ||
+                lookupAnimeIds.isNotEmpty())) {
             originAttempted = true
             val version = sourceVersion
             val sourcePlayer = current
@@ -288,6 +295,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             val tmdb = lookupTmdb
             val imdb = lookupImdb
             val simkl = lookupSimkl
+            val animeIds = lookupAnimeIds
             val movie = lookupMovie
             originJob = scope.launch {
                 val resolved = try {
@@ -295,8 +303,15 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                     val mapped = if (direct == null && simkl != null)
                         ElevateMediaIdentity.simklMapping(
                             ElevateMediaIdentity.Ids(simkl = simkl), movie) else null
-                    val tmdbId = direct ?: mapped?.tmdb ?: mapped?.imdb?.let {
+                    var tmdbId = direct ?: mapped?.tmdb ?: mapped?.imdb?.let {
                         ElevateIdResolver.tmdbForImdb(it, movie)
+                    }
+                    if (tmdbId == null) for ((source, id) in animeIds) {
+                        val animeMapping = ElevateAnimeIdResolver.resolve(source, id) ?: continue
+                        tmdbId = animeMapping.tmdb ?: animeMapping.imdb?.let {
+                            ElevateIdResolver.tmdbForImdb(it, movie)
+                        }
+                        if (tmdbId != null) break
                     }
                     tmdbId?.let {
                         ElevateTmdbMetadata.originalLanguage(it, movie,
@@ -345,6 +360,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         lookupTmdb = null
         lookupImdb = null
         lookupSimkl = null
+        lookupAnimeIds = emptyList()
         observedRoot?.removeOnLayoutChangeListener(rootLayout)
         observedRoot = null
         removeObserver?.invoke()
