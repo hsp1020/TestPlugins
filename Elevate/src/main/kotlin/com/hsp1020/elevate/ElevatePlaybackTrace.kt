@@ -177,7 +177,8 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
-        stoppedActivities.remove(System.identityHashCode(activity))
+        // Preserve the pending stop snapshot: Activity destruction must not
+        // cancel the AFTER_ACTIVITY_STOP_5S sample scheduled by onActivityStopped.
         if (host === activity || activity is DownloadedPlayerActivity) {
             Log.i(TAG, "ACTIVITY_DESTROY activity=${System.identityHashCode(activity)}")
             snapshotHeap(System.identityHashCode(activity), "ACTIVITY_DESTROY")
