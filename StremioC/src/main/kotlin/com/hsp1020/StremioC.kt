@@ -269,7 +269,9 @@ private object MetadataDiskCache {
                 if (temp.length() > MAX_ENTRY_BYTES) {
                     return@withContext
                 }
+                val lockStart = SystemClock.elapsedRealtimeNanos()
                 synchronized(lock) {
+                    val lockWaitMs = StremioCAllocDiag.ms(lockStart)
                     val acquired = android.os.SystemClock.elapsedRealtime()
                     if (!cleanedOldTemps) {
                         cleanedOldTemps = true
@@ -284,18 +286,28 @@ private object MetadataDiskCache {
                             writesSinceQuotaCheck >= QUOTA_CHECK_WRITES ||
                             acquired - lastQuotaCheckAtMs >= QUOTA_CHECK_MS
                         if (due) {
+                            val scanStart = SystemClock.elapsedRealtimeNanos()
                             val files = dir.listFiles()?.filter {
                                 it.isFile && it.name.endsWith(".gz")
                             }.orEmpty()
                             val totalBytes = files.sumOf { it.length() }
                             val kindCount = files.count { it.name.startsWith("${kind}_") }
+                            val scanMs = StremioCAllocDiag.ms(scanStart)
                             val trimNeeded = totalBytes > MAX_BYTES ||
                                 kindCount > (entryLimits[kind] ?: Int.MAX_VALUE)
+                            val trimStart = SystemClock.elapsedRealtimeNanos()
                             if (trimNeeded) trim(dir)
+                            val trimMs = if (trimNeeded) StremioCAllocDiag.ms(trimStart) else 0L
+                            StremioCAllocDiag.log("P3_CACHE_QUOTA kind=$kind files=${files.size} " +
+                                "totalBytes=$totalBytes kindFiles=$kindCount trim=$trimNeeded " +
+                                "scanMs=$scanMs trimMs=$trimMs lockWaitMs=$lockWaitMs " +
+                                "lockMs=${StremioCAllocDiag.ms(lockStart)}")
                             quotaChecked = true
                             writesSinceQuotaCheck = 0
                             lastQuotaCheckAtMs = android.os.SystemClock.elapsedRealtime()
 
+                        } else if (kind == "detail" && lockWaitMs >= 50L) {
+                            StremioCAllocDiag.log("P3_CACHE_LOCK kind=$kind lockWaitMs=$lockWaitMs")
                         }
                     }
 
@@ -322,6 +334,69 @@ private object MetadataDiskCache {
             val length = file.length()
             if (file.delete()) {
                 total -= length
+            }
+        }
+    }
+}
+
+
+private object StremioCAllocDiag {
+    private const val TAG = "StremioCAllocDiag"
+    private val parseCalls = HashMap<String, Int>()
+    private val extractorUrls = LinkedHashMap<String, Int>()
+    private var extractorCount = 0
+    private var repeatedExtractors = 0
+
+    fun ms(startNs: Long): Long =
+        (SystemClock.elapsedRealtimeNanos() - startNs) / 1_000_000L
+
+    fun log(message: String) {
+        android.util.Log.i(TAG, message)
+    }
+
+    fun <T> parsed(model: String, chars: Int, block: () -> T): T {
+        val count = synchronized(parseCalls) {
+            (parseCalls[model] ?: 0).plus(1).also { parseCalls[model] = it }
+        }
+        val started = SystemClock.elapsedRealtimeNanos()
+        var completed = false
+        try {
+            return block().also { completed = true }
+        } finally {
+            if (count <= 5 || count % 20 == 0) {
+                log("P4_PARSE model=$model call=$count chars=$chars " +
+                    "parser=${System.identityHashCode(app.responseParser)} " +
+                    "ms=${ms(started)} success=$completed")
+            }
+        }
+    }
+
+    suspend fun <T> extractor(kind: String, target: String, block: suspend () -> T): T {
+        val count: Int
+        val seenBefore: Boolean
+        val repeats: Int
+        val tracked: Int
+        synchronized(extractorUrls) {
+            extractorCount++
+            count = extractorCount
+            seenBefore = extractorUrls.containsKey(target)
+            if (seenBefore) repeatedExtractors++
+            repeats = repeatedExtractors
+            if (!seenBefore && extractorUrls.size >= 512) {
+                extractorUrls.remove(extractorUrls.keys.first())
+            }
+            extractorUrls[target] = (extractorUrls[target] ?: 0) + 1
+            tracked = extractorUrls.size
+        }
+        val started = SystemClock.elapsedRealtimeNanos()
+        var completed = false
+        try {
+            return block().also { completed = true }
+        } finally {
+            if (count <= 8 || count % 20 == 0 || (seenBefore && repeats <= 4)) {
+                log("P0_EXTRACTOR kind=$kind calls=$count repeated=$repeats " +
+                    "seenBefore=$seenBefore tracked=$tracked urlHash=${target.hashCode()} " +
+                    "ms=${ms(started)} success=$completed")
             }
         }
     }
@@ -1660,14 +1735,21 @@ open class StremioC(
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
             return suspendCancellableCoroutine { continuation ->
+                val started = SystemClock.elapsedRealtimeNanos()
                 val call = homeForegroundClient.newCall(request)
                 continuation.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : okhttp3.Callback {
                     override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                        StremioCAllocDiag.log("P2_HTTP_FAIL urlHash=${url.hashCode()} " +
+                            "ms=${StremioCAllocDiag.ms(started)} error=${e.javaClass.simpleName}")
                         if (continuation.isActive) continuation.resumeWith(Result.failure(e))
                     }
 
                     override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                        val headerMs = StremioCAllocDiag.ms(started)
+                        val bodyStart = SystemClock.elapsedRealtimeNanos()
+                        val declaredBytes = response.body?.contentLength() ?: -1L
+                        val encoding = response.header("Content-Encoding").orEmpty()
                         val outcome = runCatching {
                             response.use { res ->
                                 if (res.code == 429) {
@@ -1689,6 +1771,9 @@ open class StremioC(
                                 res.body?.string() ?: throw IllegalStateException("Empty catalog response body")
                             }
                         }
+                        StremioCAllocDiag.log("P2_HTTP urlHash=${url.hashCode()} status=${response.code} " +
+                            "declaredBytes=$declaredBytes encoding=$encoding chars=${outcome.getOrNull()?.length ?: -1} " +
+                            "headerMs=$headerMs readMs=${StremioCAllocDiag.ms(bodyStart)} success=${outcome.isSuccess}")
                         if (continuation.isActive) continuation.resumeWith(outcome)
                     }
                 })
@@ -1926,30 +2011,51 @@ open class StremioC(
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
             "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
             *videoLanguages)
+        val started = SystemClock.elapsedRealtimeNanos()
         val fromRam = stremioCacheMemoryRead(tmdbDetailsCache[detailUrl], METADATA_CACHE_TTL)
+        val diskStart = SystemClock.elapsedRealtimeNanos()
         val cached = fromRam ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
-            runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
+            runCatching {
+                StremioCAllocDiag.parsed("TmdbDetailResponse", json.length) {
+                    parseJson<TmdbDetailResponse>(json)
+                }
+            }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
                     tmdbDetailsCache[detailUrl] = it
                 }
             }
         }
+        val diskMs = StremioCAllocDiag.ms(diskStart)
+        var bodyChars = 0
+        var fetchMs = 0L
+        var writeMs = 0L
         val result: TmdbDetailResponse? = if (cached != null) {
             cached.first
         } else {
             runSuspendCatching {
+                val fetchStart = SystemClock.elapsedRealtimeNanos()
                 val text = run { fetchSharedMetadataText(detailUrl) }
+                fetchMs = StremioCAllocDiag.ms(fetchStart)
+                bodyChars = text.length
                 val fetched = run {
-                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                    if (text.isNotBlank()) StremioCAllocDiag.parsed("TmdbDetailResponse", text.length) {
+                        parseJson<TmdbDetailResponse>(text)
+                    } else null
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
+                    val writeStart = SystemClock.elapsedRealtimeNanos()
                     MetadataDiskCache.write("detail", detailUrl, text)
+                    writeMs = StremioCAllocDiag.ms(writeStart)
                 } else {
                 }
                 fetched
             }.getOrNull()
         }
+        StremioCAllocDiag.log("P3_TMDB idHash=${tmdbId.hashCode()} type=$mediaType " +
+            "source=${if (fromRam != null) "RAM" else if (cached != null) "DISK" else "NETWORK"} " +
+            "chars=$bodyChars diskMs=$diskMs fetchMs=$fetchMs writeMs=$writeMs " +
+            "totalMs=${StremioCAllocDiag.ms(started)} success=${result != null}")
         return result
     }
 
@@ -2440,12 +2546,19 @@ open class StremioC(
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
         }?.let {
+            StremioCAllocDiag.log("P1_CATALOG_CACHE origin=$origin pathHash=${path.hashCode()} items=${it.first.size}")
             return it
         }
         return homeForegroundSemaphore.withPermit {
+            val started = SystemClock.elapsedRealtimeNanos()
             val json = fetchHomeJson(buildUrl(path))
-            val metas = parseJson<HomeCatalogResponse>(json).metas
-                ?: throw IllegalStateException("Catalog response is missing metas")
+            val fetchMs = StremioCAllocDiag.ms(started)
+            val parseStart = SystemClock.elapsedRealtimeNanos()
+            val metas = StremioCAllocDiag.parsed("HomeCatalogResponse", json.length) {
+                parseJson<HomeCatalogResponse>(json)
+            }.metas ?: throw IllegalStateException("Catalog response is missing metas")
+            val parseMs = StremioCAllocDiag.ms(parseStart)
+            val mapStart = SystemClock.elapsedRealtimeNanos()
             val items = metas.mapNotNull { meta ->
                 val type = meta.type ?: fallbackType
                 val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -2455,6 +2568,10 @@ open class StremioC(
                 rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
+            val mapMs = StremioCAllocDiag.ms(mapStart)
+            StremioCAllocDiag.log("P1_CATALOG origin=$origin pathHash=${path.hashCode()} " +
+                "chars=${json.length} metas=${metas.size} items=${items.size} " +
+                "fetchMs=$fetchMs parseMs=$parseMs mapMs=$mapMs totalMs=${StremioCAllocDiag.ms(started)}")
             val result = items to metas.size
             if (items.isNotEmpty() && items.size <= 80) {
                 synchronized(recentHomeResults) {
@@ -2581,7 +2698,9 @@ open class StremioC(
                 runSuspendCatching {
                     val text = run { fetchAddonMetaText(metaUrl, forceRefresh) }
                     val response = run {
-                        if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
+                        if (text.isNotBlank()) StremioCAllocDiag.parsed("CatalogResponse", text.length) {
+                            parseJson<CatalogResponse>(text)
+                        } else null
                     }
                     response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
                         ?: response?.metas?.firstOrNull()
@@ -2603,7 +2722,9 @@ open class StremioC(
             async(Dispatchers.IO) { run { fetchSecondaryMeta(metaUrl, urlHint!!.id) } }
         }
         val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
-            runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
+            runCatching {
+                StremioCAllocDiag.parsed("CatalogEntry", url.length) { parseJson<CatalogEntry>(url) }?.id
+            }.getOrNull() else null)
             ?.takeIf { IMDB_ID_REGEX.matches(it) }
         val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
             async(Dispatchers.IO) {
@@ -2655,14 +2776,21 @@ open class StremioC(
 
         var initialMetaFromResponse: CatalogEntry? = null
         val res: CatalogEntry = if (url.startsWith("{")) {
-            run { parseJson<CatalogEntry>(url) }
+            run {
+                StremioCAllocDiag.parsed("CatalogEntry", url.length) { parseJson<CatalogEntry>(url) }
+            }
         } else {
             val responseText = run { fetchAddonMetaText(url, forceRefresh) }
             try {
                 run {
-                    val rootNode = parseJson<JsonNode>(responseText)
+                    val rootNode = StremioCAllocDiag.parsed("DetailJsonNode", responseText.length) {
+                parseJson<JsonNode>(responseText)
+            }
                     val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
-                    val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
+                    val metaText = metaNode.toString()
+                    val parsedEntry = StremioCAllocDiag.parsed("CatalogEntry", metaText.length) {
+                        parseJson<CatalogEntry>(metaText)
+                    }
                         ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
                     if (rootNode.has("meta") && metaNode.isObject) {
                         initialMetaFromResponse = parsedEntry
@@ -5695,12 +5823,21 @@ open class StremioC(
                 })
             }
 
-            if ((emitLinks || emitSubtitles) && ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId",
-                if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
-                if (emitLinks) callback else { _: ExtractorLink -> })
-            if ((emitLinks || emitSubtitles) && externalUrl != null) loadExtractor(externalUrl,
-                if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
-                if (emitLinks) callback else { _: ExtractorLink -> })
+            if ((emitLinks || emitSubtitles) && ytId != null) {
+                val target = "https://m.youtube.com/watch?v=$ytId"
+                StremioCAllocDiag.extractor("youtube", target) {
+                    loadExtractor(target,
+                        if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
+                        if (emitLinks) callback else { _: ExtractorLink -> })
+                }
+            }
+            if ((emitLinks || emitSubtitles) && externalUrl != null) {
+                StremioCAllocDiag.extractor("external", externalUrl) {
+                    loadExtractor(externalUrl,
+                        if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
+                        if (emitLinks) callback else { _: ExtractorLink -> })
+                }
+            }
             if (emitLinks && infoHash != null) {
                 val displayTitle = description ?: title ?: name ?: ""
                 val magnet = torrentLink("magnet:?xt=urn:btih:" + infoHash, ExtractorLinkType.MAGNET)
