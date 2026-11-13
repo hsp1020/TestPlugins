@@ -164,7 +164,24 @@ class ElevatePlugin : Plugin() {
         val pid = Process.myPid()
         val processKey = "$pid:${Process.getStartElapsedRealtime()}"
         val prefs = application.getSharedPreferences("ElevateExitHistory", Context.MODE_PRIVATE)
-        if (prefs.getString("logged_process", null) == processKey) return
+        val processName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            Application.getProcessName() else application.applicationInfo.processName
+        val processType = if (processName == application.packageName) "MAIN" else "SECONDARY"
+        val previousKey = prefs.getString("logged_process", null)
+        if (previousKey == processKey) {
+            Log.i("ElevateExitHistory", "PROCESS_REUSE pid=$pid process=$processName " +
+                "processType=$processType reason=PLUGIN_RELOAD_SAME_PID")
+            return
+        }
+        val previousPid = previousKey?.substringBefore(':') ?: "none"
+        val startType = when {
+            previousKey == null -> "FIRST_OBSERVED"
+            previousPid == pid.toString() -> "PID_REUSED_NEW_PROCESS"
+            else -> "NEW_PID_SINCE_PREVIOUS_LOAD"
+        }
+        Log.i("ElevateExitHistory", "PROCESS_START pid=$pid process=$processName " +
+            "processType=$processType startType=$startType previousPid=$previousPid " +
+            "startElapsedMs=${Process.getStartElapsedRealtime()} cause=UNKNOWN_UNTIL_EXIT_HISTORY")
         prefs.edit().putString("logged_process", processKey).apply()
 
         Thread({
@@ -195,9 +212,23 @@ class ElevatePlugin : Plugin() {
                     val time = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", java.util.Locale.US)
                         .format(java.util.Date(info.timestamp))
                     val description = info.description?.replace('\n', ' ')?.replace('\r', ' ')?.take(240) ?: "-"
+                    val reasonType = when (info.reason) {
+                        ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH"
+                        ApplicationExitInfo.REASON_ANR -> "ANR"
+                        ApplicationExitInfo.REASON_LOW_MEMORY,
+                        ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "SYSTEM_RESOURCE"
+                        ApplicationExitInfo.REASON_EXIT_SELF -> "SELF_EXIT"
+                        ApplicationExitInfo.REASON_SIGNALED -> "SIGNAL"
+                        ApplicationExitInfo.REASON_USER_REQUESTED,
+                        ApplicationExitInfo.REASON_USER_STOPPED -> "USER_ACTION"
+                        else -> "OTHER_OR_UNKNOWN"
+                    }
+                    val exitedType = if (info.processName == application.packageName) "MAIN" else "SECONDARY"
                     Log.i("ElevateExitHistory",
-                        "exit[$index] pid=${info.pid} process=${info.processName} time=$time " +
-                            "timestampMs=${info.timestamp} reason=$reason(${info.reason}) status=${info.status} " +
+                        "exit[$index] pid=${info.pid} process=${info.processName} processType=$exitedType " +
+                            "matchesPreviousPid=${info.pid.toString() == previousPid} time=$time " +
+                            "timestampMs=${info.timestamp} reasonType=$reasonType " +
+                            "reason=$reason(${info.reason}) status=${info.status} " +
                             "importance=${info.importance} pssKb=${info.pss} rssKb=${info.rss} description=$description")
                 }
             } catch (failure: Throwable) {

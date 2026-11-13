@@ -3,6 +3,7 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.os.Process
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -36,6 +37,19 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     private var probeScheduled = false
     private val stoppedActivities = HashMap<Int, Long>()
     private var stopSequence = 0L
+    private val previousDestroyed = HashMap<String, String>()
+
+    private fun activityInfo(activity: Activity): String =
+        "pid=${Process.myPid()} type=${activity.javaClass.simpleName} " +
+            "activity=${System.identityHashCode(activity)} taskId=${activity.taskId} " +
+            "taskRoot=${activity.isTaskRoot} finishing=${activity.isFinishing} " +
+            "changingConfig=${activity.isChangingConfigurations} pip=${activity.isInPictureInPictureMode}"
+
+    private fun destroyReason(activity: Activity): String = when {
+        activity.isChangingConfigurations -> "CONFIGURATION_CHANGE"
+        activity.isFinishing -> "FINISHING"
+        else -> "SYSTEM_OR_EXTERNAL_UNKNOWN"
+    }
 
     private fun snapshotHeap(fragmentId: Int, phase: String) {
         try {
@@ -150,7 +164,10 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     fun start() {
         running = true
         application.registerActivityLifecycleCallbacks(this)
-        PipLibraryNavigation.currentPlayerHost()?.let(::use)
+        PipLibraryNavigation.currentPlayerHost()?.let {
+            Log.i(TAG, "ACTIVITY_EXISTING ${activityInfo(it)} reason=TRACE_ATTACHED_AFTER_CREATE")
+            use(it)
+        }
         scheduleProbe()
     }
     fun stop() {
@@ -169,31 +186,46 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         main.removeCallbacks(probe)
         probeScheduled = false
     }
+    override fun onActivityCreated(activity: Activity, state: Bundle?) {
+        val previous = previousDestroyed.remove(activity.javaClass.name) ?: "none"
+        val evidence = when {
+            previous != "none" -> "AFTER_PREVIOUS_DESTROY"
+            state != null -> "RESTORED_SAVED_STATE"
+            else -> "NEW_INSTANCE_CAUSE_UNKNOWN"
+        }
+        Log.i(TAG, "ACTIVITY_CREATE ${activityInfo(activity)} evidence=$evidence " +
+            "previous=$previous savedState=${state != null} intentAction=${activity.intent?.action} " +
+            "intentFlags=0x${Integer.toHexString(activity.intent?.flags ?: 0)}")
+    }
     override fun onActivityStarted(activity: Activity) {
+        Log.i(TAG, "ACTIVITY_START ${activityInfo(activity)}")
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityResumed(activity: Activity) {
+        Log.i(TAG, "ACTIVITY_RESUME ${activityInfo(activity)}")
         stoppedActivities.remove(System.identityHashCode(activity))
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
+    override fun onActivityPaused(activity: Activity) {
+        Log.i(TAG, "ACTIVITY_PAUSE ${activityInfo(activity)}")
+    }
     override fun onActivityDestroyed(activity: Activity) {
-        // Preserve the pending stop snapshot: Activity destruction must not
-        // cancel the AFTER_ACTIVITY_STOP_5S sample scheduled by onActivityStopped.
+        val reason = destroyReason(activity)
+        Log.i(TAG, "ACTIVITY_DESTROY ${activityInfo(activity)} reason=$reason")
+        previousDestroyed[activity.javaClass.name] =
+            "activity=${System.identityHashCode(activity)},taskId=${activity.taskId},reason=$reason"
+        // Preserve the pending stop snapshot: destruction must not cancel the 5-second sample.
         if (host === activity || activity is DownloadedPlayerActivity) {
-            Log.i(TAG, "ACTIVITY_DESTROY activity=${System.identityHashCode(activity)}")
             snapshotHeap(System.identityHashCode(activity), "ACTIVITY_DESTROY")
         }
         if (host === activity) unbind()
     }
-    override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
-    override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) {
+        Log.i(TAG, "ACTIVITY_STOP ${activityInfo(activity)}")
         if (host !== activity && activity !is DownloadedPlayerActivity) return
         val activityId = System.identityHashCode(activity)
         val token = ++stopSequence
         stoppedActivities[activityId] = token
-        Log.i(TAG, "ACTIVITY_STOP activity=$activityId playerFragments=${watched.size} " +
-            "pip=${activity.isInPictureInPictureMode}")
         snapshotHeap(activityId, "ACTIVITY_STOP")
         main.postDelayed({
             if (running && stoppedActivities[activityId] == token) {
@@ -202,5 +234,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             }
         }, 5_000L)
     }
-    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) {
+        Log.i(TAG, "ACTIVITY_SAVE_STATE ${activityInfo(activity)}")
+    }
 }
