@@ -13,6 +13,32 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class SyncDomainRegressionTest {
+    @Test fun sha256HexOptimizationMatchesLegacyForAllByteValues() {
+        val inputs = listOf(
+            byteArrayOf(), byteArrayOf(0, -1, 1, -128, 127),
+            ByteArray(256) { it.toByte() },
+            "SyncCS-test-한국어".toByteArray(Charsets.UTF_8)
+        )
+        for (bytes in inputs) {
+            val legacy = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }
+            assertEquals(legacy, SyncBackend.digestBytes(bytes))
+        }
+    }
+
+    @Test fun unchangedListBaselineRequiresEveryKeyAndRawValueToMatch() {
+        val old = JSONObject().put("a", "alpha").put("b", "beta")
+        val reordered = JSONObject().put("b", "beta").put("a", "alpha")
+        assertTrue(SyncCoordinator.sameListBaselines(old, reordered))
+        assertFalse(SyncCoordinator.sameListBaselines(old,
+            JSONObject().put("a", "alpha")))
+        assertFalse(SyncCoordinator.sameListBaselines(old,
+            JSONObject().put("a", "alpha").put("b", "updated")))
+        assertFalse(SyncCoordinator.sameListBaselines(old,
+            JSONObject().put("a", "alpha").put("c", "beta")))
+        assertTrue(SyncCoordinator.sameListBaselines(JSONObject(), JSONObject()))
+    }
+
     private fun plugin(name: String, version: Int, url: String): JSONObject =
         JSONObject().put("type", "online").put("name", name)
             .put("repo", "https://example.org/repo.json")

@@ -91,6 +91,20 @@ internal object PosterWipe {
         OkHttpNetworkFetcherFactory(OkHttpClient.Builder().dispatcher(dispatcher).build())
     }
 
+    // Opt-in diagnostics: adb shell setprop log.tag.ElevateCoilTrace DEBUG
+    private fun traceImage(
+        phase: String, url: String, size: Size, scale: Scale,
+        result: ImageResult? = null
+    ) {
+        if (!android.util.Log.isLoggable("ElevateCoilTrace", android.util.Log.DEBUG)) return
+        val success = result as? SuccessResult
+        val source = success?.dataSource?.toString()
+            ?: if (result is ErrorResult) "ERROR" else "-"
+        val dimensions = success?.image?.let { "${it.width}x${it.height}" } ?: "-"
+        android.util.Log.d("ElevateCoilTrace", "phase=$phase urlHash=${url.hashCode().toUInt().toString(16)} " +
+            "requested=$size scale=$scale source=$source decoded=$dimensions")
+    }
+
     private suspend fun executeImage(
         context: Context, url: String, size: Size, scale: Scale
     ): ImageResult {
@@ -111,14 +125,17 @@ internal object PosterWipe {
                     .networkCachePolicy(CachePolicy.DISABLED)
                     .fetcherFactory(cacheOnlyFetcher).build())
                 if (cached is SuccessResult) {
+                    traceImage("CACHE_PROBE_HIT", url, size, scale, cached)
                     return cached
                 }
             }
             gate.mutex.lock()
             try {
-                return loader.execute(request
+                val result = loader.execute(request
                     .networkCachePolicy(CachePolicy.ENABLED)
                     .fetcherFactory(posterFetcher).build())
+                traceImage("LOAD_RESULT", url, size, scale, result)
+                return result
             } finally {
                 gate.mutex.unlock()
             }
@@ -135,8 +152,9 @@ internal object PosterWipe {
         context: Context, url: String, size: Size, scale: Scale
     ): ImageResult {
         val key = RequestKey(url, size, scale)
+        var reused = false
         val flight = synchronized(imageFlights) {
-            (imageFlights[key] ?: run {
+            (imageFlights[key]?.also { reused = true } ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
                     executeImage(context, url, size, scale)
                 }
@@ -150,6 +168,7 @@ internal object PosterWipe {
                 }
             }).also { it.subscribers++ }
         }
+        if (reused) traceImage("SHARED_INFLIGHT", url, size, scale)
         flight.request.start()
         try {
             return flight.request.await()
@@ -210,6 +229,7 @@ internal object PosterWipe {
     /** Warm the existing Coil cache without attaching or modifying an ImageView. */
     suspend fun prefetch(context: Context, url: String, width: Int, height: Int): Result {
         val outcome = try {
+            traceImage("PREFETCH", url, Size(width, height), Scale.FILL)
             loadSharedImage(context, url, Size(width, height), Scale.FILL)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -240,6 +260,7 @@ internal object PosterWipe {
             }
             if (!valid() || !image.isAttachedToWindow)
                 return Result(false, error = "stale")
+            traceImage("DISPLAY", url, size, scale)
             loadSharedImage(image.context, url, size, scale)
         } catch (cancelled: CancellationException) {
             throw cancelled

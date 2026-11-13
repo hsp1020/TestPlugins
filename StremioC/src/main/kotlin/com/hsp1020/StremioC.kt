@@ -1187,6 +1187,55 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
+        // Opt-in diagnostics; never logs raw payload, title, URL or account IDs.
+        // Enable via: adb shell setprop log.tag.StremioSPTrace DEBUG
+        private data class StreamPlayTraceKey(
+            val provider: MainAPI, val payload: String, val casting: Boolean
+        )
+        private val streamPlayTraceActive = HashMap<StreamPlayTraceKey, Int>()
+        private var streamPlayTraceSequence = 0L
+
+        private suspend fun traceStreamPlay(
+            route: String, provider: MainAPI, payload: String, casting: Boolean,
+            subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
+        ): Boolean {
+            val tag = "StremioSPTrace"
+            if (!android.util.Log.isLoggable(tag, android.util.Log.DEBUG))
+                return provider.loadLinks(payload, casting, subtitleCallback, callback)
+
+            val key = StreamPlayTraceKey(provider, payload, casting)
+            val (id, overlapping) = synchronized(streamPlayTraceActive) {
+                val active = streamPlayTraceActive[key] ?: 0
+                streamPlayTraceActive[key] = active + 1
+                (++streamPlayTraceSequence) to active
+            }
+            val fingerprint = payload.hashCode().toUInt().toString(16)
+            val started = SystemClock.elapsedRealtime()
+            val links = java.util.concurrent.atomic.AtomicInteger()
+            var result = "exception"
+            android.util.Log.d(tag, "BEGIN id=$id route=$route provider=${provider.javaClass.simpleName} " +
+                "request=$fingerprint casting=$casting identicalActiveBefore=$overlapping")
+            try {
+                val ok = provider.loadLinks(payload, casting, subtitleCallback, { link ->
+                    links.incrementAndGet()
+                    callback(link)
+                })
+                result = "returned:$ok"
+                return ok
+            } catch (cancelled: CancellationException) {
+                result = "cancelled"
+                throw cancelled
+            } finally {
+                synchronized(streamPlayTraceActive) {
+                    val remaining = (streamPlayTraceActive[key] ?: 1) - 1
+                    if (remaining == 0) streamPlayTraceActive.remove(key)
+                    else streamPlayTraceActive[key] = remaining
+                }
+                android.util.Log.d(tag, "END id=$id route=$route request=$fingerprint " +
+                    "elapsedMs=${SystemClock.elapsedRealtime() - started} links=${links.get()} result=$result")
+            }
+        }
+
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 16
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
@@ -3960,7 +4009,7 @@ open class StremioC(
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(60000L) {
-                        withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
+                        withIntegratedSource("streamplay") { traceStreamPlay("non-anime", streamPlayProvider, 
                             streamPlayPayload(loadData, targetType, media).toJson(),
                             isCasting, subtitleCallback, callback
                         ) }
@@ -3998,7 +4047,7 @@ open class StremioC(
                                 "isCartoon" to loadData.isCartoon
                             )
                             withTimeoutOrNull(60000L) {
-                                withIntegratedSource("anime") { animeProvider.loadLinks(
+                                withIntegratedSource("anime") { traceStreamPlay("dedicated-anime", animeProvider, 
                                     animePayload.toJson(), isCasting, subtitleCallback, callback
                                 ) }
                             }
@@ -4012,7 +4061,7 @@ open class StremioC(
                     val anime = async(Dispatchers.IO) {
                         try {
                             if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
-                                withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
+                                withIntegratedSource("streamplay") { traceStreamPlay("anime-standard", streamPlayProvider, 
                                     streamPlayPayload(loadData, targetType, media).toJson(),
                                     isCasting, subtitleCallback, callback
                                 ) }
@@ -4028,7 +4077,7 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             try {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
+                                    withIntegratedSource("streamplay") { traceStreamPlay("anime-general", streamPlayProvider, 
                                         streamPlayPayload(
                                             loadData, targetType, media, generalAnimeRoute = true
                                         ).toJson(),
@@ -4047,7 +4096,7 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             runSuspendCatching {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
+                                    withIntegratedSource("streamplay") { traceStreamPlay("anime-imdb", streamPlayProvider, 
                                         streamPlayPayload(loadData, targetType, media,
                                             generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
                                         isCasting, subtitleCallback, callback

@@ -110,6 +110,7 @@ class ElevatePlugin : Plugin() {
     private var nativePanelEnabled = false
     private var subtitleRefresh: ElevateSubtitleRefreshHook? = null
     private var subtitleSourceObserver: ElevateSubtitleSourceObserver? = null
+    private var playbackTrace: ElevatePlaybackTrace? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -132,6 +133,7 @@ class ElevatePlugin : Plugin() {
             if (generation.get() != token) return@post
             stopAll()
             app = application
+            playbackTrace = ElevatePlaybackTrace(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 featurePrefs = preferences
@@ -480,6 +482,8 @@ class ElevatePlugin : Plugin() {
     }
 
     private fun stopAll() {
+        playbackTrace?.stop()
+        playbackTrace = null
         featureListener?.let { featurePrefs?.unregisterOnSharedPreferenceChangeListener(it) }
         featureListener = null
         featurePrefs = null

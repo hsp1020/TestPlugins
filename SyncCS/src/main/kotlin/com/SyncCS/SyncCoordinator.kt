@@ -340,11 +340,23 @@ internal object SyncCoordinator {
         return verifiedRemovals
     }
 
+    /** Exact collection ancestry equality; JSON key iteration order is irrelevant. */
+    internal fun sameListBaselines(before: JSONObject, after: JSONObject): Boolean {
+        if (before.length() != after.length()) return false
+        val keys = before.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (!after.has(key) || before.opt(key) != after.opt(key)) return false
+        }
+        return true
+    }
+
     /** All baseline and remote revision fields commit together after CAS publication. */
     private fun persistCommittedBaseline(
         config: SyncConfiguration,
         next: Map<String, String>, versions: Map<String, Long>,
         priorLists: JSONObject, completeLocal: Boolean,
+        previousListCipher: String?,
         local: Map<String, String>, apply: Map<String, String?>,
         marked: Set<String>, remoteKeys: Set<String>,
         upload: Map<String, String?>, remoteCursor: Long?,
@@ -365,11 +377,15 @@ internal object SyncCoordinator {
             listBaselineJson.put(key, raw)
         } else listBaselineJson.remove(key)
     }
+    // Reuse validated ciphertext only when the effective collection ancestry
+    // is unchanged. Full audits and first-time/recovery snapshots still re-encrypt.
+    val listCipher = if (!completeLocal && previousListCipher != null &&
+        sameListBaselines(priorLists, listBaselineJson)) previousListCipher
+    else LocalVault.encrypt(listBaselineJson.toString().toByteArray(Charsets.UTF_8))
     val persisted = config.preferences.edit()
         .putString("base", baseRaw)
         .putString("remote_versions", revisionJson.toString())
-        .putString("list_baselines", LocalVault.encrypt(
-            listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
+        .putString("list_baselines", listCipher)
     if (remoteCursor != null) persisted.putLong("remote_cursor", remoteCursor)
     else persisted.remove("remote_cursor")
 
@@ -771,7 +787,7 @@ internal object SyncCoordinator {
             val (githubRevision, githubGeneration) =
                 (backend as GithubSyncAdapter).verifiedRevision()
             persistCommittedBaseline(config, next, versions, priorLists,
-                completeLocal, local, apply, marked, remoteValues.keys,
+                completeLocal, savedLists, local, apply, marked, remoteValues.keys,
                 upload, pull.cursor, githubRevision, githubGeneration, serverPluginManifest)
 
 
