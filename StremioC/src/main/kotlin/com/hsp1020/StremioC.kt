@@ -4289,7 +4289,9 @@ open class StremioC(
     private data class AioCredits(
         @JsonProperty("cast") val cast: List<AioPerson>? = null,
         @JsonProperty("directors") val directors: List<AioPerson>? = null,
-        @JsonProperty("writers") val writers: List<AioPerson>? = null
+        @JsonProperty("writers") val writers: List<AioPerson>? = null,
+        @JsonProperty("certificationLocal") val certificationLocal: String? = null,
+        @JsonProperty("certifications") val certifications: Map<String, String>? = null
     )
 
     private data class AioActorRow(val data: ActorData, val id: Int?, val crew: Boolean)
@@ -4297,6 +4299,8 @@ open class StremioC(
     private data class CatalogEntry(
         @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String? = null, 
+        @JsonProperty("year") val year: String? = null,
+        @JsonProperty("status") val status: String? = null,
         @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
         @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
         @JsonProperty("_malId") val malIdExt: String? = null,
@@ -5058,16 +5062,14 @@ open class StremioC(
             }
 
             val finalBackground = addonBackground ?: tmdbData?.fetchedBackdrop
-            var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
+            val finalName = originalName?.takeIf { it.isNotBlank() }
+                ?: tmdbData?.fetchedTitle?.takeIf { it.isNotBlank() } ?: "Unknown Content"
             val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
                 .firstOrNull { !it.isNullOrBlank() }
             var finalDescription = if (eligibleNonstandardId)
                 tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalAddonDescription
             else finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
 
-            if (tmdbData != null) {
-                if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
-            }
 
             if (finalType != "movie" && finalType != "series") {
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
@@ -5154,6 +5156,26 @@ open class StremioC(
                 it[1] = cleanTmdbId
             }
 
+            val finalYear = sequenceOf(detailedEntry.year, this@CatalogEntry.year)
+                .mapNotNull { it?.trim()?.toIntOrNull()?.takeIf { year -> year in 1800..3000 } }
+                .firstOrNull() ?: tmdbData?.fetchedYear
+            val countryCode = StremioTmdb.language().substringAfter("-", "KR").uppercase()
+            val finalAgeRating = sequenceOf(detailedEntry.appExtras, this@CatalogEntry.appExtras)
+                .mapNotNull { it?.certificationLocal?.trim()?.takeIf(String::isNotBlank) }
+                .firstOrNull()
+                ?: sequenceOf(detailedEntry.appExtras, this@CatalogEntry.appExtras)
+                    .mapNotNull { it?.certifications?.get(countryCode)?.trim()?.takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                ?: sequenceOf(detailedEntry.appExtras, this@CatalogEntry.appExtras)
+                    .mapNotNull { it?.certifications?.get("US")?.trim()?.takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                ?: tmdbData?.fetchedAgeRating
+            val finalShowStatus = sequenceOf(detailedEntry.status, this@CatalogEntry.status)
+                .mapNotNull { status -> when (status?.trim()?.lowercase()) {
+                    "ended", "canceled", "cancelled" -> ShowStatus.Completed
+                    "returning series", "in production" -> ShowStatus.Ongoing
+                    else -> null
+                } }.firstOrNull() ?: tmdbData?.fetchedStatus
             val finalRatingValue = finalImdbRating?.takeIf { it.isNotBlank() && it != "null" } 
                                    ?: tmdbData?.fetchedVoteAverage?.toString()
 
@@ -5243,7 +5265,7 @@ open class StremioC(
                         type = finalType, 
                         id = resolvedMovieId, 
                         imdbId = cleanImdbId, 
-                        year = tmdbData?.fetchedYear, 
+                        year = finalYear, 
                         title = finalName, 
                         tmdbId = cleanTmdbId?.toIntOrNull(), 
                         isAnime = isAnimeMedia,
@@ -5263,14 +5285,14 @@ open class StremioC(
                         embeddedStreamTitle = finalVideos?.singleOrNull()?.let { it.title ?: it.name }
                     )
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = finalYear
                     this.plot = finalDescription
                     this.tags = finalGenre
                     this.recommendations = recommendationsForPage
                     this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
                         ?: finalVideos?.singleOrNull()?.runtime?.let(::stremioRuntimeMinutes)
                         ?: tmdbData?.fetchedRuntime
-                    this.contentRating = tmdbData?.fetchedAgeRating
+                    this.contentRating = finalAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
@@ -5296,7 +5318,7 @@ open class StremioC(
                     finalAniId, 
                     finalMalId, 
                     finalKitsuId?.toString() ?: this@CatalogEntry.kitsuIdExt,
-                    tmdbData?.fetchedYear, 
+                    finalYear, 
                     originalAnimeId
                 ) }.onEach { episode ->
                     if (episode.runTime == null) episode.runTime = representativeRunTime
@@ -5322,8 +5344,8 @@ open class StremioC(
                 val response = run { provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
-                    this.showStatus = tmdbData?.fetchedStatus
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = finalYear
+                    this.showStatus = finalShowStatus
                     if (specialsSeason != null) {
                         val seasonLabel = CloudStreamApp.context
                             ?.getString(com.lagradost.cloudstream3.R.string.season)
@@ -5333,7 +5355,7 @@ open class StremioC(
                     this.plot = finalDescription
                     this.tags = finalGenre
                     this.recommendations = recommendationsForPage
-                    this.contentRating = tmdbData?.fetchedAgeRating
+                    this.contentRating = finalAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
