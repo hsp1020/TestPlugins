@@ -269,9 +269,7 @@ private object MetadataDiskCache {
                 if (temp.length() > MAX_ENTRY_BYTES) {
                     return@withContext
                 }
-                val lockStart = SystemClock.elapsedRealtimeNanos()
                 synchronized(lock) {
-                    val lockWaitMs = StremioCAllocDiag.ms(lockStart)
                     val acquired = android.os.SystemClock.elapsedRealtime()
                     if (!cleanedOldTemps) {
                         cleanedOldTemps = true
@@ -286,28 +284,18 @@ private object MetadataDiskCache {
                             writesSinceQuotaCheck >= QUOTA_CHECK_WRITES ||
                             acquired - lastQuotaCheckAtMs >= QUOTA_CHECK_MS
                         if (due) {
-                            val scanStart = SystemClock.elapsedRealtimeNanos()
                             val files = dir.listFiles()?.filter {
                                 it.isFile && it.name.endsWith(".gz")
                             }.orEmpty()
                             val totalBytes = files.sumOf { it.length() }
                             val kindCount = files.count { it.name.startsWith("${kind}_") }
-                            val scanMs = StremioCAllocDiag.ms(scanStart)
                             val trimNeeded = totalBytes > MAX_BYTES ||
                                 kindCount > (entryLimits[kind] ?: Int.MAX_VALUE)
-                            val trimStart = SystemClock.elapsedRealtimeNanos()
-                            if (trimNeeded) trim(dir)
-                            val trimMs = if (trimNeeded) StremioCAllocDiag.ms(trimStart) else 0L
-                            StremioCAllocDiag.log("P3_CACHE_QUOTA kind=$kind files=${files.size} " +
-                                "totalBytes=$totalBytes kindFiles=$kindCount trim=$trimNeeded " +
-                                "scanMs=$scanMs trimMs=$trimMs lockWaitMs=$lockWaitMs " +
-                                "lockMs=${StremioCAllocDiag.ms(lockStart)}")
+                            if (trimNeeded) trim(files)
                             quotaChecked = true
                             writesSinceQuotaCheck = 0
                             lastQuotaCheckAtMs = android.os.SystemClock.elapsedRealtime()
 
-                        } else if (kind == "detail" && lockWaitMs >= 50L) {
-                            StremioCAllocDiag.log("P3_CACHE_LOCK kind=$kind lockWaitMs=$lockWaitMs")
                         }
                     }
 
@@ -319,13 +307,14 @@ private object MetadataDiskCache {
         }
     }
 
-    private fun trim(dir: File, limitBytes: Long = MAX_BYTES) {
-        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") } ?: return
+    private fun trim(files: List<File>, limitBytes: Long = MAX_BYTES) {
+        val byKind = files.groupBy { file ->
+            entryLimits.keys.firstOrNull { kind -> file.name.startsWith("${kind}_") }
+        }
         for ((kind, limit) in entryLimits) {
-            files.filter { it.name.startsWith("${kind}_") }
-                .sortedByDescending { it.lastModified() }.drop(limit).forEach {
-                    it.delete()
-                }
+            byKind[kind].orEmpty().sortedByDescending { it.lastModified() }.drop(limit).forEach {
+                it.delete()
+            }
         }
         val remaining = files.filter { it.exists() }.sortedBy { it.lastModified() }
         var total = remaining.sumOf { it.length() }
@@ -339,68 +328,6 @@ private object MetadataDiskCache {
     }
 }
 
-
-private object StremioCAllocDiag {
-    private const val TAG = "StremioCAllocDiag"
-    private val parseCalls = HashMap<String, Int>()
-    private val extractorUrls = LinkedHashMap<String, Int>()
-    private var extractorCount = 0
-    private var repeatedExtractors = 0
-
-    fun ms(startNs: Long): Long =
-        (SystemClock.elapsedRealtimeNanos() - startNs) / 1_000_000L
-
-    fun log(message: String) {
-        android.util.Log.i(TAG, message)
-    }
-
-    fun <T> parsed(model: String, chars: Int, block: () -> T): T {
-        val count = synchronized(parseCalls) {
-            (parseCalls[model] ?: 0).plus(1).also { parseCalls[model] = it }
-        }
-        val started = SystemClock.elapsedRealtimeNanos()
-        var completed = false
-        try {
-            return block().also { completed = true }
-        } finally {
-            if (count <= 5 || count % 20 == 0) {
-                log("P4_PARSE model=$model call=$count chars=$chars " +
-                    "parser=${System.identityHashCode(app.responseParser)} " +
-                    "ms=${ms(started)} success=$completed")
-            }
-        }
-    }
-
-    suspend fun <T> extractor(kind: String, target: String, block: suspend () -> T): T {
-        val count: Int
-        val seenBefore: Boolean
-        val repeats: Int
-        val tracked: Int
-        synchronized(extractorUrls) {
-            extractorCount++
-            count = extractorCount
-            seenBefore = extractorUrls.containsKey(target)
-            if (seenBefore) repeatedExtractors++
-            repeats = repeatedExtractors
-            if (!seenBefore && extractorUrls.size >= 512) {
-                extractorUrls.remove(extractorUrls.keys.first())
-            }
-            extractorUrls[target] = (extractorUrls[target] ?: 0) + 1
-            tracked = extractorUrls.size
-        }
-        val started = SystemClock.elapsedRealtimeNanos()
-        var completed = false
-        try {
-            return block().also { completed = true }
-        } finally {
-            if (count <= 8 || count % 20 == 0 || (seenBefore && repeats <= 4)) {
-                log("P0_EXTRACTOR kind=$kind calls=$count repeated=$repeats " +
-                    "seenBefore=$seenBefore tracked=$tracked urlHash=${target.hashCode()} " +
-                    "ms=${ms(started)} success=$completed")
-            }
-        }
-    }
-}
 
 private fun JsonNode?.textOrNull(): String? {
     if (this == null || this.isNull || this.isMissingNode) return null
@@ -1701,9 +1628,9 @@ open class StremioC(
                 .build()
         }
         private val homeHostBackoff = ConcurrentHashMap<String, Long>()
-        private val homeJsonFlights = mutableMapOf<String, Deferred<String>>()
+        private val homeJsonFlights = mutableMapOf<String, Deferred<HomeCatalogResponse>>()
 
-        private suspend fun fetchHomeJson(url: String): String {
+        private suspend fun fetchHomeJson(url: String): HomeCatalogResponse {
             val task = synchronized(homeJsonFlights) {
                 homeJsonFlights[url]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
@@ -1723,7 +1650,7 @@ open class StremioC(
             return task.await()
         }
 
-        private suspend fun fetchHomeJsonUnshared(url: String): String {
+        private suspend fun fetchHomeJsonUnshared(url: String): HomeCatalogResponse {
             currentCoroutineContext().ensureActive()
             val host = url.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
             val now = System.currentTimeMillis()
@@ -1735,21 +1662,14 @@ open class StremioC(
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
             return suspendCancellableCoroutine { continuation ->
-                val started = SystemClock.elapsedRealtimeNanos()
                 val call = homeForegroundClient.newCall(request)
                 continuation.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : okhttp3.Callback {
                     override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                        StremioCAllocDiag.log("P2_HTTP_FAIL urlHash=${url.hashCode()} " +
-                            "ms=${StremioCAllocDiag.ms(started)} error=${e.javaClass.simpleName}")
                         if (continuation.isActive) continuation.resumeWith(Result.failure(e))
                     }
 
                     override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                        val headerMs = StremioCAllocDiag.ms(started)
-                        val bodyStart = SystemClock.elapsedRealtimeNanos()
-                        val declaredBytes = response.body?.contentLength() ?: -1L
-                        val encoding = response.header("Content-Encoding").orEmpty()
                         val outcome = runCatching {
                             response.use { res ->
                                 if (res.code == 429) {
@@ -1768,12 +1688,16 @@ open class StremioC(
                                     throw CatalogHttpException(429)
                                 }
                                 if (!res.isSuccessful) throw CatalogHttpException(res.code)
-                                res.body?.string() ?: throw IllegalStateException("Empty catalog response body")
+                                val body = res.body ?: throw IllegalStateException("Empty catalog response body")
+                                val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+                                if (charset == Charsets.UTF_8) {
+                                    com.lagradost.cloudstream3.mapper.readValue(
+                                        body.byteStream(), HomeCatalogResponse::class.java)
+                                } else {
+                                    parseJson<HomeCatalogResponse>(body.string())
+                                }
                             }
                         }
-                        StremioCAllocDiag.log("P2_HTTP urlHash=${url.hashCode()} status=${response.code} " +
-                            "declaredBytes=$declaredBytes encoding=$encoding chars=${outcome.getOrNull()?.length ?: -1} " +
-                            "headerMs=$headerMs readMs=${StremioCAllocDiag.ms(bodyStart)} success=${outcome.isSuccess}")
                         if (continuation.isActive) continuation.resumeWith(outcome)
                     }
                 })
@@ -2011,51 +1935,30 @@ open class StremioC(
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
             "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
             *videoLanguages)
-        val started = SystemClock.elapsedRealtimeNanos()
         val fromRam = stremioCacheMemoryRead(tmdbDetailsCache[detailUrl], METADATA_CACHE_TTL)
-        val diskStart = SystemClock.elapsedRealtimeNanos()
         val cached = fromRam ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
-            runCatching {
-                StremioCAllocDiag.parsed("TmdbDetailResponse", json.length) {
-                    parseJson<TmdbDetailResponse>(json)
-                }
-            }.getOrNull()?.let { value ->
+            runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
                     tmdbDetailsCache[detailUrl] = it
                 }
             }
         }
-        val diskMs = StremioCAllocDiag.ms(diskStart)
-        var bodyChars = 0
-        var fetchMs = 0L
-        var writeMs = 0L
         val result: TmdbDetailResponse? = if (cached != null) {
             cached.first
         } else {
             runSuspendCatching {
-                val fetchStart = SystemClock.elapsedRealtimeNanos()
                 val text = run { fetchSharedMetadataText(detailUrl) }
-                fetchMs = StremioCAllocDiag.ms(fetchStart)
-                bodyChars = text.length
                 val fetched = run {
-                    if (text.isNotBlank()) StremioCAllocDiag.parsed("TmdbDetailResponse", text.length) {
-                        parseJson<TmdbDetailResponse>(text)
-                    } else null
+                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
-                    val writeStart = SystemClock.elapsedRealtimeNanos()
                     MetadataDiskCache.write("detail", detailUrl, text)
-                    writeMs = StremioCAllocDiag.ms(writeStart)
                 } else {
                 }
                 fetched
             }.getOrNull()
         }
-        StremioCAllocDiag.log("P3_TMDB idHash=${tmdbId.hashCode()} type=$mediaType " +
-            "source=${if (fromRam != null) "RAM" else if (cached != null) "DISK" else "NETWORK"} " +
-            "chars=$bodyChars diskMs=$diskMs fetchMs=$fetchMs writeMs=$writeMs " +
-            "totalMs=${StremioCAllocDiag.ms(started)} success=${result != null}")
         return result
     }
 
@@ -2546,19 +2449,11 @@ open class StremioC(
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
         }?.let {
-            StremioCAllocDiag.log("P1_CATALOG_CACHE origin=$origin pathHash=${path.hashCode()} items=${it.first.size}")
             return it
         }
         return homeForegroundSemaphore.withPermit {
-            val started = SystemClock.elapsedRealtimeNanos()
-            val json = fetchHomeJson(buildUrl(path))
-            val fetchMs = StremioCAllocDiag.ms(started)
-            val parseStart = SystemClock.elapsedRealtimeNanos()
-            val metas = StremioCAllocDiag.parsed("HomeCatalogResponse", json.length) {
-                parseJson<HomeCatalogResponse>(json)
-            }.metas ?: throw IllegalStateException("Catalog response is missing metas")
-            val parseMs = StremioCAllocDiag.ms(parseStart)
-            val mapStart = SystemClock.elapsedRealtimeNanos()
+            val metas = fetchHomeJson(buildUrl(path)).metas
+                ?: throw IllegalStateException("Catalog response is missing metas")
             val items = metas.mapNotNull { meta ->
                 val type = meta.type ?: fallbackType
                 val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -2568,12 +2463,8 @@ open class StremioC(
                 rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
-            val mapMs = StremioCAllocDiag.ms(mapStart)
-            StremioCAllocDiag.log("P1_CATALOG origin=$origin pathHash=${path.hashCode()} " +
-                "chars=${json.length} metas=${metas.size} items=${items.size} " +
-                "fetchMs=$fetchMs parseMs=$parseMs mapMs=$mapMs totalMs=${StremioCAllocDiag.ms(started)}")
             val result = items to metas.size
-            if (items.isNotEmpty() && items.size <= 80) {
+            if (items.isNotEmpty() && items.size <= 100) {
                 synchronized(recentHomeResults) {
                     recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())
                 }
@@ -2698,9 +2589,7 @@ open class StremioC(
                 runSuspendCatching {
                     val text = run { fetchAddonMetaText(metaUrl, forceRefresh) }
                     val response = run {
-                        if (text.isNotBlank()) StremioCAllocDiag.parsed("CatalogResponse", text.length) {
-                            parseJson<CatalogResponse>(text)
-                        } else null
+                        if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
                     }
                     response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
                         ?: response?.metas?.firstOrNull()
@@ -2722,9 +2611,7 @@ open class StremioC(
             async(Dispatchers.IO) { run { fetchSecondaryMeta(metaUrl, urlHint!!.id) } }
         }
         val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
-            runCatching {
-                StremioCAllocDiag.parsed("CatalogEntry", url.length) { parseJson<CatalogEntry>(url) }?.id
-            }.getOrNull() else null)
+            runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
             ?.takeIf { IMDB_ID_REGEX.matches(it) }
         val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
             async(Dispatchers.IO) {
@@ -2776,21 +2663,14 @@ open class StremioC(
 
         var initialMetaFromResponse: CatalogEntry? = null
         val res: CatalogEntry = if (url.startsWith("{")) {
-            run {
-                StremioCAllocDiag.parsed("CatalogEntry", url.length) { parseJson<CatalogEntry>(url) }
-            }
+            run { parseJson<CatalogEntry>(url) }
         } else {
             val responseText = run { fetchAddonMetaText(url, forceRefresh) }
             try {
                 run {
-                    val rootNode = StremioCAllocDiag.parsed("DetailJsonNode", responseText.length) {
-                parseJson<JsonNode>(responseText)
-            }
+                    val rootNode = parseJson<JsonNode>(responseText)
                     val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
-                    val metaText = metaNode.toString()
-                    val parsedEntry = StremioCAllocDiag.parsed("CatalogEntry", metaText.length) {
-                        parseJson<CatalogEntry>(metaText)
-                    }
+                    val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
                         ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
                     if (rootNode.has("meta") && metaNode.isObject) {
                         initialMetaFromResponse = parsedEntry
@@ -3307,11 +3187,13 @@ open class StremioC(
             emitLinks: Boolean = true,
             emitSubtitles: Boolean = true
         ): Int = coroutineScope {
+            val extractorFlights = ExtractorFlightGroup()
             val jobs = streams.orEmpty().map { stream -> async(Dispatchers.IO) {
                 val readyLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
                 withStreamCallback(category) {
                     stream.runCallback(this@StremioC, source, subtitleHandler, extractorSubtitleHandler,
-                        { readyLinks.add(it) }, preferredName, addonUrl, emitLinks, emitSubtitles)
+                        { readyLinks.add(it) }, preferredName, addonUrl, emitLinks, emitSubtitles,
+                        extractorFlights)
                 }
                 readyLinks
             } }
@@ -5757,6 +5639,50 @@ open class StremioC(
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
     private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?, @JsonProperty("filename") val filename: String? = null)
 
+
+    // Share only concurrently running extractor work within one addon's response.
+    // Each stream still receives its own callbacks in the original order.
+
+    // Share only an in-flight "no matching extractor" result within one response.
+    // Successful extractor calls and their mutable links/callbacks remain independent.
+    private class ExtractorFlightGroup {
+        private val flights = HashMap<Pair<String, String>, CompletableDeferred<Boolean>>()
+
+        suspend fun load(
+            kind: String, url: String,
+            subtitleCallback: (SubtitleFile) -> Unit,
+            linkCallback: (ExtractorLink) -> Unit
+        ) {
+            val key = kind to url
+            var leader = false
+            val flight = synchronized(flights) {
+                flights[key] ?: CompletableDeferred<Boolean>().also {
+                    flights[key] = it
+                    leader = true
+                }
+            }
+            if (!leader) {
+                if (flight.await()) return
+                loadExtractor(url, subtitleCallback, linkCallback)
+                return
+            }
+            var callbacks = 0
+            try {
+                val found = loadExtractor(url,
+                    { subtitle -> callbacks++; subtitleCallback(subtitle) },
+                    { link -> callbacks++; linkCallback(link) })
+                flight.complete(!found && callbacks == 0)
+            } catch (error: Throwable) {
+                flight.complete(false)
+                throw error
+            } finally {
+                synchronized(flights) {
+                    if (flights[key] === flight) flights.remove(key)
+                }
+            }
+        }
+    }
+
     private data class Stream(
         @JsonProperty("name") val name: String?,
         @JsonProperty("title") val title: String?,
@@ -5779,7 +5705,8 @@ open class StremioC(
             preferredName: String? = null,
             addonUrl: String? = null,
             emitLinks: Boolean = true,
-            emitSubtitles: Boolean = true
+            emitSubtitles: Boolean = true,
+            extractorFlights: ExtractorFlightGroup? = null
         ) {
             val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
             fun rememberFilename(url: String, displayName: String) {
@@ -5825,18 +5752,16 @@ open class StremioC(
 
             if ((emitLinks || emitSubtitles) && ytId != null) {
                 val target = "https://m.youtube.com/watch?v=$ytId"
-                StremioCAllocDiag.extractor("youtube", target) {
-                    loadExtractor(target,
-                        if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
-                        if (emitLinks) callback else { _: ExtractorLink -> })
-                }
+                val subs = if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> }
+                val links = if (emitLinks) callback else { _: ExtractorLink -> }
+                if (extractorFlights != null) extractorFlights.load("youtube", target, subs, links)
+                else loadExtractor(target, subs, links)
             }
             if ((emitLinks || emitSubtitles) && externalUrl != null) {
-                StremioCAllocDiag.extractor("external", externalUrl) {
-                    loadExtractor(externalUrl,
-                        if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
-                        if (emitLinks) callback else { _: ExtractorLink -> })
-                }
+                val subs = if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> }
+                val links = if (emitLinks) callback else { _: ExtractorLink -> }
+                if (extractorFlights != null) extractorFlights.load("external", externalUrl, subs, links)
+                else loadExtractor(externalUrl, subs, links)
             }
             if (emitLinks && infoHash != null) {
                 val displayTitle = description ?: title ?: name ?: ""
