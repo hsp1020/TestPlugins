@@ -19,7 +19,7 @@ import java.util.function.Consumer
 internal object ElevateJavaAllocationProfile {
     private const val TAG = "ElevateJavaAlloc"
     private const val PREFIX = "elevate-java-alloc-"
-    private const val DURATION_MS = 90_000
+    private const val DURATION_MS = 180_000
     private val lock = Any()
     private val callbackExecutor = Executor { task ->
         Thread(task, "ElevateJavaAllocResult").start()
@@ -89,7 +89,7 @@ internal object ElevateJavaAllocationProfile {
                 stopSignal = signal
                 requestTag = tag
                 awaitingResult = true
-                state = "Recording requested (max 90 s). Reproduce, then Stop."
+                state = "Recording requested (max 180 s). Reproduce, then Stop."
                 Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=" + DURATION_MS)
                 logHeap("PROFILE_START", tag)
                 state
