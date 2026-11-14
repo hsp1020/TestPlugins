@@ -1475,16 +1475,21 @@ open class StremioC(
                     mapOf("Cache-Control" to "no-cache") else emptyMap()).text
             }
             val storageKey = addonMetaStorageKey(url)
+            val cacheHash = Integer.toHexString(storageKey.hashCode())
             val previous = if (forceRefresh) {
                 cachedAddonMetaInRam(storageKey)
                     ?: MetadataDiskCache.read("meta", storageKey)?.first
             } else null
             if (!forceRefresh) {
                 cachedAddonMetaInRam(storageKey)?.let {
+                    android.util.Log.d("MetadataSwapTrace",
+                        "STREMIOC_META_CACHE source=ram keyHash=$cacheHash")
                     return it
                 }
                 MetadataDiskCache.readWithTtl("meta", storageKey)?.let {
                     cacheAddonMetaInRam(storageKey, it.json, it.ttlMs, it.timestamp)
+                    android.util.Log.d("MetadataSwapTrace",
+                        "STREMIOC_META_CACHE source=disk keyHash=$cacheHash ttlMs=${it.ttlMs}")
                     return it.json
                 }
             }
@@ -1515,15 +1520,22 @@ open class StremioC(
                         val valid = rejectReason == null
                         val transient = containsTransientMetaLinks(root)
                         val image = body.contains("data:image/", ignoreCase = true)
-                        if (valid && ttlMs > 0L && safeVary && !transient && !image) {
+                        val cacheable = valid && ttlMs > 0L && safeVary && !transient && !image
+                        android.util.Log.d("MetadataSwapTrace",
+                            "STREMIOC_META_CACHE source=network keyHash=$cacheHash" +
+                                " cacheable=$cacheable ttlMs=$ttlMs valid=$valid" +
+                                " safeVary=$safeVary transient=$transient image=$image")
+                        if (cacheable) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
-
                             addonMetaScope.launch {
                                 MetadataDiskCache.write("meta", storageKey, body, ttlMs)
                             }
                         }
                         body
                     } catch (error: Throwable) {
+                        android.util.Log.d("MetadataSwapTrace",
+                            "STREMIOC_META_CACHE source=network keyHash=$cacheHash" +
+                                " error=${error.javaClass.simpleName}")
                         throw error
                     } finally {
                         synchronized(addonMetaFlights) { addonMetaFlights.remove(flightKey) }
@@ -5406,6 +5418,13 @@ open class StremioC(
                 ) }.onEach { episode ->
                     if (episode.runTime == null) episode.runTime = representativeRunTime
                 }
+                android.util.Log.d("MetadataSwapTrace",
+                    "STREMIOC_NATIVE_SERIES videos=${finalVideos?.size ?: 0}" +
+                        " episodes=${finalEpisodes.size}" +
+                        " seasons=${finalEpisodes.mapNotNull { it.season }.distinct().size}" +
+                        " addonEpisodes=${detailedEntry.videos?.size ?: 0}" +
+                        " tmdbEpisodes=${tmdbData?.episodeTmdbMeta?.size ?: 0}" +
+                        " representativeRuntime=${representativeRunTime ?: 0}")
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true

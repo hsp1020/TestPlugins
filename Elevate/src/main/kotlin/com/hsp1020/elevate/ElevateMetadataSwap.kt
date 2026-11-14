@@ -35,6 +35,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,7 +99,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             )
         }
 
-        fun toPage(original: ResultData): ResultData {
+        fun toPage(original: ResultData, movie: Boolean): ResultData {
             val sync = HashMap(original.syncData)
             sync["metadata_swap_source"] = source
             sync["logo_expected"] = (!logo.isNullOrBlank()).toString()
@@ -125,7 +129,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 ratingText = rating?.let {
                     txt(R.string.rating_format, String.format(Locale.US, "%.1f", it))
                 },
-                durationText = duration?.let { txt(it) },
+                durationText = if (movie) duration?.let { txt(it) } else null,
                 contentRatingText = certification?.let { txt(it) },
                 onGoingText = ongoing?.let {
                     txt(if (it) R.string.status_ongoing else R.string.status_completed)
@@ -404,6 +408,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val seasonRequests = Semaphore(6)
     private val screens = mutableMapOf<Fragment, Screen>()
     private var host: FragmentActivity? = null
     private val responseField = runCatching {
@@ -580,7 +585,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val resolved = try {
                     withContext(Dispatchers.IO) {
                         val aio = if (provider == "AIO")
-                            Addon.load(manifest, movie, ids)?.let { metadataFromAddon(it) }
+                            Addon.load(manifest, movie, ids, locale)?.let { metadataFromAddon(it) }
                         else null
                         if (provider == "AIO") metadataSwapTrace(
                             "ELEVATE_AIO_RESULT gen=$generation parsed=${aio != null}" +
@@ -639,8 +644,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 metadata = current
                 detailId = resolved.second
                 detailLocale = locale
-                swapped = current.toPage(page)
+                swapped = current.toPage(page, movie)
                 swapped?.let { nativePage(model, it) }
+                metadataSwapTrace("ELEVATE_FIELDS gen=$generation movie=$movie" +
+                    " titleChanged=${swapped?.title != page.title}" +
+                    " plotChanged=${swapped?.plotText != page.plotText}" +
+                    " posterChanged=${swapped?.posterImage != page.posterImage}" +
+                    " logoChanged=${swapped?.logoUrl != page.logoUrl}" +
+                    " runtimeCleared=${!movie && swapped?.durationText == null}" +
+                    " castCount=${current.actors?.size ?: 0}")
                 metadataSwapTrace("ELEVATE_APPLY gen=$generation source=${current.source}" +
                     " pagePublished=${(model.page.value as? Resource.Success<ResultData>)?.value === swapped}" +
                     " title=${current.title != null} logo=${current.logo != null}" +
@@ -672,26 +684,45 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     (activeSeason == null || it == activeSeason)
                             }
                         }.distinct()
-                        for (season in seasons) {
-                            if (source.source == "AIO" && base.filter {
-                                    it.seasonIndex == season && it.season == season &&
-                                        it.episode > 0
-                                }.all { episode ->
-                                    val info = source.episodes[season to episode.episode]
-                                    info != null && info.name != null &&
-                                        info.description != null && info.poster != null &&
-                                        info.date != null && info.runTime != null &&
-                                        info.rating != null
-                                }) continue
-                            val response = ElevateTmdbMetadata.season(id, season, detailLocale)
-                                ?: continue
-                            val values = response.optJSONArray("episodes") ?: continue
-                            for (i in 0 until values.length()) {
-                                val ep = values.optJSONObject(i) ?: continue
-                                val number = ep.optInt("episode_number").takeIf { it > 0 } ?: continue
-                                result[season to number] = ep.episodeMeta(true)
+                        metadataSwapTrace("ELEVATE_SEASON_PLAN gen=" + generation +
+                            " selected=" + (activeSeason?.toString() ?: "all") +
+                            " seasonCount=" + seasons.size + " concurrency=6")
+                        val responses = seasons.map { season ->
+                            async(Dispatchers.IO) {
+                                if (source.source == "AIO" && base.filter {
+                                        it.seasonIndex == season && it.season == season &&
+                                            it.episode > 0
+                                    }.all { episode ->
+                                        val info = source.episodes[season to episode.episode]
+                                        info != null && info.name != null &&
+                                            info.description != null && info.poster != null &&
+                                            info.date != null && info.runTime != null &&
+                                            info.rating != null
+                                    }) {
+                                    metadataSwapTrace("ELEVATE_SEASON_SKIP gen=" + generation +
+                                        " season=" + season + " reason=aio_complete")
+                                    return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
+                                }
+                                val response = seasonRequests.withPermit {
+                                    withTimeoutOrNull(10_000L) {
+                                        ElevateTmdbMetadata.season(id, season, detailLocale)
+                                    }
+                                }
+                                val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+                                val values = response?.optJSONArray("episodes")
+                                if (values != null) for (i in 0 until values.length()) {
+                                    val ep = values.optJSONObject(i) ?: continue
+                                    val number = ep.optInt("episode_number")
+                                        .takeIf { it > 0 } ?: continue
+                                    found[season to number] = ep.episodeMeta(true)
+                                }
+                                metadataSwapTrace("ELEVATE_SEASON_RESULT gen=" + generation +
+                                    " season=" + season + " ok=" + (response != null) +
+                                    " episodes=" + found.size)
+                                found
                             }
-                        }
+                        }.awaitAll()
+                        for (items in responses) result.putAll(items)
                         result
                     }
                 }
@@ -702,6 +733,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
                 metadataSwapTrace("ELEVATE_EPISODES_RESOLVED gen=$generation tmdbMatches=${tmdbEpisodes.size}" +
                     " addonMatches=${source.episodes.size}")
+                var matched = 0
+                var unmatched = 0
                 val result = base.map { episode ->
                     val season = episode.seasonIndex?.takeIf {
                         it == episode.season && it in 0..99 && episode.episode > 0
@@ -711,16 +744,27 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val tmdb = key?.let { tmdbEpisodes[it] }
                     val info = if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
                         else tmdb
-                    // Clear old provider display fields even when TMDB has no match.
-                    // .copy preserves id, data, playback position, season and episode.
+                    if (info == null) unmatched++ else matched++
+                    // Preserve the existing display replacement policy; only instrument matches.
+                    // .copy retains playback URL, episode ID, season mapping and watch progress.
                     episode.copy(
                         name = info?.name, description = info?.description,
                         poster = info?.poster, score = info?.rating?.let { Score.from10(it) },
                         airDate = date(info?.date), runTime = info?.runTime
                     )
                 }
+                metadataSwapTrace("ELEVATE_EPISODES_MATCH gen=" + generation +
+                    " matched=" + matched + " unmatched=" + unmatched +
+                    " idsPreserved=" + result.indices.all {
+                        result[it].id == base[it].id && result[it].data == base[it].data
+                    })
                 swappedEpisodes = result
                 nativeEpisodes(result)
+                metadataSwapTrace("ELEVATE_UI_STATE gen=" + generation +
+                    " seasonOptions=" + (model.seasonSelections.value?.size ?: 0) +
+                    " selectedSeason=" + (model.selectedSeasonIndex.value ?: -1) +
+                    " rangeOptions=" + (model.rangeSelections.value?.size ?: 0) +
+                    " visibleEpisodes=" + result.size)
                 metadataSwapTrace("ELEVATE_EPISODES_APPLY gen=$generation count=${result.size}" +
                     " published=${(model.episodes.value as? Resource.Success<List<ResultEpisode>>)?.value === result}")
             }
@@ -825,7 +869,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
     /** Stremio manifest/meta contract, using the configured addon, not the StremioC provider. */
     private object Addon {
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private data class Cached(val at: Long, val json: JSONObject?)
+        private data class Cached(val at: Long, val ttlMs: Long, val json: JSONObject)
+        private data class Fetched(val json: JSONObject, val ttlMs: Long)
         private val manifests = LinkedHashMap<String, Cached>()
         private val metadata = LinkedHashMap<String, Cached>()
         private val manifestFlights = mutableMapOf<String, Deferred<JSONObject?>>()
@@ -842,19 +887,44 @@ internal class ElevateMetadataSwap(private val application: Application) :
             ).fragment(null).build()
         }
 
-        private suspend fun shared(key: String, cache: LinkedHashMap<String, Cached>,
-            flights: MutableMap<String, Deferred<JSONObject?>>, ttl: Long,
-            request: suspend () -> JSONObject?): JSONObject? {
+        private suspend fun shared(
+            key: String, kind: String, cache: LinkedHashMap<String, Cached>,
+            flights: MutableMap<String, Deferred<JSONObject?>>,
+            request: suspend () -> Fetched?
+        ): JSONObject? {
             val now = System.currentTimeMillis()
             val job = synchronized(cache) {
-                cache[key]?.takeIf { now - it.at in 0 until ttl }?.let { return it.json }
+                cache[key]?.takeIf { now >= it.at && now - it.at < it.ttlMs }?.let {
+                    metadataSwapTrace("ELEVATE_CACHE_HIT kind=" + kind + " source=ram" +
+                        " keyHash=" + key.hashCode().toString(16))
+                    return it.json
+                }
                 flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
-                    val json = request()
-                    synchronized(cache) {
-                        cache[key] = Cached(System.currentTimeMillis(), json)
-                        if (cache.size > 100) cache.remove(cache.keys.first())
+                    val disk = ElevateMetadataDiskCache.read(kind, key)
+                    if (disk != null) {
+                        val parsed = runCatching { JSONObject(disk.body) }.getOrNull()
+                        if (parsed != null) {
+                            synchronized(cache) {
+                                cache[key] = Cached(disk.at, disk.ttlMs, parsed)
+                                if (cache.size > 100) cache.remove(cache.keys.first())
+                            }
+                            metadataSwapTrace("ELEVATE_CACHE_HIT kind=" + kind + " source=disk" +
+                                " keyHash=" + key.hashCode().toString(16))
+                            return@async parsed
+                        }
                     }
-                    json
+                    val fetched = request()
+                    if (fetched != null && fetched.ttlMs > 0L) {
+                        synchronized(cache) {
+                            cache[key] = Cached(System.currentTimeMillis(), fetched.ttlMs, fetched.json)
+                            if (cache.size > 100) cache.remove(cache.keys.first())
+                        }
+                        ElevateMetadataDiskCache.write(kind, key, fetched.json.toString(), fetched.ttlMs)
+                        metadataSwapTrace("ELEVATE_CACHE_STORE kind=" + kind +
+                            " ttlMs=" + fetched.ttlMs + " keyHash=" + key.hashCode().toString(16))
+                    } else metadataSwapTrace("ELEVATE_CACHE_BYPASS kind=" + kind +
+                        " reason=" + (if (fetched == null) "request_failed" else "cache_policy"))
+                    fetched?.json
                 }.also { active ->
                     flights[key] = active
                     active.invokeOnCompletion {
@@ -866,23 +936,91 @@ internal class ElevateMetadataSwap(private val application: Application) :
             return job.await()
         }
 
-        private suspend fun request(url: String): JSONObject? = try {
-            val result = app.get(url, timeout = 12L)
-            if (result.code !in 200..299) null else {
-                val raw = JSONObject(result.text)
-                if (!url.contains("/meta/")) raw else {
-                    // A series can carry hundreds of episodes; cache only display metadata.
-                    val data = raw.optJSONObject("meta") ?: raw
+        private fun cacheTtl(
+            headers: List<Pair<String, String>>, payload: JSONObject, movie: Boolean?
+        ): Long {
+            fun header(name: String): String? =
+                headers.firstOrNull { it.first.equals(name, true) }?.second
+            val directives = header("Cache-Control").orEmpty()
+                .lowercase(Locale.ROOT).split(',').map { it.trim() }
+            if (directives.any {
+                it == "no-store" || it == "no-cache" || it == "private" ||
+                    it == "max-age=0" || it == "s-maxage=0"
+            }) return 0L
+            if (header("Vary").orEmpty().split(',').any {
+                    it.trim().isNotEmpty() && !it.trim().equals("Accept-Encoding", true)
+                }) return 0L
+            val max = 7L * 24 * 60 * 60 * 1000
+            val age = header("Age")?.trim()?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+            val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
+                ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+            if (maxAge != null) return (maxAge - age).coerceIn(0L, max / 1000L) * 1000L
+            val expires = header("Expires")
+            if (!expires.isNullOrBlank()) {
+                fun parseDate(value: String?): Long? = runCatching {
+                    SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
+                        .parse(value ?: "")?.time
+                }.getOrNull()
+                parseDate(expires)?.let {
+                    return (it - (parseDate(header("Date")) ?: System.currentTimeMillis()) -
+                        age * 1000L).coerceIn(0L, max)
+                }
+            }
+            payload.optLong("cacheMaxAge", -1L).takeIf { it >= 0L }?.let {
+                return (it - age).coerceIn(0L, max / 1000L) * 1000L
+            }
+            return when (movie) {
+                null -> 3_600_000L
+                true -> 3L * 24 * 60 * 60 * 1000
+                false -> 12L * 60 * 60 * 1000
+            }
+        }
+
+        private suspend fun request(url: String, movie: Boolean?): Fetched? = try {
+            val response = app.get(url, timeout = 12L)
+            if (response.code !in 200..299) null else {
+                val text = response.text
+                val raw = JSONObject(text)
+                val meta = if (movie == null) null else raw.optJSONObject("meta") ?: raw
+                var ttl = cacheTtl(response.headers.toList(), raw, movie)
+                if (meta != null) {
+                    val wantedType = url.substringAfter("/meta/").substringBefore('/')
+                    val wantedId = Uri.decode(url.substringBefore('?')
+                        .substringAfterLast('/').removeSuffix(".json"))
+                    val foundId = meta.optString("id").trim()
+                    val foundType = meta.optString("type").trim()
+                    val idValid = wantedId == foundId ||
+                        (wantedId.startsWith("mal:") || wantedId.startsWith("kitsu:") ||
+                            wantedId.startsWith("anilist:")) &&
+                        (foundId.matches(Regex("tt[0-9]+")) || foundId.startsWith("tmdb:"))
+                    val typeValid = wantedType == foundType ||
+                        (wantedType == "tv" && foundType == "series")
+                    val transient = meta.has("streams") || meta.optString("url").isNotBlank() ||
+                        (meta.optJSONArray("videos")?.let { videos ->
+                            (0 until videos.length()).any { i ->
+                                val video = videos.optJSONObject(i)
+                                video != null && listOf("streams", "sources", "stream", "url")
+                                    .any { video.has(it) }
+                            }
+                        } == true)
+                    if (!idValid || !typeValid || transient ||
+                        text.contains("data:image/", true)) {
+                        ttl = 0L
+                        metadataSwapTrace("ELEVATE_CACHE_VALIDATE id=" + idValid +
+                            " type=" + typeValid + " transient=" + transient)
+                    }
+                }
+                val result = if (meta == null) raw else {
+                    val data = meta
                     val slim = JSONObject()
-                    for (field in listOf("name", "title", "description", "overview", "poster",
-                        "background", "backdrop", "logo", "logoUrl", "genres", "genre",
-                        "year", "releaseInfo", "released", "imdbRating", "rating",
-                        "runtime", "status", "contentRating", "certification",
+                    for (field in listOf("id", "type", "name", "title", "description",
+                        "overview", "poster", "background", "backdrop", "logo", "logoUrl",
+                        "genres", "genre", "year", "releaseInfo", "released", "imdbRating",
+                        "rating", "runtime", "status", "contentRating", "certification",
                         "app_extras", "trailers", "trailerStreams", "_providerArt",
                         "original_title", "originalTitle", "english_title", "englishTitle")) {
                         if (data.has(field)) slim.put(field, data.get(field))
                     }
-                    // Preserve only episode display metadata, never stream data/IDs.
                     data.optJSONArray("videos")?.let { videos ->
                         slim.put("videos", JSONArray().apply {
                             for (i in 0 until videos.length()) {
@@ -900,12 +1038,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     }
                     JSONObject().put("meta", slim)
                 }
+                Fetched(result, ttl)
             }
-        } catch (e: CancellationException) {
-            throw e
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) { null }
 
-        suspend fun load(rawManifest: String, movie: Boolean, ids: ElevateMediaIdentity.Ids): JSONObject? {
+        suspend fun load(rawManifest: String, movie: Boolean, ids: ElevateMediaIdentity.Ids, locale: String): JSONObject? {
             val manifest = manifestUrl(rawManifest)
             if (manifest == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP reason=invalid_manifest")
@@ -913,8 +1052,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
             val uri = manifest.toString()
             val manifestHash = Integer.toHexString(uri.hashCode())
-            val definition = shared(uri, manifests, manifestFlights, 3_600_000L) {
-                request(uri)
+            val definition = shared(uri, "manifest", manifests, manifestFlights) {
+                request(uri, null)
             }
             if (definition == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash reason=manifest_failed")
@@ -958,13 +1097,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
             metadataSwapTrace("ELEVATE_ADDON_CANDIDATES manifestHash=$manifestHash" +
                 " type=$type ids=${values.size} prefixes=${prefixes.size}")
+            val version = definition.optString("version").trim()
             for (id in values.take(4)) {
                 val url = manifest.buildUpon().encodedPath(
                     manifest.encodedPath.orEmpty().removeSuffix("/manifest.json") +
                         "/meta/$type/${Uri.encode(id)}.json"
                 ).build().toString()
-                val result = shared(url, metadata, metaFlights, 43_200_000L) {
-                    request(url)
+                val key = version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
+                val result = shared(key, "meta", metadata, metaFlights) {
+                    request(url, movie)
                 }
                 val found = result?.optJSONObject("meta") != null
                 metadataSwapTrace("ELEVATE_ADDON_META manifestHash=$manifestHash type=$type" +
