@@ -585,24 +585,24 @@ internal class ElevateMetadataSwap(private val application: Application) :
             if (metadata != null && swapped != null) suppressNativeTrailers()
         }
         private val episodeObserver = Observer<Resource<List<ResultEpisode>>?> { state ->
-            if (state is Resource.Loading) {
-                if (metadata != null && !rebuildingHost)
-                    swappedEpisodes?.let(::nativeEpisodes)
-                return@Observer
+            when (state) {
+                is Resource.Loading -> {
+                    if (metadata != null && !rebuildingHost)
+                        swappedEpisodes?.let(::nativeEpisodes)
+                }
+                is Resource.Success -> {
+                    val list = state.value
+                    if (list === swappedEpisodes) return@Observer
+                    if (rebuildingHost || aioRebuilt) {
+                        // Preserve the host's rebuilt episode list across sync/PiP refreshes.
+                        swappedEpisodes = list
+                        return@Observer
+                    }
+                    originalEpisodes = list
+                    updateEpisodes()
+                }
+                else -> Unit
             }
-            val list = (state as? Resource.Success<List<ResultEpisode>>)?.value ?: return@Observer
-            if (list === swappedEpisodes || aioRebuilt || rebuildingHost) return@Observer
-            originalEpisodes = list
-            if (pendingPage != null && swappedEpisodes == null) nativeEpisodesLoading()
-            updateEpisodes()
-        }
-
-        @Suppress("UNCHECKED_CAST")
-        private fun nativeEpisodesLoading() {
-            @Suppress("UNCHECKED_CAST")
-            val live = episodeField?.get(model) as?
-                MutableLiveData<Resource<List<ResultEpisode>>?> ?: return
-            if (live.value !is Resource.Loading) live.value = Resource.Loading()
         }
 
         private fun nativePageLoading(page: ResultData) {
@@ -638,8 +638,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
 
         fun start() {
-            model.episodes.observe(fragment.viewLifecycleOwner, episodeObserver)
             model.page.observe(fragment.viewLifecycleOwner, observer)
+            model.episodes.observe(fragment.viewLifecycleOwner, episodeObserver)
             model.trailers.observe(fragment.viewLifecycleOwner, trailerObserver)
         }
 
@@ -682,8 +682,6 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 return
             }
             nativePageLoading(page)
-            if (originalEpisodes == null ||
-                page.syncData["metadata_swap_source"] != provider) nativeEpisodesLoading()
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -860,7 +858,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     ElevateAnimeIdResolver.resolve(kind, id)
                 }
                 val tmdbSeason = animeMapping?.tmdbSeason
-                val tmdbStart = animeMapping?.tmdbFromEpisode
+                val tmdbStart = if (tmdbSeason != null)
+                    animeMapping?.tmdbFromEpisode ?: 1 else null
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
                     val id = if (animeLookup != null) {
                         animeMapping?.tmdb?.takeIf { tmdbSeason != null }
@@ -954,7 +953,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val key = season?.let { it to episode.episode }
                     val addon = key?.let { source.episodes[it] }
                     val mappedKey = season?.let {
-                        (tmdbSeason ?: it) to (episode.episode + (tmdbStart ?: 1) - 1)
+                        val selectedSeason = tmdbSeason ?: it
+                        val selectedEpisode = if (tmdbSeason != null)
+                            (tmdbStart ?: 1) + episode.episode - 1 else episode.episode
+                        selectedSeason to selectedEpisode
                     }
                     val tmdb = (mappedKey ?: key)?.let { tmdbEpisodes[it] }
                     val info = if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
@@ -996,8 +998,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             model.trailers.removeObserver(trailerObserver)
             restoreNativeSeries()
             restoreNativeTrailers()
-            if (model.episodes.value is Resource.Loading ||
-                (model.episodes.value as? Resource.Success<List<ResultEpisode>>)
+            if ((model.episodes.value as? Resource.Success<List<ResultEpisode>>)
                     ?.value === swappedEpisodes)
                 originalEpisodes?.let(::nativeEpisodes)
             val visible = (model.page.value as? Resource.Success<ResultData>)?.value
