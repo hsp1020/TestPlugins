@@ -47,6 +47,10 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var focusTree: ViewTreeObserver? = null
+    private var observedRoot: View? = null
+    private val rootLayoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        synchronizeSource()
+    }
     private var pendingPlayerAttachTree: ViewTreeObserver? = null
     private val pendingPlayerAttachListener = ViewTreeObserver.OnPreDrawListener {
         if (fragment?.playerView?.player != null) {
@@ -118,6 +122,15 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
             .apply { isAccessible = true }
     }.getOrNull()
+    private val nativeSubtitleSetter = runCatching {
+        GeneratorPlayer::class.java.getDeclaredMethod(
+            "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
+        ).apply { isAccessible = true }
+    }.getOrNull()
+    private val selectedLinkField = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("currentSelectedLink")
+            .apply { isAccessible = true }
+    }.getOrNull()
     private val helperField = runCatching {
         CS3IPlayer::class.java.getDeclaredField("subtitleHelper")
             .apply { isAccessible = true }
@@ -139,6 +152,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             "onTracksChanged" -> {
                 synchronizeSource()
                 (args?.getOrNull(0) as? Tracks)?.let(::selectEmbedded)
+                null
+            }
+            "onRenderedFirstFrame" -> {
+                val expected = player
+                fragment?.view?.post {
+                    if (player === expected) expected?.currentTracks?.let(::selectEmbedded)
+                }
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -169,7 +189,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             ?.takeIf { it.isEmpty() || it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
 
     private fun currentLinkUrl(f: GeneratorPlayer): String? =
-        runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
+        runCatching {
+            val selected = selectedLinkField?.get(f) as? Pair<*, *>
+            (selected?.first as? ExtractorLink)?.url
+                ?: (linkField?.get(f.player) as? ExtractorLink)?.url
+        }.getOrNull()
 
     private fun selectedByHost(f: GeneratorPlayer): SubtitleData? =
         runCatching { selectedField?.get(f) as? SubtitleData }.getOrNull()
@@ -256,6 +280,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private fun discardPreviousEmbedded() {
         val stale = previousEmbedded
         previousEmbedded = emptySet()
+        val f = fragment
+        if (f != null && selectedByHost(f)?.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
+            runCatching { selectedField?.set(f, null) }
+            f.player.setPreferredSubtitles(null)
+        }
         if (stale.isEmpty()) return
         model?.let { vm ->
             if (vm.state.subtitles.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
@@ -503,9 +532,14 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             .mapNotNull { subtitle ->
                 val (group, index) = available[subtitle.url] ?: return@mapNotNull null
                 if (!group.isTrackSupported(index)) return@mapNotNull null
-                Triple(SubtitleLanguageNormalizer.subtitlePriority(subtitle, tracks, null), group, index)
+                Triple(SubtitleLanguageNormalizer.subtitlePriority(subtitle, tracks, null), subtitle, group to index)
             }.minByOrNull { it.first } ?: return
-        val (_, group, index) = match
+        val (_, subtitle, track) = match
+        val (group, index) = track
+        if (selectedByHost(f) != subtitle) {
+            // Preserve CloudStream's selected subtitle through the first frame and reload.
+            runCatching { nativeSubtitleSetter?.invoke(f, subtitle, false) }
+        }
         if (group.isTrackSelected(index)) return
         runCatching {
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
@@ -561,6 +595,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         }
         detach()
         fragment = candidate
+        observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(rootLayoutListener) }
         ElevateJavaAllocationProfile.traceHook("EmbeddedSubtitleController", "ATTACH", host, candidate)
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
@@ -610,6 +645,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        observedRoot?.removeOnLayoutChangeListener(rootLayoutListener)
+        observedRoot = null
         ElevateJavaAllocationProfile.traceHook("EmbeddedSubtitleController", "DETACH", host, fragment)
         captionLayoutTree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(captionLayoutListener)
         captionLayoutTree = null
