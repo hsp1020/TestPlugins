@@ -101,6 +101,7 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
         private var vm: PlayerGeneratorViewModel? = null
         private var player: Media3Player? = null
         private var removeObservers: (() -> Unit)? = null
+        private var independentProbeStarted = false
         private val processCpuStartMs = Process.getElapsedCpuTime()
         private var tickNo = 0
 
@@ -142,6 +143,16 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
         private fun firstFrame(origin: String) {
             if (firstFrameMs == 0L) firstFrameMs = SystemClock.elapsedRealtime()
             log("FIRST_VIDEO_FRAME", "origin=$origin")
+            if (!independentProbeStarted) {
+                independentProbeStarted = true
+                val file = vm?.state?.generatorState?.meta as? ExtractorUri
+                if (file != null) {
+                    ElevateOfflineFileProbe.start(activity.applicationContext, file.uri,
+                        id, startedMs, player?.currentPosition ?: 0L)
+                } else {
+                    log("PROBE_NOT_STARTED", "reason=no_offline_uri")
+                }
+            }
         }
         // Proxies match the already-established Media3 ABI bridging used by Elevate.
         private val playerListener = Proxy.newProxyInstance(
@@ -156,9 +167,21 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                     log("MEDIA3_STATE", "state=${stateName(args?.getOrNull(0) as? Int ?: -1)}"); null
                 }
                 "onIsLoadingChanged", "onIsPlayingChanged", "onPlayWhenReadyChanged",
-                "onPlaybackSuppressionReasonChanged", "onPositionDiscontinuity",
-                "onTimelineChanged", "onMediaItemTransition" -> {
+                "onPlaybackSuppressionReasonChanged", "onMediaItemTransition" -> {
                     log("MEDIA3_${method.name}", "arg=${args?.getOrNull(0)?.javaClass?.simpleName}"); null
+                }
+                "onPositionDiscontinuity" -> {
+                    val from = args?.getOrNull(0) as? Media3Player.PositionInfo
+                    val to = args?.getOrNull(1) as? Media3Player.PositionInfo
+                    log("MEDIA3_POSITION_DISCONTINUITY",
+                        "fromMs=${from?.positionMs} toMs=${to?.positionMs} reason=${args?.getOrNull(2)}")
+                    null
+                }
+                "onTimelineChanged" -> {
+                    log("MEDIA3_TIMELINE", "reason=${args?.getOrNull(1)} " +
+                        "durationMs=${player?.duration} seekable=${player?.isCurrentMediaItemSeekable} " +
+                        "positionMs=${player?.currentPosition}")
+                    null
                 }
                 "onTracksChanged" -> {
                     log("MEDIA3_TRACKS", "groups=${player?.currentTracks?.groups?.size} " +
