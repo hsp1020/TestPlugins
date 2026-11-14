@@ -1093,8 +1093,19 @@ open class StremioC(
 
         /** Expose only the catalog's metadata setting; Elevate owns its swap source and requests. */
     private fun isMetadataSwapAllowed(catalogUrl: String?): Boolean {
-        val catalog = catalogUrl?.takeIf { it.isNotBlank() }?.cleanBaseUrl()?.lowercase() ?: return false
-        return getSyncSettings().syncMap[catalog] == true
+        val catalog = catalogUrl?.takeIf { it.isNotBlank() }?.cleanBaseUrl()?.lowercase()
+        if (catalog == null) {
+            android.util.Log.d("MetadataSwapTrace", "STREMIOC_PERMISSION reason=empty_catalog_url allowed=false")
+            return false
+        }
+        val settings = getSyncSettings()
+        val stored = settings.syncMap[catalog]
+        android.util.Log.d("MetadataSwapTrace",
+            "STREMIOC_PERMISSION catalogHash=${Integer.toHexString(catalog.hashCode())}" +
+                " savedCatalogs=${settings.syncMap.size} matched=${stored != null}" +
+                " setting=$stored allowed=${stored == true}" +
+                " historyUrlMatch=${settings.syncUrl.isNotBlank() && settings.syncUrl.cleanBaseUrl().lowercase() == catalog}")
+        return stored == true
     }
 
         /** Encode the catalog's progress permission into returned metadata. */
@@ -5298,7 +5309,15 @@ open class StremioC(
                     .mapNotNull { it?.trim()?.lowercase()?.takeIf { code ->
                         code.matches(Regex("[a-z]{2,3}")) && code != "und"
                     } }.firstOrNull()?.let { syncData["original_language"] = it }
-                syncData["metadata_swap_allowed"] = StremioC.isMetadataSwapAllowed(provider.mainUrl).toString()
+                val metadataSwapAllowed = StremioC.isMetadataSwapAllowed(provider.mainUrl)
+                syncData["metadata_swap_allowed"] = metadataSwapAllowed.toString()
+                android.util.Log.d("MetadataSwapTrace",
+                    "STREMIOC_PAGE catalogHash=${Integer.toHexString(provider.mainUrl.cleanBaseUrl().lowercase().hashCode())}" +
+                        " pageHash=${Integer.toHexString(url.hashCode())}" +
+                        " apiIsStremioC=${apiName == "StremioC"} type=$finalType" +
+                        " allowed=$metadataSwapAllowed imdbPresent=${validImdb != null}" +
+                        " tmdbPresent=${!cleanTmdbId.isNullOrBlank()}" +
+                        " addonLogoPresent=${addonLogo != null || fallbackAddonLogo != null}")
                 syncData["watch_progress_allowed"] = StremioC.isWatchProgressAllowed(provider.mainUrl).toString()
                 syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && finalKitsuId != null).toString()
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)
