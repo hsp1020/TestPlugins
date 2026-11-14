@@ -48,7 +48,7 @@ internal object DownloadedPlayerLeakCleanup {
 
         fun visit(manager: FragmentManager) {
             for (fragment in manager.fragments) {
-                if (fragment is AbstractPlayerFragment) {
+                if (fragment is AbstractPlayerFragment<*>) {
                     try {
                         val host = field(fragment, "playerHostView")?.get(fragment)
                         if (host != null) {
