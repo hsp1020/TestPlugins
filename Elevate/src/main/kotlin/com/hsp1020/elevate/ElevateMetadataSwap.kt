@@ -614,8 +614,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             metadataSwapTrace("ELEVATE_GATE gen=$generation pageHash=${Integer.toHexString(page.url.hashCode())}" +
                 " featureOn=$featureOn policy=${policy ?: "absent"}" +
                 " originalSyncKeys=${page.syncData.size}")
-            if (!featureOn || policy == "false" || (provider == "AIO" && policy != "true")) {
-                metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=${if (!featureOn) "feature_off" else "stremioc_policy_denied"}")
+            if (!featureOn || policy == "false") {
+                metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=${if (!featureOn) "feature_off" else "stremioc_policy_false"}")
                 return
             }
             val manifest = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty()
@@ -640,14 +640,18 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     " original=${ids.original != null} locale=$locale")
                 val resolved = try {
                     withContext(Dispatchers.IO) {
+                        val aioIds = if (provider == "AIO" && policy != "true" &&
+                            ids.original == null && ids.imdb == null && ids.tmdb == null &&
+                            !ids.animeIds && ids.simkl != null)
+                            ElevateMediaIdentity.enrichSimkl(ids, movie) else ids
                         val aio = if (provider == "AIO")
-                            Addon.load(manifest, movie, ids.animeIds, page.url, locale)
+                            Addon.load(manifest, movie, aioIds, page.url, locale, policy == "true")
                                 ?.let { metadataFromAddon(it) }
                         else null
                         if (provider == "AIO") metadataSwapTrace(
                             "ELEVATE_AIO_RESULT gen=$generation parsed=${aio != null}" +
                                 " logo=${!aio?.logo.isNullOrBlank()} episodes=${aio?.episodes?.size ?: 0}")
-                        val id = tmdbId(ids, movie)
+                        val id = tmdbId(aioIds, movie)
                         metadataSwapTrace("ELEVATE_TMDB_ID gen=$generation resolved=${id != null}" +
                             " idHash=${id?.hashCode()?.let(Integer::toHexString) ?: "none"}")
                         val tmdb = id?.let { key ->
@@ -793,10 +797,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private fun updateEpisodes() {
             val source = metadata ?: return
             val baseRef = originalEpisodes
-            if (source.source != "AIO" && baseRef == null) return
+            val completeAio = source.source == "AIO" &&
+                original?.syncData?.get("metadata_swap_allowed") == "true"
+            if (!completeAio && baseRef == null) return
             val base = baseRef.orEmpty()
             val generation = serial
-            val completeAio = source.source == "AIO"
             metadataSwapTrace("ELEVATE_EPISODES_START gen=$generation originalCount=${base.size}" +
                 " source=${source.source} tmdbIdAvailable=${detailId != null}")
             episodeJob?.cancel()
@@ -1240,8 +1245,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             throw cancelled
         } catch (_: Exception) { null }
 
-        suspend fun load(rawManifest: String, movie: Boolean, anime: Boolean,
-            sourceUrl: String, locale: String): JSONObject? {
+        suspend fun load(rawManifest: String, movie: Boolean, ids: ElevateMediaIdentity.Ids,
+            sourceUrl: String, locale: String, stremioManaged: Boolean): JSONObject? {
             val manifest = manifestUrl(rawManifest)
             if (manifest == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP reason=invalid_manifest")
@@ -1276,18 +1281,32 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
             }.orEmpty()
             val candidates = if (movie) listOf("movie") else
-                if (anime) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
+                if (ids.animeIds) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
             val type = candidates.firstOrNull { it in allowedTypes }
             if (type == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash" +
-                    " reason=no_compatible_type movie=$movie animeIds=$anime" +
+                    " reason=no_compatible_type movie=$movie animeIds=${ids.animeIds}" +
                     " allowedTypes=${allowedTypes.joinToString(",")}")
                 return null
             }
-            val id = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
-                .substringAfter('/', "").removeSuffix(".json")
-                .takeIf { it.isNotBlank() }?.let(Uri::decode) ?: return null
-            metadataSwapTrace("ELEVATE_ADDON_ID type=$type source=stremioc_meta")
+            val sourceId = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
+                .takeIf { it.contains('/') }?.substringAfter('/', "")
+                ?.removeSuffix(".json")?.takeIf(String::isNotBlank)?.let(Uri::decode)
+            val prefixes = definition.optJSONArray("idPrefixes")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
+            }.orEmpty()
+            val id = if (stremioManaged) sourceId else listOfNotNull(
+                ids.original, ids.imdb, ids.tmdb?.let { "tmdb:$it" },
+                ids.mal?.let { "mal:$it" }, ids.anilist?.let { "anilist:$it" },
+                ids.kitsu?.let { "kitsu:$it" }
+            ).distinct().firstOrNull { candidate ->
+                prefixes.isEmpty() || prefixes.any { candidate.startsWith(it, true) }
+            }
+            if (id == null) {
+                metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash reason=no_compatible_id")
+                return null
+            }
+            metadataSwapTrace("ELEVATE_ADDON_ID type=$type source=${if (stremioManaged) "stremioc_meta" else "media_identity"}")
             val version = definition.optString("version").trim()
             synchronized(metadata) {
                 val last = versions.put(uri, version)
