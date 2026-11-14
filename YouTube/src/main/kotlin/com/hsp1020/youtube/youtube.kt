@@ -4163,7 +4163,7 @@ class YoutubeProvider(
                                 val allocationRun = System.getProperty("hsp1020.java.alloc.run")
                                 val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                                 val readStartNs = if (allocationRun != null) System.nanoTime() else 0L
-                                val responseBody = httpResponse.body().bytes()
+                                val responseBody = httpResponse.body.bytes()
                                 val readUs = if (allocationRun != null) (System.nanoTime() - readStartNs) / 1_000L else 0L
                                 val streamStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                 var parseMode = "STREAM_ITEMS"
