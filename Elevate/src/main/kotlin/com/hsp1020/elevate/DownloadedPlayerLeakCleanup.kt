@@ -76,7 +76,7 @@ internal object DownloadedPlayerLeakCleanup {
                     } catch (error: Exception) {
                         Log.w("ElevateLiveLeak",
                             "phase=LIVE_UNREGISTER_FAILED reason=$phase " +
-                                "activityId=$activityId playerId=$playerId", error)
+                                "activityId=$activityId", error)
                     }
                 }
                 players.clear()
