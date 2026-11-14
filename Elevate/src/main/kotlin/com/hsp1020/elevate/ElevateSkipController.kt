@@ -364,6 +364,7 @@ internal class ElevateSkipController(private val application: Application) :
         val nextEpisode = skipPlaybackId(state.generatorState?.meta) ?: -1
         if (nextPlayer !== mediaPlayer || state.instance != initialLoadInstance ||
             nextEpisode != initialLoadEpisode) {
+            ElevateDownloadStartupTrace.mark("SKIP_SOURCE", "instance=${state.instance} playerChanged=${nextPlayer !== mediaPlayer}")
             initialLoadCompleted = false
             initialLoadInstance = state.instance
             initialLoadEpisode = nextEpisode

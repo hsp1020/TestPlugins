@@ -229,6 +229,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val episodeId = episode?.id ?: offline?.id
         if (lastInstance == state.instance && lastProvider == name &&
             lastEpisodeId == episodeId) return
+        ElevateDownloadStartupTrace.mark("AUDIO_SOURCE", "instance=${state.instance} offline=${offline != null}")
         originJob?.cancel()
         originJob = null
         sourceVersion++
@@ -268,6 +269,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val current = player ?: return
         if (selected) return
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+        ElevateDownloadStartupTrace.mark("AUDIO_SCAN", "groups=${groups.size}")
         if (groups.isEmpty()) return
         val appLanguage = fragment?.context?.resources?.configuration?.let {
             ConfigurationCompat.getLocales(it).get(0)?.language
@@ -297,6 +299,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             (lookupTmdb != null || lookupImdb != null || lookupSimkl != null ||
                 lookupAnimeIds.isNotEmpty() || unresolvedOffline?.parentId != null)) {
             originAttempted = true
+            ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_START", "version=$sourceVersion")
             val version = sourceVersion
             val sourcePlayer = current
             val initialParameters = current.trackSelectionParameters
@@ -349,6 +352,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) { throw e }
                   catch (_: Exception) { null }
+                ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_END", "found=${resolved != null} stale=${sourceVersion != version}")
                 if (sourceVersion != version) return@launch
                 originJob = null
                 originLanguage = normalizedLanguage(resolved)
@@ -373,6 +377,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         selected = true
         current.removeListener(audioListener)
         val (group, index) = match
+        ElevateDownloadStartupTrace.mark("AUDIO_SELECTED", "index=$index")
         current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
     }

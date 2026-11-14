@@ -259,6 +259,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
+        ElevateDownloadStartupTrace.mark("PROGRESS_ATTACH", "attached=${next != null}")
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
         cancelCompletion()
