@@ -233,8 +233,6 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
                             }
                         }
                         state.applied = true
-                        println("[Anilife DBG] card orientation=" + (if (landscape) "wide" else "portrait") +
-                            " size=" + w + "x" + h + " card=" + width + "x" + height)
                         return true
                     }
                 }

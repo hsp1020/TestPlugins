@@ -1,7 +1,6 @@
 package com.hsp1020
 
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
@@ -52,11 +51,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         val url: String
     )
 
-    private fun debugLog(message: String) {
-        Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
-        println("[DDL-DEBUG] $message")
-    }
-
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -84,10 +78,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         val entryOrigin = selected.origin.trimEnd('/').ifEmpty { mainUrl }
         mainUrl = entryOrigin
 
-        debugLog(
-            "[${selected.channelName}] 선택 채널 단일 추출 시작 " +
-                "(streamId=${selected.streamId})"
-        )
 
         val entryUrl = "$entryOrigin/watch.php?id=${selected.streamId}"
         val candidates = discoverPlayerCandidates(
@@ -96,18 +86,11 @@ class DaddyLiveExtractor : ExtractorApi() {
             streamId = selected.streamId
         )
 
-        debugLog(
-            "[${selected.channelName}] 최종 player 후보 ${candidates.size}개 -> " +
-                candidates.joinToString(" | ") { "${it.player}:${it.url}" }
-        )
 
         for (candidate in candidates) {
             currentCoroutineContext().ensureActive()
 
             val sourceName = "${selected.channelName} - ${candidate.player}"
-            debugLog(
-                "[${selected.channelName}] player '${candidate.player}' 시도 -> ${candidate.url}"
-            )
 
             val link = extractVideo(
                 url = candidate.url,
@@ -116,19 +99,11 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
-                debugLog(
-                    "[${selected.channelName}] '${candidate.player}' 실제 HLS 검증 성공. " +
-                        "나머지 player 탐색 중지."
-                )
                 callback(link)
                 return
             }
         }
 
-        debugLog(
-            "[${selected.channelName}] 모든 player 후보에서 " +
-                "재생 가능한 검증 완료 HLS를 찾지 못했습니다."
-        )
     }
 
     /*
@@ -154,9 +129,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 timeout = 5
             )
 
-            debugLog(
-                "[ENTRY] $entryUrl -> HTTP ${response.code}"
-            )
 
             if (response.isSuccessful) {
                 val html = response.text
@@ -221,21 +193,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                     }
                 }
 
-                debugLog(
-                    "[ENTRY] 실제 HTML에서 발견한 player -> " +
-                        if (discovered.isEmpty()) {
-                            "없음"
-                        } else {
-                            discovered.entries.joinToString(" | ") { "${it.key}:${it.value}" }
-                        }
-                )
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            debugLog(
-                "[ENTRY] watch.php 분석 실패. 공식 folder fallback 사용 -> ${e.message}"
-            )
         }
 
         /*
@@ -275,8 +236,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         try {
             currentCoroutineContext().ensureActive()
 
-            debugLog("================= [DDL EXTRACT START] =================")
-            debugLog("소스 -> $sourceName | $url")
 
             val targetOrigin = originOf(url) ?: mainUrl
             val referer = parentReferer ?: "$targetOrigin/"
@@ -291,10 +250,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 timeout = 5
             )
 
-            debugLog("플레이어 페이지 응답 코드: ${response.code}")
 
             if (!response.isSuccessful) {
-                debugLog("플레이어 페이지 HTTP ${response.code} -> 다음 player")
                 return null
             }
 
@@ -307,24 +264,17 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
-                debugLog("================= [DDL EXTRACT SUCCESS] =================")
                 return link
             }
 
-            debugLog("현재 player '$sourceName'에서 검증 완료 HLS를 찾지 못했습니다.")
-            debugLog("================= [DDL EXTRACT END] =================")
             return null
         } catch (e: CancellationException) {
-            debugLog("extractVideo 취소 감지 -> 전체 작업 즉시 중단")
             throw e
         } catch (e: SocketTimeoutException) {
-            debugLog("extractVideo 타임아웃: ${e.message}")
             return null
         } catch (e: IOException) {
-            debugLog("extractVideo 네트워크 오류: ${e.message}")
             return null
         } catch (e: Exception) {
-            debugLog("extractVideo 오류: ${e.message}")
             return null
         }
     }
@@ -434,10 +384,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             val joined = decoded.joinToString("") { it.orEmpty() }
             val json = base64Decode(joined)
 
-            debugLog("[ECONFIG] 복호화 성공")
             mapper.readValue<Map<String, Any?>>(json)
         } catch (e: Exception) {
-            debugLog("[ECONFIG] 복호화 실패: ${e.message}")
             null
         }
     }
@@ -456,7 +404,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
-                debugLog("[HLS-VALIDATE] HTTP ${response.code} 실패 -> $url")
                 return false
             }
 
@@ -464,16 +411,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             val valid = body.startsWith("#EXTM3U")
 
             if (valid) {
-                debugLog("[HLS-VALIDATE] #EXTM3U 확인 -> $url")
             } else {
-                debugLog("[HLS-VALIDATE] HTTP ${response.code}지만 HLS 아님 -> $url")
             }
 
             valid
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            debugLog("[HLS-VALIDATE] 요청 실패 -> $url | ${e.message}")
             false
         }
     }
@@ -520,7 +464,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         ).find(pageHtml)?.groupValues?.getOrNull(1)
             ?: return null
 
-        debugLog("[ECONFIG] window._econfig 감지 -> $pageUrl")
 
         val config = decodeEConfig(encoded) ?: return null
 
@@ -546,7 +489,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         for ((kind, candidate) in candidates) {
             currentCoroutineContext().ensureActive()
 
-            debugLog("[ECONFIG] $kind 후보 검증 -> $candidate")
 
             val link = buildValidatedLink(
                 url = candidate,
@@ -558,7 +500,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
-                debugLog("[ECONFIG] 실제 재생 가능한 $kind 확정 -> $candidate")
                 return link
             }
         }
@@ -580,7 +521,6 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         val pageOrigin = originOf(pageUrl) ?: return null
 
-        debugLog("[CRAWL] depth=$depth -> $pageUrl")
 
         // 1) 최신 tiestep/stream.js _econfig 방식 최우선.
         val eConfigLink = extractEConfigStream(
@@ -607,7 +547,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 referer = "$pageOrigin/"
             )
 
-            debugLog("[DIRECT-M3U8] 후보 검증 -> $candidate")
             val link = buildValidatedLink(
                 url = candidate,
                 sourceName = sourceName,
@@ -646,10 +585,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         )
 
         if (nestedCandidates.isNotEmpty()) {
-            debugLog(
-                "[CRAWL] depth=$depth nested 후보 ${nestedCandidates.size}개 -> " +
-                    nestedCandidates.joinToString(" | ")
-            )
         }
 
         for (nestedUrl in nestedCandidates) {
@@ -699,7 +634,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 referer = "$pageOrigin/"
             )
 
-            debugLog("[atob] 후보 검증 -> $candidate")
 
             val link = buildValidatedLink(
                 url = candidate,
@@ -710,11 +644,9 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
-                debugLog("[atob] 실제 HLS 검증 성공 -> $candidate")
                 return link
             }
 
-            debugLog("[atob] dead/decoy 후보 폐기 -> $candidate")
         }
 
         // 7) Popcdn/Freeshot legacy resolver.
@@ -835,7 +767,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         return try {
             currentCoroutineContext().ensureActive()
 
-            debugLog("[CRAWL] child 시도 -> $childUrl")
 
             val response = app.get(
                 childUrl,
@@ -847,7 +778,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
-                debugLog("[CRAWL] child HTTP ${response.code} -> $childUrl")
                 return null
             }
 
@@ -861,7 +791,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            debugLog("[CRAWL] child 실패, 다음 후보 계속 -> $childUrl | ${e.message}")
             null
         }
     }
@@ -965,7 +894,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            debugLog("[IGNITE] 실패 -> ${e.message}")
             null
         }
     }
@@ -1046,7 +974,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            debugLog("[POPCDN] 실패 -> ${e.message}")
             null
         }
     }

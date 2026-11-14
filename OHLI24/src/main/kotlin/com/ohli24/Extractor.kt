@@ -29,7 +29,6 @@ open class Cdndania : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[OHLI24 v1.1] getUrl 호출됨 - url: $url, referer: $referer")
         val host= getBaseUrl(url)
         
         if (url.contains("/video/")) {
@@ -38,7 +37,6 @@ open class Cdndania : ExtractorApi() {
                 val doc = app.get(url, referer = referer).document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
                 val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
                 val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
-                println("[OHLI24 v1.1] 자막 URL 추출: $srtUrl")
 
                 val extractedHash = url.substringAfterLast("/")
                 val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
@@ -48,11 +46,9 @@ open class Cdndania : ExtractorApi() {
                 val safeReferer = referer ?: ""
                 val formdata= mapOf("hash" to extractedHash, "r" to safeReferer)
                 
-                println("[OHLI24 v1.1] 비디오 소스 API 요청: $m3u8Url")
                 val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
                 
                 response?.videoSource?.let { m3u8 ->
-                    println("[OHLI24 v1.1] API 응답 비디오 소스 획득: $m3u8")
 
                     // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
                     val streamHeaders = mapOf(
@@ -67,33 +63,22 @@ open class Cdndania : ExtractorApi() {
 
                     // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
                     try {
-                        println("[OHLI24 v1.1] M3U8(.txt) 안전 검증 시작...")
                         val m3u8Res = app.get(m3u8, headers = streamHeaders)
                         
                         val content = try {
                             m3u8Res.text.trim()
                         } catch (e: Exception) {
-                            println("[OHLI24 v1.1] text 추출 오류 발생(용량 초과 가능성). document.text() 로 대체합니다.")
                             m3u8Res.document.text().trim()
                         }
                         
-                        if (content.length < 500) {
-                            println("[OHLI24 v1.1] 응답 내용(미리보기): ${content.take(200)}")
-                        }
-
                         // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
                         if (!content.startsWith("#EXTM3U")) {
-                            println("[OHLI24 v1.1] ❌ 주의: 응답이 #EXTM3U로 시작하지 않습니다. (에러 3002 원인)")
                             val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
                             innerM3u8Regex.find(content)?.let {
                                 finalUrl = it.groupValues[1]
-                                println("[OHLI24 v1.1] 내용에서 실제 M3U8 추출 성공: $finalUrl")
-                            } ?: println("[OHLI24 v1.1] 내부에 M3U8 주소가 없습니다. 원본 URL($finalUrl)을 유지합니다.")
-                        } else {
-                            println("[OHLI24 v1.1] ✅ 정상적인 M3U8 텍스트로 확인됨.")
+                            }
                         }
                     } catch (e: Exception) {
-                        println("[OHLI24 v1.1] M3U8 검증 중 에러 발생 (재생 시도 속행): ${e.message}")
                     }
 
                     // 추출기 링크 생성 및 콜백
@@ -109,7 +94,6 @@ open class Cdndania : ExtractorApi() {
                             this.quality = Qualities.P1080.value
                         }
                     )
-                    println("[OHLI24 v1.1] ExtractorLink 콜백 전달 완료")
 
                     if (srtUrl.isNotBlank()) {
                         subtitleCallback.invoke(
@@ -118,13 +102,10 @@ open class Cdndania : ExtractorApi() {
                                 srtUrl
                             )
                         )
-                        println("[OHLI24 v1.1] SubtitleFile 콜백 전달 완료")
                     }
                 } ?: run {
-                    println("[OHLI24 v1.1] API 응답에서 videoSource가 null입니다.")
                 }
             } catch (e: Exception) {
-                println("[OHLI24 v1.1] 전체 파싱 중 예외 발생: ${e.message}")
             }
         }
     }

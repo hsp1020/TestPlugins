@@ -49,18 +49,14 @@ class UltimaEvoPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        println("[UltimaEvo-Debug] [Plugin] load() 함수 진입.")
         val appContext = context.applicationContext
         pluginContext = appContext
-        EvoSyncTrace.snapshot(appContext, "PLUGIN_LOAD_BEFORE")
-        EvoSyncTrace.backup(appContext, "PLUGIN_LOAD_BACKUP_BEFORE")
 
         // --- 1. Ultima Evo 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
         try {
             val ultimaEvoBackupStr = try {
                 CloudStreamApp.getKey<String>("native_backup_ultimaevo")
             } catch (e: Throwable) {
-                EvoSyncTrace.log("BACKUP_READ_ERROR", "class=" + e.javaClass.simpleName)
                 null
             }
 
@@ -70,9 +66,6 @@ class UltimaEvoPlugin : Plugin() {
                 val localHash = prefs.getString("ultima_evo_last_applied_backup_hash", "") ?: ""
                 val incomingHash = ultimaEvoBackupStr.hashCode().toString()
 
-                EvoSyncTrace.log("SELF_RESTORE_DECISION",
-                    "required=" + (!localComplete || localHash != incomingHash) +
-                    " complete=" + localComplete + " hashEqual=" + (localHash == incomingHash))
                 if (!localComplete || localHash != incomingHash) {
                     val editor = prefs.edit()
                     editor.clear()
@@ -83,25 +76,17 @@ class UltimaEvoPlugin : Plugin() {
                     // [대기 우회 초기화] 복원 시점에 동기화 세션을 0으로 초기화해 부팅 후 첫 mainPage 로드 때 즉시 실시간 동기화 유도
                     editor.putLong("evo_last_sync_time", 0L)
                     
-                    val committed = editor.commit()
-                    EvoSyncTrace.log("SELF_RESTORE_COMMIT", "ok=" + committed)
-                    EvoSyncTrace.snapshot(appContext, "SELF_RESTORE_AFTER")
-                    println("[UltimaEvoPlugin] Ultima Evo preferences restored successfully on load with sync reset.")
+                    editor.commit()
                 }
             }
         } catch (e: Throwable) {
-            EvoSyncTrace.log("SELF_RESTORE_ERROR", "class=" + e.javaClass.simpleName)
-            println("[UltimaEvoPlugin] Error during UltimaEvo restore on boot: ${e.message}")
             e.printStackTrace()
         }
 
-        EvoSyncTrace.snapshot(appContext, "PLUGIN_LOAD_AFTER")
-        EvoSyncTrace.backup(appContext, "PLUGIN_LOAD_BACKUP_AFTER")
         try {
             val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val instanceCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
             val instanceCount = instanceCountStr.toIntOrNull() ?: 1
-            println("[UltimaEvo-Debug] [Plugin] 생성할 카탈로그 인스턴스 수: $instanceCount")
 
             for (i in 1..instanceCount) {
                 val providerName = prefs.getString("evo_name_$i", "Ultima Evo $i") ?: "Ultima Evo $i"

@@ -45,7 +45,6 @@ class Anilife : MainAPI() {
 
     private suspend fun checkAndUpdateDomain() {
         if (domainChecked) return
-        println("$tag domain START active=$mainUrl")
         domainMutex.withLock {
             if (domainChecked) return@withLock
             val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -56,16 +55,13 @@ class Anilife : MainAPI() {
                 val res = app.get(domain + testPath, headers = mapOf("User-Agent" to userAgent, "Referer" to "$domain/"), timeout = 3L)
                 val host = Regex("""^https://anilife\d+\.tv""").find(res.url)?.value
                 val signature = res.text.contains("catalog-grid") && res.text.contains("anime-card") || res.text.contains("/assets/index-") && res.text.contains("애니라이프")
-                println("$tag domain probe=$domain ok=${res.isSuccessful} signature=$signature redirect=${res.url}")
                 if (res.isSuccessful && signature) host else null
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                println("$tag domain probe FAILED domain=$domain exception=${e.javaClass.simpleName}:${e.message}")
                 null
             }
 
             val start = cached ?: BASE
-            println("$tag domain cached=$cached start=$start")
             var found = verify(start)
             if (found == null && start != BASE) found = verify(BASE)
             if (found == null) {
@@ -77,12 +73,10 @@ class Anilife : MainAPI() {
                 }
             }
             if (found != null) {
-                println("$tag domain validated=$found")
                 currentDomain = found
                 mainUrl = found
                 prefs?.edit()?.putString("domain", found)?.apply()
             }
-            if (found == null) println("$tag domain FAILED retaining=$mainUrl")
             domainChecked = true
         }
     }
@@ -101,14 +95,11 @@ class Anilife : MainAPI() {
     private data class CatalogResult(val items: List<SearchResponse>, val hasNext: Boolean)
 
     private suspend fun catalogItems(pageUrl: String, apiUrl: String): CatalogResult {
-        println("$tag catalog START page=$pageUrl api=$apiUrl")
         val response = app.get(apiUrl, headers = headers, timeout = 10L)
-        println("$tag catalog HTTP ok=${response.isSuccessful} final=${response.url}")
         if (!response.isSuccessful) return CatalogResult(emptyList(), false)
 
         val root = JSONObject(response.text)
         val data = root.optJSONArray("items") ?: run {
-            println("$tag catalog FAILED no items array; keys=${root.keys().asSequence().toList()} body=${response.text.take(800)}")
             return CatalogResult(emptyList(), false)
         }
         val pagination = root.optJSONObject("pagination")
@@ -121,7 +112,6 @@ class Anilife : MainAPI() {
             val title = anime.optString("title").trim()
             if (id.isBlank() || id == "null" || title.isBlank()) {
                 invalid++
-                println("$tag catalog SKIP index=$index id=$id title=$title keys=${anime.keys().asSequence().toList()}")
                 return@mapNotNull null
             }
             val image = anime.optString("image").takeIf { it.isNotBlank() && it != "null" }
@@ -146,7 +136,6 @@ class Anilife : MainAPI() {
                 this.posterHeaders = headers
             }
         }
-        println("$tag catalog RESULT records=${data.length()} items=${items.size} invalid=$invalid page=$page pages=$pages total=${pagination?.optInt("total")} first=${items.firstOrNull()?.name}")
         return CatalogResult(items, page < pages)
     }
 
@@ -160,11 +149,9 @@ class Anilife : MainAPI() {
             (if (popular) "&sort=popular" else "") + "&format=$format&v=catalog-media-2"
         return try {
             val result = catalogItems(pageUrl, apiUrl)
-            println("$tag mainPage RESULT category=${request.name} page=$page count=${result.items.size} hasNext=${result.hasNext}")
             newHomePageResponse(request.name, result.items, hasNext = result.hasNext)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("$tag mainPage FAILED category=${request.name} exception=${e.stackTraceToString()}")
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
@@ -184,17 +171,14 @@ class Anilife : MainAPI() {
         }
         return try {
             val url = "$mainUrl/search?q=${URLEncoder.encode(query, "UTF-8")}"
-            println("$tag search START query=$query url=$url")
             val req = WebViewResolver(
                 Regex("""https?://anilife\d+\.tv/api/(?:anime|search)[^\s]*"""),
                 userAgent = userAgent, useOkhttp = false, timeout = 7000L
             ).resolveUsingWebView(url, headers = headers).first
-            println("$tag search apiRequest=${req?.url} method=${req?.method}")
             if (req == null || req.method != "GET") emptyList()
-            else catalogItems(url, req.url.toString()).items.also { println("$tag search RESULT count=${it.size}") }
+            else catalogItems(url, req.url.toString()).items
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("$tag search FAILED exception=${e.stackTraceToString()}")
             emptyList()
         }
     }
@@ -205,7 +189,6 @@ class Anilife : MainAPI() {
             val cleanUrl = freshUrl(url.substringBefore("?"))
             val seriesId = Regex("""/content/(\d+)""").find(cleanUrl)?.groupValues?.get(1)
                 ?: throw IllegalArgumentException("Invalid AniLife content URL: $cleanUrl")
-            println("$tag detail START series=$seriesId url=$cleanUrl")
 
             val response = app.get("$mainUrl/api/anime/$seriesId?v=playback-url-v1", headers = headers, timeout = 10L)
             val meta = JSONObject(response.text).optJSONObject("item")
@@ -232,7 +215,6 @@ class Anilife : MainAPI() {
                     }
                 }.distinctBy { it.data }
                 val isMovie = meta.optString("format").equals("Movie", true) && episodes.size == 1
-                println("$tag detail API RESULT series=$seriesId title=$title format=${meta.optString("format")} episodes=${episodes.size} movie=$isMovie plot=${plot?.length ?: 0} tags=${tags.size}")
                 val result: LoadResponse = if (isMovie) {
                     newMovieLoadResponse(title, url, TvType.Movie, episodes.single().data)
                 } else {
@@ -250,7 +232,6 @@ class Anilife : MainAPI() {
             throw IllegalStateException("AniLife detail metadata missing for $seriesId")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("$tag detail FAILED url=$url exception=${e.stackTraceToString()}")
             throw e
         }
     }
@@ -261,7 +242,6 @@ class Anilife : MainAPI() {
     ): Boolean {
         checkAndUpdateDomain()
         val episodeUrl = freshUrl(data.substringBefore("?ref="))
-        println("$tag links START episode=$episodeUrl casting=$isCasting")
         return try {
             // ArtPlayer uses a blob: video element: capture its real signed HLS request.
             val (match, subtitleRequests) = WebViewResolver(
@@ -269,30 +249,23 @@ class Anilife : MainAPI() {
                 additionalUrls = listOf(Regex("""https?://[^\s]+\.(?:vtt|srt)(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE)),
                 userAgent = userAgent, useOkhttp = false, timeout = 18000L
             ).resolveUsingWebView(episodeUrl, headers = headers)
-            println("$tag links captured subtitleRequests=${subtitleRequests.size} hls=${match != null}")
             subtitleRequests.distinctBy { it.url.toString() }.forEach { request ->
                 if (request.url.encodedPath.endsWith(".vtt", true) || request.url.encodedPath.endsWith(".srt", true)) {
-                    println("$tag subtitle captured host=${request.url.host} path=${request.url.encodedPath} keys=${request.url.queryParameterNames}")
                     subtitleCallback(newSubtitleFile("Korean", request.url.toString()) {
                         headers = request.headers.toMap()
                     })
-                    println("$tag subtitle delivered")
                 }
             }
             if (match == null) {
-                println("$tag links FAILED no HLS request observed episode=$episodeUrl")
                 return false
             }
-            println("$tag links HLS host=${match.url.host} path=${match.url.encodedPath} queryKeys=${match.url.queryParameterNames} headers=${match.headers.names()}")
             callback(newExtractorLink(name, name, match.url.toString(), ExtractorLinkType.M3U8) {
                 this.referer = mainUrl + "/"
                 this.headers = match.headers.toMap() + ("Referer" to (mainUrl + "/"))
             })
-            println("$tag links callback RESULT delivered")
             true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("$tag links FAILED exception=${e.stackTraceToString()}")
             false
         }
     }

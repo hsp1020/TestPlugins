@@ -1,6 +1,5 @@
 package com.hsp1020
 
-import com.lagradost.api.Log
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -54,23 +53,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
 
     @Volatile
     private var scheduleCache: ScheduleSnapshot? = null
-
-    private fun debugLog(message: String, throwable: Throwable? = null) {
-        val errMessage = throwable?.message ?: "Unknown Error"
-        val formatted = if (throwable != null) {
-            "[DDL-Provider] $message | Exception: $errMessage"
-        } else {
-            "[DDL-Provider] $message"
-        }
-
-        if (throwable != null) {
-            Log.e("DaddyLive-DEBUG", "$message: $errMessage")
-            println(formatted)
-        } else {
-            Log.d("DaddyLive-DEBUG", message)
-            println(formatted)
-        }
-    }
 
     @Suppress("ConstPropertyName")
     companion object {
@@ -131,7 +113,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
             cached != null &&
             now - cached.fetchedAt < SCHEDULE_CACHE_TTL_MS
         ) {
-            debugLog("getSchedule: Using cached schedule snapshot.")
             return cached
         }
 
@@ -144,11 +125,9 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 lockedCached != null &&
                 lockedNow - lockedCached.fetchedAt < SCHEDULE_CACHE_TTL_MS
             ) {
-                debugLog("getSchedule: Another coroutine refreshed the cache. Reusing it.")
                 return@withLock lockedCached
             }
 
-            debugLog("getSchedule: Fetching schedule from $mainUrl")
 
             val response = withContext(Dispatchers.IO) {
                 app.get(
@@ -157,7 +136,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 )
             }
 
-            debugLog("getSchedule: Received response with status ${response.code}")
 
             if (!response.isSuccessful) {
                 throw IllegalStateException("DaddyLive schedule HTTP ${response.code}")
@@ -214,9 +192,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                     )
                 }
 
-                debugLog(
-                    "getSchedule: Category '$sectionTitle' parsed with ${events.size} events."
-                )
 
                 ScheduleSection(
                     title = sectionTitle,
@@ -229,10 +204,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 sections = sections
             ).also {
                 scheduleCache = it
-                debugLog(
-                    "getSchedule: Cache refreshed. Sections=${it.sections.size}, " +
-                        "events=${it.sections.sumOf { section -> section.events.size }}"
-                )
             }
         }
     }
@@ -260,7 +231,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        debugLog("getMainPage: Loading schedule.")
 
         return try {
             val snapshot = getSchedule()
@@ -273,16 +243,13 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 )
             }
 
-            debugLog("getMainPage: Built ${home.size} homepage sections from cache.")
             newHomePageResponse(home, false)
         } catch (e: Exception) {
-            debugLog("getMainPage FAILED", e)
             throw e
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        debugLog("search: Initiated with query '$query'")
 
         return try {
             val normalizedQuery =
@@ -299,10 +266,8 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 }
                 .map { eventToSearchResponse(it) }
                 .also {
-                    debugLog("search: Found ${it.size} matches for '$query'")
                 }
         } catch (e: Exception) {
-            debugLog("search FAILED for query '$query'", e)
             emptyList()
         }
     }
@@ -330,10 +295,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
             return cachedMatch
         }
 
-        debugLog(
-            "findEvent: Event '$dataTitle' not found in cache. " +
-                "Refreshing schedule once."
-        )
 
         return getSchedule(forceRefresh = true)
             .sections
@@ -343,7 +304,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        debugLog("load: Building channel selector for URL: $url")
 
         return try {
             /*
@@ -390,7 +350,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
 
             val dataTitle = decodeEventTitle(url)
 
-            debugLog("load: Looking up cached event by data-title: '$dataTitle'")
 
             val event = findEvent(dataTitle)
                 ?: throw NoSuchElementException(
@@ -432,11 +391,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 event.timeGmt
             }
 
-            debugLog(
-                "load SUCCESS: '${event.eventTitle}' exposed as " +
-                    "${episodes.size} selectable channel episodes. " +
-                    "No stream extraction has been performed yet."
-            )
 
             newTvSeriesLoadResponse(
                 "$formattedTime - ${event.eventTitle}",
@@ -455,7 +409,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 )
             }
         } catch (e: Exception) {
-            debugLog("load FAILED for URL: $url", e)
             throw e
         }
     }
@@ -470,10 +423,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
             val selected =
                 mapper.readValue<ChannelSelection>(data)
 
-            debugLog(
-                "loadLinks: Selected channel only -> " +
-                    "'${selected.channelName}' (streamId=${selected.streamId})"
-            )
 
             var found = false
 
@@ -490,17 +439,9 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 callback(link)
             }
 
-            debugLog(
-                if (found) {
-                    "loadLinks SUCCESS: '${selected.channelName}' resolved."
-                } else {
-                    "loadLinks: '${selected.channelName}' produced no playable link."
-                }
-            )
 
             found
         } catch (e: Exception) {
-            debugLog("loadLinks FAILED", e)
             false
         }
     }

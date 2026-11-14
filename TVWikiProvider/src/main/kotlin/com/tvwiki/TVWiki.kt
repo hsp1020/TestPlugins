@@ -33,7 +33,6 @@ class TVWiki : MainAPI() {
             currentMainUrl = newDomain
             CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[TVWiki DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
     }
 
@@ -97,11 +96,9 @@ class TVWiki : MainAPI() {
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
-                println("[TVWiki DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
 
             val testPath = "/popular"
-            println("[TVWiki DBG] 🔄 기본 도메인 유효성 체크 -> $currentMainUrl$testPath")
             
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 5L)
@@ -111,21 +108,16 @@ class TVWiki : MainAPI() {
                 
                 if (res.isSuccessful && hasSignature) {
                     if (currentMainUrl != finalUrl) {
-                        println("[TVWiki DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    println("[TVWiki DBG] ✅ 기존 도메인 활성 상태 확정 -> $mainUrl")
                     return@withLock
-                } else {
-                    println("[TVWiki DBG] ⚠️ 기존 도메인 유효성 상실 (응답성공: ${res.isSuccessful}, 시그니처매칭: $hasSignature)")
                 }
-            } catch (e: Exception) { println("[TVWiki DBG] ❌ 현재 도메인 접속 실패: ${e.message}") }
+            } catch (_: Exception) { }
 
             val match = Regex("tvwiki(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 35
-            println("[TVWiki DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
             var foundDomain: String? = null
             coroutineScope {
@@ -136,7 +128,6 @@ class TVWiki : MainAPI() {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             val testUrl = "$testDomain$testPath"
-                            println("[TVWiki DBG] 🔄 후보 도메인 검증 시도 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = commonHeaders, timeout = 3L)
                                 val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
@@ -158,14 +149,12 @@ class TVWiki : MainAPI() {
             }
 
             if (foundDomain != null) {
-                println("[TVWiki DBG] ✨ 브루트포스 성공: $foundDomain")
                 saveDomain(foundDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
                 return@withLock
             }
 
-            println("[TVWiki DBG] 💀 탐색 범주($startNum ~ ${startNum + 100}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
             isDomainChecked = true 
         }
     }
@@ -175,7 +164,6 @@ class TVWiki : MainAPI() {
         if (qLower.startsWith("!tvwiki ")) {
             val userDomain = query.substring(8).trim().trimEnd('/')
             if (userDomain.startsWith("http")) {
-                println("[TVWiki DBG] 🔧 백도어 도메인 수동 갱신: $userDomain")
                 saveDomain(userDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
@@ -185,14 +173,12 @@ class TVWiki : MainAPI() {
 
         checkAndUpdateDomain() 
         val searchUrl = "$mainUrl/search?stx=$query"
-        println("[TVWiki DBG] 🔍 검색 요청: $query")
         return try {
             val doc = app.get(searchUrl, headers = commonHeaders).document
             var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
             if (items.isEmpty()) {
                  items = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
             }
-            println("[TVWiki DBG] 🔍 검색 결과 수: ${items.size}")
             items
         } catch (e: Exception) { 
             if (e is CancellationException) throw e; emptyList() 
@@ -202,14 +188,12 @@ class TVWiki : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         val url = "$mainUrl${request.data}?page=$page"
-        println("[TVWiki DBG] 📄 메인페이지 로드: 카테고리=${request.name}, 페이지=$page")
         
         return try {
             val doc = requestMutex.withLock {
                 app.get(url, headers = commonHeaders).document
             }
             val list = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
-            println("[TVWiki DBG] 📄 메인페이지 아이템 수: ${list.size}")
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -272,7 +256,6 @@ class TVWiki : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain() 
-        println("[TVWiki DBG] 🎬 상세페이지 로드: $url")
         
         var targetUrl = url
         if (!targetUrl.startsWith(mainUrl) && targetUrl.contains("tvwiki")) {
@@ -345,7 +328,6 @@ class TVWiki : MainAPI() {
             newEpisode(href) { this.name = epName; this.posterUrl = fixUrl(epThumb ?: "") }
         }.sortedBy { getEpisodeNumber(it.name ?: "") }
         
-        println("[TVWiki DBG] 🎬 파싱 완료: 에피소드 수=${episodes.size}")
 
         val type = determineTypeFromUrl(realUrl)
 
@@ -362,7 +344,6 @@ class TVWiki : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
-        println("[TVWiki DBG] 🔗 영상 링크 추출 시작: $data")
         
         var targetData = data
         if (!targetData.startsWith(mainUrl) && targetData.contains("tvwiki")) {

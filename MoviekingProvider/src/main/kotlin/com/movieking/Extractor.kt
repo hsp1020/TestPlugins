@@ -34,9 +34,6 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[MovieKingPlayer DBG] ===== extractor start =====")
-        println("[MovieKingPlayer DBG] playerUrl=$url")
-        println("[MovieKingPlayer DBG] incomingReferer=${referer ?: "<null>"}")
 
         try {
             val videoId = extractVideoIdDeep(url)
@@ -53,7 +50,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
             )
 
-            println("[MovieKingPlayer DBG] 🌐 player request Referer=$pageReferer")
             var playerRes = app.get(url, headers = playerHeaders)
             var playerHtml = playerRes.text
             var m3u8Url = extractM3u8Url(playerHtml, url)
@@ -70,14 +66,12 @@ class BcbcRedExtractor : ExtractorApi() {
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
                 )
-                println("[MovieKingPlayer DBG] 🔁 m3u8 미검출 -> 기존 self-referer 방식 비교 요청")
                 val selfRes = app.get(url, headers = selfHeaders)
                 val selfHtml = selfRes.text
                 val selfM3u8 = extractM3u8Url(selfHtml, url)
                 logPlayerResponse("self-referer", selfRes.code, selfRes.url, selfHtml, selfM3u8)
 
                 if (selfM3u8 != null) {
-                    println("[MovieKingPlayer DBG] ⚠ parent-referer에서는 실패, self-referer에서는 m3u8 검출")
                     playerRes = selfRes
                     playerHtml = selfHtml
                     m3u8Url = selfM3u8
@@ -85,12 +79,9 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             if (m3u8Url == null) {
-                println("[MovieKingPlayer DBG] ❌ player HTML에서 m3u8 URL을 찾지 못함")
-                println("[MovieKingPlayer DBG] HTML diagnostic=${diagnosticHtml(playerHtml)}")
                 return
             }
 
-            println("[MovieKingPlayer DBG] ✅ m3u8 URL=$m3u8Url")
 
             // Media requests originate from the player page.
             val mediaHeaders = mutableMapOf(
@@ -102,13 +93,8 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val playlistRes = app.get(m3u8Url, headers = mediaHeaders)
             val playlistText = playlistRes.text
-            println(
-                "[MovieKingPlayer DBG] 📃 playlist HTTP=${playlistRes.code} final=${playlistRes.url} " +
-                    "len=${playlistText.length} extm3u=${playlistText.trimStart().startsWith("#EXTM3U")}" 
-            )
 
             if (!playlistText.contains("#EXTM3U")) {
-                println("[MovieKingPlayer DBG] ❌ 응답이 HLS playlist가 아님: ${diagnosticHtml(playlistText)}")
                 return
             }
 
@@ -116,7 +102,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 .find(playlistText)
             val hexIv = keyMatch?.groupValues?.getOrNull(2)?.takeIf { it.isNotBlank() }
             val keyUrl = keyMatch?.groupValues?.getOrNull(1)?.let { resolveUrl(m3u8Url, it) }
-            println("[MovieKingPlayer DBG] 🔐 AES128=${keyMatch != null} keyUrl=${keyUrl ?: "<none>"} explicitIV=${hexIv ?: "<none>"}")
 
             val candidates = if (keyUrl != null) {
                 withContext(Dispatchers.Default) {
@@ -125,7 +110,6 @@ class BcbcRedExtractor : ExtractorApi() {
             } else {
                 emptyList()
             }
-            println("[MovieKingPlayer DBG] 🔑 key candidates=${candidates.size}")
 
             val lines = playlistText.lines()
             val currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""")
@@ -134,7 +118,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
                 ?.let { resolveUrl(m3u8Url, it.trim()) }
 
-            println("[MovieKingPlayer DBG] 🎞 firstSegment=${firstSegmentUrl ?: "<none>"} mediaSequence=$currentSeq")
 
             var confirmedKey = ByteArray(16)
             var confirmedIvType = -1
@@ -143,7 +126,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 try {
                     val firstSegRes = app.get(firstSegmentUrl, headers = mediaHeaders)
                     val firstSegBytes = firstSegRes.body.bytes()
-                    println("[MovieKingPlayer DBG] 🎞 first segment HTTP=${firstSegRes.code} bytes=${firstSegBytes.size}")
 
                     val ivs = getIvList(currentSeq, hexIv)
                     val checkSize = Math.min(firstSegBytes.size, 188 * 2)
@@ -162,7 +144,6 @@ class BcbcRedExtractor : ExtractorApi() {
                                 ) {
                                     confirmedKey = key
                                     confirmedIvType = ivIdx
-                                    println("[MovieKingPlayer DBG] ✅ AES key confirmed keyIdx=$keyIdx ivType=$ivIdx")
                                     break@outer
                                 }
                             } catch (e: Exception) {
@@ -172,12 +153,10 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
-                    println("[MovieKingPlayer DBG] ⚠ first segment/key 검증 실패: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
 
             if (keyMatch != null && confirmedIvType == -1) {
-                println("[MovieKingPlayer DBG] ⚠ AES-128 playlist인데 유효한 키/IV 조합을 확정하지 못함")
             }
 
             proxyServer?.stop()
@@ -201,17 +180,14 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.updateData(newLines.joinToString("\n"), confirmedKey)
             val localUrl = "http://127.0.0.1:${proxyServer!!.port}/$videoId/playlist.m3u8"
-            println("[MovieKingPlayer DBG] 🚀 callback local playlist=$localUrl")
 
             callback(
                 newExtractorLink(name, name, localUrl, ExtractorLinkType.M3U8) {
                     this.referer = "$hostUrl/"
                 }
             )
-            println("[MovieKingPlayer DBG] ===== extractor success =====")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("[MovieKingPlayer DBG] ❌ extractor exception: ${e.javaClass.simpleName}: ${e.message}")
             e.printStackTrace()
         }
     }
@@ -248,13 +224,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
     private fun logPlayerResponse(label: String, code: Int, finalUrl: String, html: String, m3u8Url: String?) {
         val lower = html.lowercase()
-        println(
-            "[MovieKingPlayer DBG] 🧪 $label HTTP=$code final=$finalUrl len=${html.length} " +
-                "data-m3u8=${lower.contains("data-m3u8")} dotM3u8=${lower.contains(".m3u8")} " +
-                "cf=${lower.contains("cf-challenge") || lower.contains("just a moment")} " +
-                "bunny=${lower.contains("bunny.net") || lower.contains("hold tight") || lower.contains("secure connection")} " +
-                "resolved=${m3u8Url ?: "<none>"}"
-        )
     }
 
     private fun diagnosticHtml(html: String): String {
@@ -286,7 +255,6 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (_: Exception) {
         }
         val fallback = url.hashCode().toString().replace("-", "n")
-        println("[MovieKingPlayer DBG] ℹ videoId payload 미해석 -> fallback=$fallback")
         return "MK_$fallback"
     }
 
@@ -312,7 +280,6 @@ class BcbcRedExtractor : ExtractorApi() {
         val list = mutableListOf<ByteArray>()
         return try {
             val res = app.get(kUrl, headers = h)
-            println("[MovieKingPlayer DBG] 🔑 key response HTTP=${res.code} final=${res.url} len=${res.text.length}")
             val raw = res.text.trim()
             val json = if (raw.startsWith("{")) {
                 raw
@@ -320,7 +287,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 try {
                     String(Base64.decode(raw, Base64.DEFAULT))
                 } catch (e: Exception) {
-                    println("[MovieKingPlayer DBG] ❌ key 응답 Base64 decode 실패: ${e.message}")
                     return emptyList()
                 }
             }
@@ -328,14 +294,12 @@ class BcbcRedExtractor : ExtractorApi() {
             val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""")
                 .find(json)?.groupValues?.get(1)
             if (encStr == null) {
-                println("[MovieKingPlayer DBG] ❌ key 응답에 encrypted_key 없음: ${diagnosticHtml(json)}")
                 return emptyList()
             }
 
             val b64 = try {
                 Base64.decode(encStr, Base64.DEFAULT)
             } catch (e: Exception) {
-                println("[MovieKingPlayer DBG] ❌ encrypted_key Base64 decode 실패: ${e.message}")
                 byteArrayOf()
             }
 
@@ -360,7 +324,6 @@ class BcbcRedExtractor : ExtractorApi() {
                             list.add(k)
                         }
                     } catch (e: Exception) {
-                        println("[MovieKingPlayer DBG] ⚠ key candidate 조립 실패: ${e.message}")
                     }
                 }
             }
@@ -368,7 +331,6 @@ class BcbcRedExtractor : ExtractorApi() {
             list.distinctBy { it.contentHashCode() }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("[MovieKingPlayer DBG] ❌ key 처리 예외: ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }
@@ -394,7 +356,6 @@ class BcbcRedExtractor : ExtractorApi() {
         fun updateData(m3u8: String, key: ByteArray) {
             finalM3u8 = m3u8
             finalKey = key
-            println("[MovieKingPlayer DBG] 🧰 proxy data updated: m3u8Len=${m3u8.length}, keyBytes=${key.size}")
         }
 
         fun start() {
@@ -402,7 +363,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("[MovieKingPlayer DBG] 🧰 local proxy started port=$port")
                 CoroutineScope(Dispatchers.IO).launch { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
@@ -425,7 +385,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val path = reader.readLine()?.split(" ")?.getOrNull(1) ?: return@withContext
-                println("[MovieKingPlayer DBG] 🧰 proxy request path=$path")
                 val output = socket.getOutputStream()
 
                 // [공통 개선] Connection: close & Content-Length 헤더 명시적 추가

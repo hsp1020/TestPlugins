@@ -260,7 +260,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 val discoveryTimeout = Runnable {
                     if (cont.isActive) {
-                        println("[TVWiki HOOK] Timed out; capturedKeyCount=${sessionKeys.size}, cUrlDetected=${detectedCUrl != null}")
                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                         cont.resume(null)
                     }
@@ -296,7 +295,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         val reqUrl = request?.url?.toString() ?: ""
                         if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
                             detectedCUrl = reqUrl
-                            println("[TVWiki HOOK] Playlist URL detected; capturedKeyCount=${sessionKeys.size}")
                             view?.post { view.evaluateJavascript(hookScript, null) }
                             
                             if (sessionKeys.isNotEmpty() && cont.isActive) {
@@ -308,7 +306,6 @@ class BunnyPoorCdn : ExtractorApi() {
                             } else {
                                 handler.postDelayed({
                                     if (cont.isActive) {
-                                        println("[TVWiki HOOK] Waited for key; capturedKeyCount=${sessionKeys.size}")
                                         handler.removeCallbacksAndMessages(null)
                                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                         cont.resume(detectedCUrl)
@@ -403,7 +400,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     path.contains("/key.bin") -> {
                         val keyPayload = verifiedKey ?: verifyMultipleKeys()?.also { verifiedKey = it }
                         if (keyPayload == null) {
-                            println("[TVWiki KEY] No verified AES key; refusing to serve a placeholder key")
                             output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                         } else {
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
@@ -418,19 +414,15 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private suspend fun verifyMultipleKeys(): ByteArray? {
             val url = testSegmentUrl ?: run {
-                println("[TVWiki KEY] No media segment found in playlist")
                 return null
             }
             val targetIv = currentIv ?: run {
-                println("[TVWiki KEY] No segment IV available")
                 return null
             }
             try {
                 val responseData = app.get(url, headers = currentHeaders).body.bytes()
                 val captured = synchronized(sessionKeys) { sessionKeys.toList() }
-                println("[TVWiki KEY] segmentBytes=${responseData.size}, capturedKeyCount=${captured.size}")
                 if (responseData.isEmpty() || responseData.size % 16 != 0) {
-                    println("[TVWiki KEY] Segment is not a complete AES-CBC ciphertext")
                     return null
                 }
                 val candidates = captured.filter { it.matches(Regex("[0-9a-fA-F]{32}")) }
@@ -438,27 +430,22 @@ class BunnyPoorCdn : ExtractorApi() {
                 originalKeyUrl?.let { keyUrl ->
                     try {
                         val keyResponse = app.get(keyUrl, headers = currentHeaders).body.bytes()
-                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}")
                         if (keyResponse.size == 16) {
                             candidates.add(keyResponse)
                         } else {
                             decodeLevel7Key(keyResponse)?.let { candidates.add(it) }
                         }
                     } catch (e: Exception) {
-                        println("[TVWiki KEY] Original key request failed: ${e.javaClass.simpleName}: ${e.message}")
                     }
                 }
                 for (keyBytes in candidates) {
                     val decrypted = decryptAES(responseData, keyBytes, targetIv)
                     if (looksLikeMedia(decrypted)) {
-                        println("[TVWiki KEY] Verified media segment with an AES key")
                         return keyBytes
                     }
                 }
-                println("[TVWiki KEY] No candidate decrypted the first media segment")
                 return null
             } catch (e: Exception) {
-                println("[TVWiki KEY] Segment fetch/verification failed: ${e.javaClass.simpleName}: ${e.message}")
                 return null 
             }
         }
@@ -533,10 +520,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     for (bit in 0 until 8) value = (value shl 1) or bits[i * 8 + bit]
                     value.toByte()
                 }
-                println("[TVWiki KEY] Decoded Level7 key response")
                 key
             } catch (e: Exception) {
-                println("[TVWiki KEY] Level7 key decode failed: ${e.javaClass.simpleName}: ${e.message}")
                 null
             }
         }

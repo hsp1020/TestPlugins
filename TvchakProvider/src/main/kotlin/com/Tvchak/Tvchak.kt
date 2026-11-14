@@ -29,7 +29,6 @@ class TvchakProvider : MainAPI() {
             currentMainUrl = newDomain
             CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[ChakPlay DBG] 💾 도메인 로컬 저장 완료 -> $newDomain")
         }
     }
 
@@ -100,7 +99,6 @@ class TvchakProvider : MainAPI() {
                 cookieManager.removeAllCookies(null)
                 cookieManager.flush()
             } catch (e: Exception) {
-                println("[ChakPlay DBG] ⚠️ 쿠키 초기화 실패: ${e.message}")
             }
 
             val webView = android.webkit.WebView(context).apply {
@@ -166,7 +164,6 @@ class TvchakProvider : MainAPI() {
                 res = app.get(url, headers = getHeaders(referer))
                 if (!isChallenge(res.text, res.code)) return res
 
-                println("[ChakPlay DBG] 🧱 WAF Challenge detected. Solving...")
                 val bypass = solveWaf(url)
                 if (bypass != null) {
                     cfCookies = bypass.first
@@ -182,10 +179,8 @@ class TvchakProvider : MainAPI() {
                            res.text.contains("vod-search-list")
                            
         if (res.isSuccessful && hasSignature) {
-            println("[ChakPlay DBG] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
         } else if (res.isSuccessful) {
             // [로그 버그 수정]: 성공(200)을 텍스트로 하드코딩하지 않고 실제 응답 코드를 유연하게 출력하도록 수정
-            println("[ChakPlay DBG] ⚠️ HTTP 응답 성공(코드: ${res.code})했으나 알맹이가 없음")
         }
         return res
     }
@@ -201,7 +196,6 @@ class TvchakProvider : MainAPI() {
             mainUrl = currentMainUrl
 
             val testPath = "/"
-            println("[ChakPlay DBG] 🔄 기본 도메인 유효성 체크 -> $currentMainUrl$testPath")
 
             try {
                 val res = safeGet("$currentMainUrl$testPath")
@@ -218,16 +212,13 @@ class TvchakProvider : MainAPI() {
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    println("[ChakPlay DBG] ✅ 기존 도메인 활성 상태 확정 -> $mainUrl")
                     return@withLock
                 }
             } catch (e: Exception) { 
-                println("[ChakPlay DBG] ❌ 현재 도메인 접속 실패: ${e.message}") 
             }
 
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
-            println("[ChakPlay DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
 
             var foundDomain: String? = null
             coroutineScope {
@@ -262,7 +253,6 @@ class TvchakProvider : MainAPI() {
                 saveDomain(foundDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
-                println("[ChakPlay DBG] ✨ 브루트포스 성공: $mainUrl")
                 return@withLock
             }
             isDomainChecked = true
@@ -470,7 +460,6 @@ class TvchakProvider : MainAPI() {
                 this.posterUrl = poster
             }
         } catch (e: Exception) {
-            println("[ChakPlay DBG] [parseItem] 아이템 추출 예외: ${e.message}")
             null
         }
     }

@@ -150,8 +150,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     private var cachedMainPageList: List<MainPageData> = emptyList()
 
     fun invalidateCache() {
-        EvoSyncTrace.log("CACHE_INVALIDATE", "instance=" + instanceId +
-            " oldSize=" + cachedMainPageList.size)
         cachedMainPageList = emptyList()
     }
 
@@ -163,7 +161,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
 
     init {
-        println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
         applyAdBlockPatch() 
     }
 
@@ -182,7 +179,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
                     if (targetContext is Context && targetContext !is PreventAdContextWrapper) {
                         field.set(null, PreventAdContextWrapper(targetContext))
-                        println("[UltimaEvo_AdBlock] ${clazz.simpleName} 광고 가로채기 차단 패치 주입 완료")
                     }
                 } catch (e: NoSuchFieldException) {
                     // context 변수가 없는 경우 안전히 생략
@@ -204,16 +200,12 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
             if (!isVisible) {
-                EvoSyncTrace.log("MAINPAGE_HIDDEN", "instance=" + instanceId)
                 return emptyList()
             }
 
             if (cachedMainPageList.isNotEmpty()) {
-                EvoSyncTrace.log("MAINPAGE_CACHE_HIT", "instance=" + instanceId +
-                    " pages=" + cachedMainPageList.size)
                 return cachedMainPageList
             }
-            EvoSyncTrace.log("MAINPAGE_REBUILD", "instance=" + instanceId)
 
             val pages = mutableListOf<Pair<MainPageData, Int>>()
 
@@ -257,9 +249,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             }
 
             cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
-            EvoSyncTrace.log("MAINPAGE_READY", "instance=" + instanceId +
-                " saved=" + savedConfigs.size + " pages=" + cachedMainPageList.size +
-                " providers=" + targetProviders.size)
             return cachedMainPageList
         }
 
@@ -374,7 +363,6 @@ class PreventAdContextWrapper(base: Context) : ContextWrapper(base) {
 
             if (scheme == "http" || scheme == "https") {
                 if (host != "t.me") {
-                    println("[UltimaEvo_AdBlock] 외부 브라우저 광고 강제 호출 정상 가로채기 차단 완료 (차단된 URL: $uri)")
                     return 
                 }
             }

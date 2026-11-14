@@ -39,9 +39,6 @@ internal object ElevateActivityResultOwner {
         }
         owners.removeAll { it.activity.get()?.isDestroyed != false }
         owners.add(Owner(activity, launcher))
-        Log.i(TAG, "phase=REGISTER source=$source type=${activity.javaClass.simpleName} " +
-            "ownerId=${System.identityHashCode(activity)} launcherId=${System.identityHashCode(launcher)} " +
-            "liveOwners=${owners.size}")
     }
 
     /** Both pre-destroy and destroy invoke this; removing the entry makes it idempotent. */
@@ -60,12 +57,6 @@ internal object ElevateActivityResultOwner {
             }
         } else null
         if (currentMatches) MainActivity.activityResultLauncher = replacement?.launcher
-        Log.i(TAG, "phase=RELEASE type=${activity.javaClass.simpleName} " +
-            "ownerId=${System.identityHashCode(activity)} launcherId=${System.identityHashCode(departing.launcher)} " +
-            "currentMatches=$currentMatches " +
-            "replacementType=${replacement?.activity?.get()?.javaClass?.simpleName ?: "none"} " +
-            "replacementId=${replacement?.activity?.get()?.let { System.identityHashCode(it) } ?: 0} " +
-            "liveOwners=${owners.size}")
     }
 
     fun reset() {

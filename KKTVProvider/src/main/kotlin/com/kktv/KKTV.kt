@@ -61,7 +61,6 @@ class KKTVProvider : MainAPI() {
     }
 
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
-        println("[KKTV DEBUG] ❌ 에러/빈화면 반환 사유: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
             this.posterUrl = "" 
         }
@@ -72,8 +71,6 @@ class KKTVProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        println("[KKTV DEBUG] =========================================")
-        println("[KKTV DEBUG] 1. getMainPage 시작 | request.data: ${request.data}")
         
         val items = mutableListOf<SearchResponse>()
         val iframeUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
@@ -83,23 +80,15 @@ class KKTVProvider : MainAPI() {
             val iframeResponse = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
             val iframeHtml = iframeResponse.text
             
-            println("[KKTV DEBUG] 2. iframe 응답 결과 | HTTP Code: ${iframeResponse.code} | 본문 길이: ${iframeHtml.length}")
 
             // 1. targetId 추출 (var targetId=469; 매칭)
             val targetIdRegex = Regex("""targetId\s*=\s*(\d+)""")
             val parsedTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
 
-            if (parsedTargetId == null) {
-                println("[KKTV DEBUG] ⚠️ targetId 추출 실패! 기본값 469 사용.")
-            } else {
-                println("[KKTV DEBUG] ✅ targetId 추출 성공: $parsedTargetId")
-            }
-
             // 2. 자체 토큰 생성기 연동 (지연 시간 0ms, 무한 보장)
             val dynamicToken = generateAuToken()
             val dynamicTargetId = parsedTargetId ?: "469"
             
-            println("[KKTV DEBUG] 🚀 로컬 실시간 auToken 자동 생성 완료: $dynamicToken")
 
             val postData = mapOf(
                 "sportsType" to "all",
