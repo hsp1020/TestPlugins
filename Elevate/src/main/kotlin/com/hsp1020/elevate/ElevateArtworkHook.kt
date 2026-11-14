@@ -87,7 +87,8 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             hasExpectedLogo = {
                 val data = page()
                 data?.syncData?.get("logo_expected") == "true" || !data?.logoUrl.isNullOrBlank()
-            }
+            },
+            currentLogoUrl = { page()?.logoUrl }
         )
         private val trailers = TrailerChooser(fragment, root, fragment.arguments?.getString("url"))
         private val pageObserver = Observer<Resource<ResultData>?> { state ->

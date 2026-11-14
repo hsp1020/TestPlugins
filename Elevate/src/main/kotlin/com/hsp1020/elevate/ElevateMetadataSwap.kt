@@ -564,13 +564,29 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 is Resource.Success -> {
                     val page = state.value
                     val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
-                    if (page === swapped || (original?.url == page.url &&
-                            (response === nativeResponse ||
-                                page.syncData["metadata_swap_source"] != null))) {
-                        metadataSwapTrace("ELEVATE_REEMIT_SKIP gen=$serial" +
-                            " own=${page === swapped} source=${page.syncData["metadata_swap_source"]}" +
-                            " responseSame=${response === nativeResponse}" +
-                            " urlHash=${Integer.toHexString(page.url.hashCode())}")
+                    if (page === swapped) {
+                        metadataSwapTrace("ELEVATE_REEMIT_OWN gen=$serial")
+                    } else if (original?.url == page.url &&
+                        response != null && response === nativeResponse) {
+                        val current = metadata
+                        if (current != null && swapped != null) {
+                            // setMeta() republishes the same LoadResponse. Keep its updated
+                            // sync data, but reuse the swap fields already resolved.
+                            val movie = nativeResponse?.type in setOf(TvType.Movie, TvType.AnimeMovie)
+                            val refreshed = current.toPage(page, movie, !ElevateFeaturePrefs.enabled(
+                                application, ElevateFeature.ACTOR_INFORMATION))
+                            swapped = refreshed
+                            metadataSwapTrace("ELEVATE_REEMIT_REBASE gen=$serial" +
+                                " source=${current.source} syncKeys=${page.syncData.size}")
+                            nativePage(model, refreshed)
+                        } else if (pendingPage != null) {
+                            // Do not reveal a prior provider's page while the new swap loads.
+                            metadataSwapTrace("ELEVATE_REEMIT_PENDING gen=$serial" +
+                                " source=${page.syncData["metadata_swap_source"]}")
+                            nativePageLoading(page)
+                        } else {
+                            metadataSwapTrace("ELEVATE_REEMIT_SKIP gen=$serial reason=no_swap")
+                        }
                     } else update(page)
                 }
                 is Resource.Failure -> metadataSwapTrace(
@@ -855,7 +871,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 episode
             }
             val names = source.videos.mapNotNull { it.season }.distinct().map { season ->
-                if (season == 0) SeasonData(specialSeason ?: 0, "Season S")
+                if (season == 0) SeasonData(specialSeason ?: 0,
+                    "${fragment.getString(R.string.season)} S")
                 else SeasonData(season)
             }
             return response.copy(episodes = episodes, seasonNames = names, comingSoon = false)

@@ -33,13 +33,17 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import coil3.result
+import coil3.request.ErrorResult
+import coil3.request.SuccessResult
 import kotlinx.coroutines.*
 import kotlin.math.*
 
 internal class DetailBackdropLayout(
     private val root: View,
     private val requiresTitleForLogo: () -> Boolean,
-    private val hasExpectedLogo: () -> Boolean
+    private val hasExpectedLogo: () -> Boolean,
+    private val currentLogoUrl: () -> String?
 ) {
     private fun find(name: String): View? {
         val id = root.resources.getIdentifier(name, "id", root.context.packageName)
@@ -348,6 +352,36 @@ internal class DetailBackdropLayout(
     private var artworkRevealStart = 0L
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
+    private var observedLogoRequest = 0
+    private var observedLogoVisibility = -1
+
+    private fun inspectLogoResult() {
+        val image = logo ?: return
+        val url = currentLogoUrl()?.takeIf(String::isNotBlank) ?: return
+        val result = image.result
+        val requestMatches = result?.request?.data?.toString() == url
+        val requestId = result?.let(System::identityHashCode) ?: 0
+        if (requestId != observedLogoRequest || image.visibility != observedLogoVisibility) {
+            observedLogoRequest = requestId
+            observedLogoVisibility = image.visibility
+            val status = when (result) {
+                is SuccessResult -> "success"
+                is ErrorResult -> "error"
+                else -> "pending_or_cancelled"
+            }
+            android.util.Log.d("ElevateArtworkTrace", "LOGO_RESULT tv=$tv status=$status" +
+                " urlMatch=$requestMatches visible=${image.visibility}" +
+                " drawable=${image.drawable != null}" +
+                " error=${(result as? ErrorResult)?.throwable?.javaClass?.simpleName ?: "none"}")
+        }
+        // Coil successfully decoded this exact logo, but native UI later hid its View.
+        // Restore visibility only; a failed or different request is never retried.
+        if (result is SuccessResult && requestMatches &&
+            image.visibility == View.GONE && image.drawable != null) {
+            image.visibility = View.VISIBLE
+            android.util.Log.d("ElevateArtworkTrace", "LOGO_REVEAL tv=$tv reason=loaded_but_hidden")
+        }
+    }
 
     private var titleSlot: FrameLayout? = null
     private var titleSlotParent: LinearLayout? = null
@@ -731,6 +765,7 @@ internal class DetailBackdropLayout(
     private fun update() {
 
         if (!started) return
+        inspectLogoResult()
         if (portraitTitleOnly) { updatePortraitTitle(); return }
         if (splitFallback) { revealRecoveredLayout(); return }
         val edgeView = edge ?: return
