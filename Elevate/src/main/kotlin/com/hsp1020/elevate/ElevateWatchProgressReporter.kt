@@ -137,7 +137,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
                 null, false, null, emptyMap(), null, null, null, file)
         }
         val episode = state.meta as? ResultEpisode ?: run { return null }
-        val collected = ElevateMediaIdentity.collect(response, episode.data)
+        val collected = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
         val ids = collected.asMap().toMutableMap()
         val policy = progressPolicy(response.syncData, episode.data)
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
@@ -651,6 +651,13 @@ internal class ElevateWatchProgressReporter(private val application: Application
             val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
             val season = item.imdbNumbers?.first ?: item.season
             val tmdb = ids["tmdb"]
+            // Multi-season IMDb episodes must not inherit a title-wide season-1 anime ID.
+            // Only the existing AIOStreams season mapping may supply tracker IDs here.
+            if (imdb != null && season != null && season > 1) {
+                ids.remove("kitsu")
+                ids.remove("mal")
+                ids.remove("anilist")
+            }
             val source = item.originalAnimeId?.substringBefore(':')
                 ?.takeIf { it in setOf("kitsu", "mal", "anilist") }
             val needsMapping = season == null || season > 1 ||

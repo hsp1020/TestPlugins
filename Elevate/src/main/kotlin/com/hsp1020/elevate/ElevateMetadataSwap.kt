@@ -381,6 +381,16 @@ internal class ElevateMetadataSwap(private val application: Application) :
             originalTitle = originalName, englishTitle = english ?: originalName)
     }
 
+    private fun addonLogoUrl(url: String?): String? {
+        val value = url?.takeIf { it.isNotBlank() } ?: return null
+        val uri = runCatching { Uri.parse(value) }.getOrNull()
+        val path = uri?.path ?: value.substringBefore('?')
+        if (!path.endsWith(".svg", ignoreCase = true)) return value
+        if (!uri?.host.equals("image.tmdb.org", ignoreCase = true)) return null
+        return value.substringBefore('?').dropLast(4) + ".png" +
+            (if ('?' in value) "?" + value.substringAfter('?') else "")
+    }
+
     private fun metadataFromAddon(json: JSONObject, includeActors: Boolean): Metadata? {
         val meta = json.optJSONObject("meta") ?: json
         val title = meta.string("name", "title")
@@ -410,8 +420,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
         val videos = addonVideos(meta)
         return Metadata(title, meta.string("description", "overview"),
             meta.string("poster"), meta.string("background", "backdrop"),
-            (meta.string("logo", "logoUrl")
-                ?: meta.optJSONObject("_providerArt")?.string("logo")),
+            sequenceOf(meta.string("logo"), meta.string("logoUrl"),
+                meta.optJSONObject("_providerArt")?.string("logo"))
+                .firstNotNullOfOrNull(::addonLogoUrl),
             meta.names("genres").ifEmpty { meta.names("genre") },
             year, rating, meta.string("runtime"), age, status,
             addonTrailers(meta), videos.mapNotNull { video ->
