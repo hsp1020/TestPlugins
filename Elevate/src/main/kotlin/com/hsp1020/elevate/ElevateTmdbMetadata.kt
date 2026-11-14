@@ -8,6 +8,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
@@ -22,6 +23,10 @@ internal object ElevateTmdbMetadata {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cache = LinkedHashMap<String, Entry>()
     private val flights = mutableMapOf<String, Deferred<Entry?>>()
+    private val originLogoCache = LinkedHashMap<String, Pair<Long, JSONArray>>()
+    private val originLogoFlights = mutableMapOf<String, Deferred<JSONArray?>>()
+    private val seasonCache = LinkedHashMap<String, Pair<Long, JSONObject>>()
+    private val seasonFlights = mutableMapOf<String, Deferred<JSONObject?>>()
 
     private fun language(raw: String?): String? {
         val value = raw?.trim()?.replace('_', '-')?.lowercase(Locale.ROOT) ?: return null
@@ -61,6 +66,82 @@ internal object ElevateTmdbMetadata {
         resolve(id, movie, locale, needsDetails = true,
             needsCredits = includeCredits, prefetchCredits = includeCredits)?.details
 
+    /** Second request only when preferred-language and English logos are absent. */
+    suspend fun originalLogos(id: String, movie: Boolean, original: String): JSONArray? {
+        val number = id.toLongOrNull()?.takeIf { it > 0 } ?: return null
+        val language = language(original)?.substringBefore('-') ?: return null
+        val kind = if (movie) "movie" else "tv"
+        val key = "$kind:$number:$language"
+        val now = System.currentTimeMillis()
+        val task = synchronized(originLogoCache) {
+            originLogoCache[key]?.takeIf { now - it.first in 0 until TTL }
+                ?.let { return it.second }
+            originLogoFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                try {
+                    val apiKey = ElevateIdResolver.tmdbApiKey() ?: return@async null
+                    val response = app.get(
+                        "https://api.themoviedb.org/3/$kind/$number/images",
+                        params = mapOf("api_key" to apiKey, "include_image_language" to language),
+                        timeout = 12L
+                    )
+                    if (response.code !in 200..299) return@async null
+                    JSONObject(response.text).optJSONArray("logos")?.also { logos ->
+                        synchronized(originLogoCache) {
+                            originLogoCache[key] = System.currentTimeMillis() to logos
+                            if (originLogoCache.size > 128)
+                                originLogoCache.remove(originLogoCache.keys.first())
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (_: Exception) { null }
+            }.also { active ->
+                originLogoFlights[key] = active
+                active.invokeOnCompletion {
+                    synchronized(originLogoCache) {
+                        if (originLogoFlights[key] === active) originLogoFlights.remove(key)
+                    }
+                }
+            }
+        }
+        task.start()
+        return task.await()
+    }
+
+    /** Shared season response, cached by title, season and locale. */
+    suspend fun season(id: String, season: Int, locale: String): JSONObject? {
+        val number = id.toLongOrNull()?.takeIf { it > 0 } ?: return null
+        if (season !in 0..99) return null
+        val key = "$number:$season:${locale.lowercase(Locale.ROOT)}"
+        val now = System.currentTimeMillis()
+        val task = synchronized(seasonCache) {
+            seasonCache[key]?.takeIf { now - it.first in 0 until TTL }?.let { return it.second }
+            seasonFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                try {
+                    val apiKey = ElevateIdResolver.tmdbApiKey() ?: return@async null
+                    val response = app.get("https://api.themoviedb.org/3/tv/$number/season/$season",
+                        params = mapOf("api_key" to apiKey, "language" to locale), timeout = 12L)
+                    if (response.code !in 200..299) return@async null
+                    JSONObject(response.text).also { json ->
+                        synchronized(seasonCache) {
+                            seasonCache[key] = System.currentTimeMillis() to json
+                            if (seasonCache.size > 128) seasonCache.remove(seasonCache.keys.first())
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                  catch (_: Exception) { null }
+            }.also { active ->
+                seasonFlights[key] = active
+                active.invokeOnCompletion {
+                    synchronized(seasonCache) {
+                        if (seasonFlights[key] === active) seasonFlights.remove(key)
+                    }
+                }
+            }
+        }
+        task.start()
+        return task.await()
+    }
+
     private suspend fun resolve(
         id: String, movie: Boolean, locale: String,
         needsDetails: Boolean, needsCredits: Boolean, prefetchCredits: Boolean
@@ -89,17 +170,33 @@ internal object ElevateTmdbMetadata {
                             val endpoint = "https://api.themoviedb.org/3/$kind/$number" +
                                 if (fetchDetails) "" else "/credits"
                             val params = mutableMapOf("api_key" to apiKey, "language" to locale)
-                            if (fetchDetails && fetchCredits) params["append_to_response"] = "credits"
+                            if (fetchDetails && needsDetails) {
+                                params["append_to_response"] = (listOf(
+                                    "images", "videos", "translations",
+                                    if (movie) "release_dates" else "content_ratings"
+                                ) + if (fetchCredits) listOf("credits") else emptyList()).joinToString(",")
+                                params["include_image_language"] = listOf(
+                                    locale.substringBefore('-').lowercase(Locale.ROOT), "en"
+                                ).distinct().joinToString(",")
+                                params["include_video_language"] = listOf(
+                                    locale, locale.substringBefore('-'), "en"
+                                ).distinct().joinToString(",")
+                            } else if (fetchDetails && fetchCredits) {
+                                params["append_to_response"] = "credits"
+                            }
                             val response = app.get(endpoint, params = params, timeout = 12L)
                             if (response.code !in 200..299) return@async null
                             val json = JSONObject(response.text)
                             val original = if (fetchDetails) language(json.optString("original_language"))
                                 else null
                             // Keep only display fields; don't retain the full appended credits tree twice.
-                            val foundDetail = if (fetchDetails) JSONObject().apply {
+                            val foundDetail = if (fetchDetails && needsDetails) JSONObject().apply {
                                 for (field in listOf("name", "title", "overview", "poster_path",
                                     "backdrop_path", "genres", "vote_average", "release_date",
-                                    "first_air_date", "runtime", "episode_run_time")) {
+                                    "first_air_date", "runtime", "episode_run_time",
+                                    "status", "images", "videos", "release_dates",
+                                    "content_ratings", "translations", "original_language",
+                                    "original_title", "original_name")) {
                                     if (json.has(field)) put(field, json.get(field))
                                 }
                             } else null
@@ -111,12 +208,12 @@ internal object ElevateTmdbMetadata {
                                     System.currentTimeMillis() - it.at in 0 until TTL
                                 }
                                 val entry = Entry(System.currentTimeMillis(),
-                                    fetchDetails || current?.detailLoaded == true,
+                                    (fetchDetails && needsDetails) || current?.detailLoaded == true,
                                     original ?: current?.originalLanguage,
                                     if (fetchCredits) normalizedLocale else current?.creditsLocale,
                                     if (fetchCredits) foundCredits else current?.credits,
-                                    if (fetchDetails) normalizedLocale else current?.detailLocale,
-                                    if (fetchDetails) foundDetail else current?.details)
+                                    if (fetchDetails && needsDetails) normalizedLocale else current?.detailLocale,
+                                    if (fetchDetails && needsDetails) foundDetail else current?.details)
                                 cache[key] = entry
                                 if (cache.size > 128) cache.remove(cache.keys.first())
                                 entry

@@ -1534,6 +1534,7 @@ open class StremioC(
         }
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(200)
+        private val tmdbOriginLogoCache = lruCacheMap<String, Pair<TmdbImages, Long>>(100)
         private val tmdbCreditsCache = lruCacheMap<String, Pair<TmdbCreditsResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(300)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
@@ -4747,7 +4748,7 @@ open class StremioC(
             }
 
             val preferred = langCode.substringBefore('-').lowercase()
-            val selectedLogo = detailRes.images?.logos.orEmpty()
+            val preferredLogo = detailRes.images?.logos.orEmpty()
                 .filter { logo ->
                     val language = logo.iso_639_1?.lowercase()
                     !logo.file_path.isNullOrBlank() && (language == preferred || language == "en")
@@ -4755,6 +4756,32 @@ open class StremioC(
                 .maxWithOrNull(compareBy<TmdbLogo> {
                     when (it.iso_639_1?.lowercase()) { preferred -> 3; "en" -> 2; else -> 1 }
                 }.thenBy { it.vote_average ?: 0.0 })
+            // Only request the original language when the existing preferred/English
+            // response has no logo. Keep the addon's established final-logo priority.
+            val originalLanguage = detailRes.original_language?.lowercase()
+                ?.takeIf { it.matches(Regex("[a-z]{2,3}")) && it != preferred && it != "en" }
+            val originalLogo = if (preferredLogo == null && originalLanguage != null) {
+                val url = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr/images",
+                    "include_image_language" to originalLanguage)
+                runSuspendCatching {
+                    val cached = stremioCacheMemoryRead(tmdbOriginLogoCache[url], METADATA_CACHE_TTL)
+                        ?: MetadataDiskCache.read("origin-logo", url)?.let { (json, stamp) ->
+                            runCatching { parseJson<TmdbImages>(json) }.getOrNull()?.let { it to stamp }
+                        }
+                    val images = cached?.first ?: fetchSharedMetadataText(url)
+                        .takeIf { it.isNotBlank() }?.let { text ->
+                            parseJson<TmdbImages>(text).also { parsed ->
+                                tmdbOriginLogoCache[url] = parsed to System.currentTimeMillis()
+                                MetadataDiskCache.write("origin-logo", url, text)
+                            }
+                        }
+                    images?.logos.orEmpty().filter { logo ->
+                        logo.iso_639_1.equals(originalLanguage, true) &&
+                            !logo.file_path.isNullOrBlank()
+                    }.maxByOrNull { it.vote_average ?: 0.0 }
+                }.getOrNull()
+            } else null
+            val selectedLogo = preferredLogo ?: originalLogo
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,

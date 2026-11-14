@@ -170,6 +170,9 @@ internal class TrailerChooser(
                         item.optString("language").takeIf { it.isNotBlank() })
                 }
             }.orEmpty()
+        // An explicit swap owns the trailer source, even when it has no trailers.
+        if (page?.syncData?.containsKey("metadata_swap_source") == true)
+            return extras.distinctBy { it.url }.take(30)
         if (extras.isNotEmpty()) return extras.distinctBy { it.url }.take(30)
         val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
         if (page == null) return emptyList()

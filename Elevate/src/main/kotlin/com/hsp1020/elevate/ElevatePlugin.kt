@@ -388,7 +388,10 @@ class ElevatePlugin : Plugin() {
             homeHero?.stop()
             homeHero = null
         }
-        val detailArtworkEnabled = enabled(ElevateFeature.ARTWORK_TRAILERS)
+        // Metadata Swap needs the existing StremioC-derived title/logo and trailer
+        // presentation even when the optional artwork picker toggle is OFF.
+        val detailArtworkEnabled = enabled(ElevateFeature.ARTWORK_TRAILERS) ||
+            enabled(ElevateFeature.METADATA_SWAP)
         val phoneHeroLayoutEnabled = enabled(ElevateFeature.PHONE_HERO_LAYOUT) && !hideHomeHero
         if (detailArtworkEnabled || phoneHeroLayoutEnabled) {
             if (artworkHook == null) artworkHook = ElevateArtworkHook(application).also { it.start() }

@@ -138,12 +138,8 @@ internal class ElevateActorHook(
         if (id == null || apiKey == null) return null
         return try {
             val locale = getCurrentLocale(appContext)
-            val settings = appContext.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
-            val shareDetails = settings.getBoolean(ElevateFeature.METADATA_SWAP.name, false) &&
-                settings.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB") == "TMDB"
-            val json = (if (shareDetails) ElevateTmdbMetadata.details(
-                id, movie, locale, includeCredits = true)?.optJSONObject("credits")
-                else ElevateTmdbMetadata.credits(id, movie, locale)) ?: return null
+            // Credits live in a separate shared cache entry, not inside details().
+            val json = ElevateTmdbMetadata.credits(id, movie, locale) ?: return null
             val pairs = ArrayList<Pair<ActorData, ElevateActorPersonRef>>()
             val crew = json.optJSONArray("crew")
             if (crew != null) for (i in 0 until crew.length()) {
@@ -188,6 +184,22 @@ internal class ElevateActorHook(
     /** Provider actors remain available only after Elevate API resolution has failed. */
     private suspend fun resolve(page: ResultData, response: LoadResponse?, ids: Ids,
         selectedSeason: Int?, multiSeason: Boolean): CastResult? {
+        if (page.syncData["metadata_swap_source"] == "AIO" &&
+            !page.actors.isNullOrEmpty()) {
+            val actors = page.actors.orEmpty()
+            val raw = page.syncData["tmdb_people"]
+            val array = runCatching { org.json.JSONArray(raw ?: "[]") }.getOrNull()
+            val people = actors.indices.map { i ->
+                val person = array?.optJSONObject(i)
+                ElevateActorPersonRef(
+                    person?.optInt("id")?.takeIf { it > 0 },
+                    person?.optString("name")?.takeIf(String::isNotBlank)
+                        ?: actors[i].actor.name,
+                    actors[i].actor.image, person?.optBoolean("crew") == true
+                )
+            }
+            return CastResult(actors, people)
+        }
         val type = response?.type
         val kind = runCatching {
             JSONObject(response?.url ?: page.url).optString("type").lowercase()
@@ -418,7 +430,8 @@ internal class ElevateActorHook(
             val multiSeason = (model.seasonSelections.value?.size ?: 0) > 1
             val ids = ids(page, response)
             val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown") +
-                "|" + (season ?: "pending") + "|" + multiSeason
+                "|" + (season ?: "pending") + "|" + multiSeason +
+                "|" + page.syncData["metadata_swap_source"]
             if (identity == pageIdentity) {
                 attachClicks()
                 return
