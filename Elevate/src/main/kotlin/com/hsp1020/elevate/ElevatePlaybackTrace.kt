@@ -3,27 +3,11 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
-import android.os.Process
-import android.util.Log
 
 /** Activity lifecycle evidence; optional memory checkpoints during a manual profile only. */
 internal class ElevatePlaybackTrace(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
-    private companion object { const val TAG = "ElevateMedia3Trace" }
     private var running = false
-    private val previousDestroyed = HashMap<String, String>()
-
-    private fun activityInfo(activity: Activity): String =
-        "pid=${Process.myPid()} type=${activity.javaClass.simpleName} " +
-            "activity=${System.identityHashCode(activity)} taskId=${activity.taskId} " +
-            "taskRoot=${activity.isTaskRoot} finishing=${activity.isFinishing} " +
-            "changingConfig=${activity.isChangingConfigurations} pip=${activity.isInPictureInPictureMode}"
-
-    private fun destroyReason(activity: Activity): String = when {
-        activity.isChangingConfigurations -> "CONFIGURATION_CHANGE"
-        activity.isFinishing -> "FINISHING"
-        else -> "SYSTEM_OR_EXTERNAL_UNKNOWN"
-    }
 
     fun start() {
         if (running) return
@@ -37,20 +21,9 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         running = false
         application.unregisterActivityLifecycleCallbacks(this)
         ElevateActivityResultOwner.reset()
-        previousDestroyed.clear()
     }
 
-    override fun onActivityCreated(activity: Activity, state: Bundle?) {
-        val previous = previousDestroyed.remove(activity.javaClass.name) ?: "none"
-        val evidence = when {
-            previous != "none" -> "AFTER_PREVIOUS_DESTROY"
-            state != null -> "RESTORED_SAVED_STATE"
-            else -> "NEW_INSTANCE_CAUSE_UNKNOWN"
-        }
-        Log.i(TAG, "ACTIVITY_CREATE ${activityInfo(activity)} evidence=$evidence " +
-            "previous=$previous savedState=${state != null} intentAction=${activity.intent?.action} " +
-            "intentFlags=0x${Integer.toHexString(activity.intent?.flags ?: 0)}")
-    }
+    override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
 
     override fun onActivityPostCreated(activity: Activity, state: Bundle?) {
         ElevateActivityResultOwner.track(activity, "POST_CREATE")
@@ -68,11 +41,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         // Fallback on older Android versions; callback removal is idempotent.
         DownloadedPlayerLeakCleanup.onDestroy(activity)
         ReceiverRegistrationTrace.snapshot(activity, "DESTROYED")
-        val reason = destroyReason(activity)
-        Log.i(TAG, "ACTIVITY_DESTROY ${activityInfo(activity)} reason=$reason")
         ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_DESTROY")
-        previousDestroyed[activity.javaClass.name] =
-            "activity=${System.identityHashCode(activity)},taskId=${activity.taskId},reason=$reason"
     }
 
     override fun onActivityStarted(activity: Activity) {

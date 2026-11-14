@@ -2350,12 +2350,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 playerFragment = null
             }
         }
-        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            android.util.Log.i("JavaAllocCause",
-                "run=$run module=YouTube phase=PLAYER_ACTIVITY_CLEANUP " +
-                    "activityId=${System.identityHashCode(activity)} screensReleased=${stale.size} " +
-                    "screensRemaining=${screens.size}")
-        }
     }
 
     override fun onActivityDestroyed(activity: Activity) {

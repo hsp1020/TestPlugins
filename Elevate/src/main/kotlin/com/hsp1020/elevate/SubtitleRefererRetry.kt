@@ -55,11 +55,6 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         val referers = if (active && response.code == 403 &&
             request.header("Referer").isNullOrBlank()
         ) subtitleReferers[request.url.toString()].orEmpty() else emptyList()
-        if (referers.isNotEmpty()) System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            android.util.Log.i("JavaAllocCause",
-                "run=$run module=Elevate phase=SUBTITLE_REFERER_RETRY " +
-                    "reason=HTTP_403 hostId=${request.url.host.hashCode()} candidates=${referers.size}")
-        }
         val resolved = when (referers.size) {
             0 -> response
             1 -> {
@@ -67,11 +62,6 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
                 chain.proceed(request.newBuilder().header("Referer", referers[0]).build())
             }
             else -> retryInParallel(chain, request, response, referers)
-        }
-        if (referers.isNotEmpty()) System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            android.util.Log.i("JavaAllocCause",
-                "run=$run module=Elevate phase=SUBTITLE_REFERER_RESULT " +
-                    "reason=RETRIED code=${resolved.code} candidates=${referers.size}")
         }
         resolved
     }

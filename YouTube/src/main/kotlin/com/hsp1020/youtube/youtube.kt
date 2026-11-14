@@ -1318,11 +1318,6 @@ class YoutubeProvider(
         requestKey: String,
         page: Int
     ): ProcessedChipPayload? {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-        if (allocationRun != null) Log.i("JavaAllocCause",
-            "run=$allocationRun module=YouTube phase=CHIP_REQUEST " +
-                "reason=NETWORK keyId=${requestKey.hashCode()} tokenId=${token.hashCode()} page=$page")
         val apiUrl = "$mainUrl/youtubei/v1/browse?key=${bootstrap.apiKey}"
         val clientContext = linkedMapOf<String, Any>(
             "clientName" to "WEB",
@@ -1357,21 +1352,9 @@ class YoutubeProvider(
             rawResponse.textLarge
         }
         currentCoroutineContext().ensureActive()
-        if (allocationRun != null) Log.i("JavaAllocCause",
-            "run=$allocationRun module=YouTube phase=CHIP_RESPONSE " +
-                "keyId=${requestKey.hashCode()} tokenId=${token.hashCode()} page=$page " +
-                "chars=${body.length} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
         if (body.isBlank()) return null
 
-        val responseChars = if (allocationRun != null) body.length else 0
-        val parseStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
         val processed = streamProcessChipResponse(body)
-        if (allocationRun != null) Log.i("JavaAllocCause",
-            "run=$allocationRun module=YouTube phase=CHIP_PARSE " +
-                "reason=${if (processed != null) "STREAM_PARSE_OK" else "STREAM_PARSE_FAILED"} " +
-                "responseChars=$responseChars page=$page keyId=${requestKey.hashCode()} " +
-                "tokenId=${token.hashCode()} results=${processed?.items?.size ?: 0} " +
-                "parseMs=${android.os.SystemClock.elapsedRealtime() - parseStart}")
         body = ""
         if (processed == null) {
             currentCoroutineContext().ensureActive()
@@ -2270,10 +2253,6 @@ class YoutubeProvider(
         html: String,
         allowedTopLevelKeys: Set<String>?
     ): Map<String, Any>? {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        if (allocationRun != null) Log.i("JavaAllocCause",
-            "run=$allocationRun module=YouTube phase=YT_INITIAL_DATA " +
-                "reason=${if (allowedTopLevelKeys == null) "FULL_KEYS" else "FILTERED_KEYS"} htmlChars=${html.length}")
         var index = 0
         val htmlLen = html.length
         while (true) {
@@ -2306,9 +2285,6 @@ class YoutubeProvider(
                             allowedTopLevelKeys
                         )
                         if (parsed != null) {
-                            if (allocationRun != null) Log.i("JavaAllocCause",
-                                "run=$allocationRun module=YouTube phase=YT_INITIAL_DATA_RESULT " +
-                                    "reason=PARSED jsonChars=${endExclusive - braceIndex} keys=${parsed.size}")
                             return parsed
                         }
                     }
@@ -2419,12 +2395,6 @@ class YoutubeProvider(
             ?: safeGet(scoped, "contents", "singleColumnBrowseResultsRenderer", "tabs")
         val filtered = browseTabs is List<*>
         val result = if (filtered) scoped else extractYtInitialData(html)
-        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_JSON_SCOPE " +
-                "mode=${if (filtered) "FILTERED" else "FULL_FALLBACK"} " +
-                "keys=${result?.keys?.joinToString(",") ?: "none"} hasTabs=$filtered " +
-                "htmlChars=${html.length}")
-        }
         return result
     }
 
@@ -3166,11 +3136,6 @@ class YoutubeProvider(
     }
 
     private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>, isShortsTab: Boolean = false) {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        val previousSize = if (allocationRun != null) collectTo.size else 0
-        val start = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-        val totalStartNs = if (allocationRun != null) System.nanoTime() else 0L
-        val scanMetrics = if (allocationRun != null) RendererScanMetrics() else null
         items.forEachIndexed { index, item ->
             try {
                 val map = item as? Map<*, *>
@@ -3178,10 +3143,7 @@ class YoutubeProvider(
                 if (map.containsKey("continuationItemRenderer")) return@forEachIndexed
 
                 val foundRenderers = mutableListOf<Map<*, *>>()
-                val scanStartNs = if (scanMetrics != null) System.nanoTime() else 0L
-                if (scanMetrics != null) scanMetrics.calls++
-                findAllRenderers(map, foundRenderers, metrics = scanMetrics)
-                if (scanMetrics != null) scanMetrics.scanNanos += System.nanoTime() - scanStartNs
+                findAllRenderers(map, foundRenderers)
 
                 if (foundRenderers.isEmpty()) return@forEachIndexed
 
@@ -3253,18 +3215,6 @@ class YoutubeProvider(
             } catch (e: Exception) {
             }
         }
-        if (allocationRun != null && scanMetrics != null) {
-            val totalNs = System.nanoTime() - totalStartNs
-            Log.i("JavaAllocCause",
-                "run=$allocationRun module=YouTube phase=RENDERER_SCAN " +
-                    "reason=${if (isShortsTab) "SHORTS_ITEMS" else "VIDEO_ITEMS"} " +
-                    "items=${items.size} emitted=${collectTo.size - previousSize} " +
-                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} " +
-                    "scanUs=${scanMetrics.scanNanos / 1_000L} " +
-                    "otherUs=${(totalNs - scanMetrics.scanNanos).coerceAtLeast(0L) / 1_000L} " +
-                    "scanCalls=${scanMetrics.calls} visited=${scanMetrics.visited} " +
-                    "matched=${scanMetrics.matched} maxDepth=${scanMetrics.maxDepth}")
-        }
     }
 
     private fun extractEpisodesFromData(data: Map<String, Any>?): List<Episode> {
@@ -3308,23 +3258,10 @@ class YoutubeProvider(
         return episodes
     }
 
-    private class RendererScanMetrics {
-        var visited = 0
-        var matched = 0
-        var calls = 0
-        var maxDepth = 0
-        var scanNanos = 0L
-    }
-
     private fun findAllRenderers(
-        obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0,
-        metrics: RendererScanMetrics? = null
+        obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0
     ) {
         if (obj == null || depth > 32) return
-        if (metrics != null) {
-            metrics.visited++
-            if (depth > metrics.maxDepth) metrics.maxDepth = depth
-        }
         when (obj) {
             is Map<*, *> -> {
                 // Keep the original two-pass order: direct keys before descendants.
@@ -3333,20 +3270,19 @@ class YoutubeProvider(
                         val match = v as? Map<*, *>
                         if (match != null) {
                             outRenderers.add(match)
-                            if (metrics != null) metrics.matched++
                         }
                     }
                 }
                 for (value in obj.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        findAllRenderers(value, outRenderers, depth + 1, metrics)
+                        findAllRenderers(value, outRenderers, depth + 1)
                     }
                 }
             }
             is List<*> -> {
                 for (item in obj) {
                     if (item is Map<*, *> || item is List<*>) {
-                        findAllRenderers(item, outRenderers, depth + 1, metrics)
+                        findAllRenderers(item, outRenderers, depth + 1)
                     }
                 }
             }
@@ -3628,17 +3564,6 @@ class YoutubeProvider(
         url: String, direct: Boolean, channelTargetPages: Int = 2,
         channelExpansionTab: String? = null
     ): LoadResponse {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        if (allocationRun != null) {
-            val route = when {
-                url.contains("/shorts/") -> "SHORTS"
-                url.contains("/watch") -> "WATCH"
-                url.contains("/channel/") || url.contains("/@") -> "CHANNEL"
-                else -> "OTHER"
-            }
-            Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=LOAD_PAGE " +
-                "reason=$route urlId=${url.hashCode()} direct=$direct pages=$channelTargetPages tab=${channelExpansionTab ?: "none"}")
-        }
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -3983,11 +3908,6 @@ class YoutubeProvider(
                         else snapshot?.pagesFetched ?: 1
                     if (snapshot != null && (snapshot.pagesFetched >= tabPageTarget ||
                             snapshot.nextToken.isNullOrBlank())) {
-                        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                            Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_TAB_CACHE " +
-                                "tab=$tabName episodes=${snapshot.episodes.size} pages=${snapshot.pagesFetched} " +
-                                "nextToken=${!snapshot.nextToken.isNullOrBlank()}")
-                        }
                         return snapshot.episodes.map { it.copy() }
                     }
                     val tabEpisodes = snapshot?.episodes?.map { it.copy() }?.toMutableList()
@@ -4160,66 +4080,24 @@ class YoutubeProvider(
                                     "continuation" to currentToken
                                 )
                                 val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
-                                val allocationRun = System.getProperty("hsp1020.java.alloc.run")
                                 val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
-                                val readStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                 val responseBody = httpResponse.body.bytes()
-                                val readUs = if (allocationRun != null) (System.nanoTime() - readStartNs) / 1_000L else 0L
-                                val streamStartNs = if (allocationRun != null) System.nanoTime() else 0L
-                                var parseMode = "STREAM_ITEMS"
                                 var javaContinuationItems = streamChannelContinuationItems(responseBody)
-                                val streamUs = if (allocationRun != null) (System.nanoTime() - streamStartNs) / 1_000L else 0L
-                                var fallbackUs = 0L
-                                var lookupUs = 0L
                                 if (javaContinuationItems == null) {
-                                    parseMode = "FULL_FALLBACK"
-                                    val fallbackStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                     @Suppress("UNCHECKED_CAST")
                                     val fullResponse = runCatching {
                                         mapper.readValue(responseBody, Map::class.java) as? Map<String, Any>
                                     }.getOrNull()
-                                    if (allocationRun != null) fallbackUs = (System.nanoTime() - fallbackStartNs) / 1_000L
                                     if (fullResponse != null) {
-                                        val lookupStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                         javaContinuationItems = findContinuationItemsRecursive(fullResponse)
-                                        if (allocationRun != null) lookupUs = (System.nanoTime() - lookupStartNs) / 1_000L
                                     }
-                                }
-                                if (allocationRun != null) {
-                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_JSON " +
-                                        "tab=$tabName page=$pagesFetchedLocal bytes=${responseBody.size} " +
-                                        "readUs=$readUs streamUs=$streamUs fallbackUs=$fallbackUs lookupUs=$lookupUs " +
-                                        "mode=$parseMode parsed=${javaContinuationItems != null}")
                                 }
                                 if (javaContinuationItems == null) {
                                     cacheable = false
                                     break
                                 }
-                                val extractStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-                                val previousCount = tabEpisodes.size
-                                val videosStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
-                                val videosMs = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() - videosStart else 0L
-                                val tokenStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 currentToken = findContinuationFromItems(javaContinuationItems)
-                                if (allocationRun != null) {
-                                    var chipDirectItems = 0
-                                    var continuationItems = 0
-                                    javaContinuationItems.forEach { item ->
-                                        val fields = item as? Map<*, *> ?: return@forEach
-                                        if (fields.containsKey("continuationItemRenderer")) continuationItems++
-                                        if (chipResultRendererKeys.any { fields.containsKey(it) }) chipDirectItems++
-                                    }
-                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CHIP_SCHEMA " +
-                                        "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
-                                        "chipDirectItems=$chipDirectItems continuationItems=$continuationItems " +
-                                        "addedEpisodes=${tabEpisodes.size - previousCount}")
-                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_EXTRACT " +
-                                        "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
-                                        "added=${tabEpisodes.size - previousCount} extractMs=${android.os.SystemClock.elapsedRealtime() - extractStart} " +
-                                        "videosMs=$videosMs tokenMs=${android.os.SystemClock.elapsedRealtime() - tokenStart} " +
-                                        "nextToken=${!currentToken.isNullOrBlank()}")
-                                }
                             } catch (e: Exception) {
                                 cacheable = false
                                 break
@@ -4245,12 +4123,6 @@ class YoutubeProvider(
                             )
                         }
                     }
-                    System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                        Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_TAB_RESULT " +
-                            "tab=$tabName episodes=${tabEpisodes.size} pages=$pagesFetchedLocal " +
-                            "targetPages=$tabPageTarget nextToken=${!currentToken.isNullOrBlank()} " +
-                            "cacheable=$cacheable")
-                    }
                     return tabEpisodes
                 }
                 
@@ -4270,12 +4142,6 @@ class YoutubeProvider(
 
                 val videosEpisodes = pair.first
                 val shortsEpisodes = pair.second
-                System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                    Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_PAGE_RESULT " +
-                        "titleFallback=${title == "YouTube Channel"} poster=${!poster.isNullOrBlank()} " +
-                        "description=${channelDescription != "\u200b"} " +
-                        "videos=${videosEpisodes.size} shorts=${shortsEpisodes.size}")
-                }
 
                 val allEpisodes = mutableListOf<Episode>()
 

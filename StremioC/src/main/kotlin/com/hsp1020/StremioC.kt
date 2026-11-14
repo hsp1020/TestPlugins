@@ -1218,62 +1218,6 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
-        private suspend fun traceStreamPlay(
-            route: String, provider: MainAPI,
-            payload: String, casting: Boolean,
-            subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit,
-            crossRouteSeen: MutableSet<Int>? = null
-        ): Boolean {
-            val run = System.getProperty("hsp1020.java.alloc.run")
-                ?: return provider.loadLinks(payload, casting, subtitleCallback, callback)
-            val started = android.os.SystemClock.elapsedRealtime()
-            val requestId = System.nanoTime()
-            val fields = runCatching {
-                val json = org.json.JSONObject(payload)
-                listOf("imdbId", "tmdbId", "aniId", "malId", "season", "episode",
-                    "imdbSeason", "imdbEpisode").joinToString(",") { key ->
-                    "${key}=${json.optString(key)}"
-                }
-            }.getOrDefault("unavailable")
-            val links = java.util.concurrent.atomic.AtomicInteger()
-            val subtitles = java.util.concurrent.atomic.AtomicInteger()
-            val uniqueLinks = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
-            val crossRouteDuplicates = java.util.concurrent.atomic.AtomicInteger()
-            val sources = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
-            android.util.Log.i("JavaAllocCause",
-                "run=$run module=StremioC phase=STREAMPLAY_START request=$requestId " +
-                    "route=$route provider=${provider.name} payloadId=${payload.hashCode()} " +
-                    "ids=$fields")
-            val measuredSubtitle: (SubtitleFile) -> Unit = { subtitle ->
-                subtitles.incrementAndGet()
-                subtitleCallback(subtitle)
-            }
-            val measuredLink: (ExtractorLink) -> Unit = { link ->
-                links.incrementAndGet()
-                val linkId = link.url.hashCode()
-                if (uniqueLinks.add(linkId) && crossRouteSeen != null &&
-                    !crossRouteSeen.add(linkId)) crossRouteDuplicates.incrementAndGet()
-                sources.computeIfAbsent(link.source) { java.util.concurrent.atomic.AtomicInteger() }
-                    .incrementAndGet()
-                callback(link)
-            }
-            return try {
-                val result = provider.loadLinks(payload, casting, measuredSubtitle, measuredLink)
-                android.util.Log.i("JavaAllocCause",
-                    "run=$run module=StremioC phase=STREAMPLAY_END request=$requestId " +
-                        "route=$route result=$result links=${links.get()} " +
-                        "uniqueLinkIds=${uniqueLinks.size} crossRouteDuplicate=${crossRouteDuplicates.get()} " +
-                        "sources=${sources.entries.sortedByDescending { it.value.get() }.take(12).joinToString(",") { "${it.key}:${it.value.get()}" }} " +
-                        "subtitles=${subtitles.get()} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
-                result
-            } catch (error: Throwable) {
-                android.util.Log.w("JavaAllocCause",
-                    "run=$run module=StremioC phase=STREAMPLAY_ERROR request=$requestId " +
-                        "route=$route error=${error.javaClass.simpleName}")
-                throw error
-            }
-        }
-
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 16
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
@@ -1542,11 +1486,6 @@ open class StremioC(
             val storageKey = addonMetaStorageKey(url)
             // The catalog's own Metadata Sync switch controls its original meta cache.
             val skipCache = isMetadataSwapAllowed(url.substringBefore("/meta/"))
-            val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                "run=$allocationRun module=StremioC phase=META_REQUEST " +
-                    "reason=${if (skipCache) "CATALOG_SYNC_BYPASS" else if (forceRefresh) "FORCE_REFRESH" else "CACHE_ALLOWED"} " +
-                    "metaId=${storageKey.hashCode()}")
             if (skipCache) {
                 invalidateAddonMetaInRam(storageKey)
                 MetadataDiskCache.invalidate("meta", storageKey)
@@ -1557,14 +1496,10 @@ open class StremioC(
             } else null
             if (!forceRefresh && !skipCache) {
                 cachedAddonMetaInRam(storageKey)?.let {
-                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                        "run=$allocationRun module=StremioC phase=META_RESULT reason=RAM_HIT metaId=${storageKey.hashCode()} chars=${it.length}")
                     return it
                 }
                 MetadataDiskCache.readWithTtl("meta", storageKey)?.let {
                     cacheAddonMetaInRam(storageKey, it.json, it.ttlMs, it.timestamp)
-                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                        "run=$allocationRun module=StremioC phase=META_RESULT reason=DISK_HIT metaId=${storageKey.hashCode()} chars=${it.json.length}")
                     return it.json
                 }
             }
@@ -1579,10 +1514,6 @@ open class StremioC(
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
-                        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                            "run=$allocationRun module=StremioC phase=META_RESULT " +
-                                "reason=${if (skipCache) "CACHE_BYPASS" else "NETWORK_FETCH"} " +
-                                "metaId=${storageKey.hashCode()} chars=${body.length}")
                         if (skipCache || isMetadataSwapAllowed(url.substringBefore("/meta/"))) {
                             // The caller still parses the metadata once for the LoadResponse.
                             // Avoid a second JSON tree and validation allocation just for caching.
@@ -2513,16 +2444,12 @@ open class StremioC(
     private suspend fun fetchCatalogItems(
         path: String, fallbackType: String = "movie", origin: String = "home"
     ): Pair<List<SearchResponse>, Int> {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
         val cacheKey = "$mainUrl|$fallbackType|$path"
         synchronized(recentHomeResults) {
             recentHomeResults[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
         }?.let {
-            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                "run=$allocationRun module=StremioC phase=CATALOG " +
-                    "reason=MEMORY_CACHE_HIT origin=$origin keyId=${cacheKey.hashCode()} items=${it.first.size}")
             return it
         }
         return homeForegroundSemaphore.withPermit {
@@ -2538,9 +2465,6 @@ open class StremioC(
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
             val result = items to metas.size
-            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                "run=$allocationRun module=StremioC phase=CATALOG " +
-                    "reason=FETCH_AND_PARSE origin=$origin keyId=${cacheKey.hashCode()} metas=${metas.size} items=${items.size}")
             if (items.isNotEmpty() && items.size <= 100) {
                 synchronized(recentHomeResults) {
                     recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())
@@ -2623,11 +2547,6 @@ open class StremioC(
     }
 
     private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-            "run=$allocationRun module=StremioC phase=DETAIL_LOAD " +
-                "reason=${if (forceRefresh) "FORCE_REFRESH" else if (url.startsWith("{")) "EMBEDDED_JSON" else "NORMAL"} " +
-                "urlId=${url.hashCode()}")
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -2763,10 +2682,6 @@ open class StremioC(
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
-        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-            "run=$allocationRun module=StremioC phase=DETAIL_PARSE " +
-                "reason=${if (url.startsWith("{")) "EMBEDDED_JSON" else "ADDON_JSON"} " +
-                "urlId=${url.hashCode()} videos=${res.videos?.size ?: 0}")
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
@@ -2932,8 +2847,6 @@ open class StremioC(
             prefetchedAnimeImdbId = hintedImdbId
         ) }
 
-        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-            "run=$allocationRun module=StremioC phase=RESPONSE_ASSEMBLY reason=LOAD_RESPONSE_READY")
         if (url != loadRes.url) {
             animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
             seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
@@ -4096,15 +4009,11 @@ open class StremioC(
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await())
             val streamPlayProvider = getStreamPlayProvider()
-            val crossRouteSeen = if (System.getProperty("hsp1020.java.alloc.run") != null)
-                java.util.concurrent.ConcurrentHashMap.newKeySet<Int>() else null
-
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(60000L) {
-                        withIntegratedSource("streamplay") { traceStreamPlay("non-anime", streamPlayProvider, 
-                            streamPlayPayload(loadData, targetType, media).toJson(),
-                            isCasting, subtitleCallback, callback, crossRouteSeen
+                        withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media).toJson(),
+                            isCasting, subtitleCallback, callback
                         ) }
                     }
                 }
@@ -4140,8 +4049,7 @@ open class StremioC(
                                 "isCartoon" to loadData.isCartoon
                             )
                             withTimeoutOrNull(60000L) {
-                                withIntegratedSource("anime") { traceStreamPlay("dedicated-anime", animeProvider, 
-                                    animePayload.toJson(), isCasting, subtitleCallback, callback, crossRouteSeen
+                                withIntegratedSource("anime") { animeProvider.loadLinks(animePayload.toJson(), isCasting, subtitleCallback, callback
                                 ) }
                             }
                         } catch (e: CancellationException) {
@@ -4154,9 +4062,8 @@ open class StremioC(
                     val anime = async(Dispatchers.IO) {
                         try {
                             if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
-                                withIntegratedSource("streamplay") { traceStreamPlay("anime-standard", streamPlayProvider, 
-                                    streamPlayPayload(loadData, targetType, media).toJson(),
-                                    isCasting, subtitleCallback, callback, crossRouteSeen
+                                withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media).toJson(),
+                                    isCasting, subtitleCallback, callback
                                 ) }
                             }
                         } catch (e: CancellationException) {
@@ -4170,11 +4077,10 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             try {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { traceStreamPlay("anime-general", streamPlayProvider, 
-                                        streamPlayPayload(
+                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(
                                             loadData, targetType, media, generalAnimeRoute = true
                                         ).toJson(),
-                                        isCasting, subtitleCallback, callback, crossRouteSeen
+                                        isCasting, subtitleCallback, callback
                                     ) }
                                 }
                             } catch (e: CancellationException) {
@@ -4189,10 +4095,9 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             runSuspendCatching {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { traceStreamPlay("anime-imdb", streamPlayProvider, 
-                                        streamPlayPayload(loadData, targetType, media,
+                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media,
                                             generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
-                                        isCasting, subtitleCallback, callback, crossRouteSeen
+                                        isCasting, subtitleCallback, callback
                                     ) }
                                 }
                             }

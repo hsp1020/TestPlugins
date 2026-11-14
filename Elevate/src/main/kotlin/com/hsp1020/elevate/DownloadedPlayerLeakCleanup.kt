@@ -39,10 +39,6 @@ internal object DownloadedPlayerLeakCleanup {
             fun remember(player: Player?, activityId: Int) {
                 if (player == null || players.any { it.get() === player }) return
                 players.add(WeakReference(player))
-                System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                    Log.i("ElevateLiveLeak", "run=$run phase=LIVE_PLAYER_SEEN activityId=$activityId " +
-                        "playerId=${System.identityHashCode(player)} tracked=${players.size}")
-                }
             }
 
             fun observe(fragment: AbstractPlayerFragment<*>, activityId: Int) {
@@ -72,18 +68,11 @@ internal object DownloadedPlayerLeakCleanup {
 
             fun release(phase: String, activityId: Int) {
                 detach()
-                val run = System.getProperty("hsp1020.java.alloc.run")
                 for (reference in players) {
                     val player = reference.get() ?: continue
-                    val playerId = System.identityHashCode(player)
                     try {
                         val registeredBefore = LiveHelper.getLiveManager(player) != null
                         if (registeredBefore) LiveHelper.unregisterPlayer(player)
-                        val registeredAfter = LiveHelper.getLiveManager(player) != null
-                        if (run != null) Log.i("ElevateLiveLeak",
-                            "run=$run phase=LIVE_UNREGISTER reason=$phase " +
-                                "activityId=$activityId playerId=$playerId " +
-                                "registeredBefore=$registeredBefore registeredAfter=$registeredAfter")
                     } catch (error: Exception) {
                         Log.w("ElevateLiveLeak",
                             "phase=LIVE_UNREGISTER_FAILED reason=$phase " +
@@ -150,10 +139,6 @@ internal object DownloadedPlayerLeakCleanup {
         val tracker = LiveTracker(System.identityHashCode(activity))
         liveTrackers[activity] = tracker
         tracker.start(host)
-        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            Log.i("ElevateLiveLeak", "run=$run phase=LIVE_TRACK_START " +
-                "activityId=${System.identityHashCode(activity)}")
-        }
     }
 
     private fun field(instance: Any, name: String): java.lang.reflect.Field? {
@@ -173,11 +158,6 @@ internal object DownloadedPlayerLeakCleanup {
         (activity as? FragmentActivity)?.let { host ->
             liveTrackers.remove(activity)?.close(host)
         }
-        val run = System.getProperty("hsp1020.java.alloc.run")
-        var callbacks = 0
-        var receivers = 0
-        var absent = 0
-        var errors = 0
 
         // The helper stores a callback value that strongly captures the
         // Activity, defeating the WeakHashMap's weak key.
@@ -185,10 +165,7 @@ internal object DownloadedPlayerLeakCleanup {
             with(BackPressedCallbackHelper) {
                 (activity as ComponentActivity).detachBackPressedCallback("DownloadedPlayerActivity")
             }
-            callbacks++
         } catch (error: Exception) {
-            errors++
-            if (run != null) Log.w("ElevateReceiverLeak", "phase=BACK_CALLBACK_RELEASE_FAILED", error)
         }
 
         fun visit(manager: FragmentManager) {
@@ -202,17 +179,12 @@ internal object DownloadedPlayerLeakCleanup {
                             if (receiver != null) {
                                 try {
                                     activity.unregisterReceiver(receiver)
-                                    receivers++
                                 } catch (_: IllegalArgumentException) {
-                                    absent++
                                 }
                                 receiverField.set(host, null)
                             }
                         }
                     } catch (error: Exception) {
-                        errors++
-                        if (run != null) Log.w("ElevateReceiverLeak",
-                            "phase=PIP_RECEIVER_RELEASE_FAILED fragment=${fragment.javaClass.simpleName}", error)
                     }
                 }
                 if (fragment.isAdded) visit(fragment.childFragmentManager)
@@ -222,11 +194,6 @@ internal object DownloadedPlayerLeakCleanup {
             val host = activity as? androidx.fragment.app.FragmentActivity
             host?.let { visit(it.supportFragmentManager) }
         } catch (error: Exception) {
-            errors++
-            if (run != null) Log.w("ElevateReceiverLeak", "phase=PIP_RECEIVER_SCAN_FAILED", error)
         }
-        if (run != null) Log.i("ElevateReceiverLeak",
-            "run=$run phase=DOWNLOADED_ACTIVITY_CLEANUP activityId=${System.identityHashCode(activity)} " +
-                "callbacks=$callbacks pipReceivers=$receivers alreadyUnregistered=$absent errors=$errors")
     }
 }

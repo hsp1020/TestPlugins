@@ -75,7 +75,6 @@ internal object PosterWipe {
     private class Flight(val request: Deferred<ImageResult>, var subscribers: Int = 0)
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val imageFlights = HashMap<RequestKey, Flight>()
-    private val cacheDiagnostics = java.util.concurrent.atomic.AtomicInteger()
 
     // Exact-size Coil work shares a decoded result. Different sizes serialize
     // the same URL's fetch, allowing Coil to reuse its disk cache before decoding.
@@ -108,16 +107,6 @@ internal object PosterWipe {
         }
         try {
             val loader = SingletonImageLoader.get(context.applicationContext)
-            val diagnosticRun = System.getProperty("hsp1020.java.alloc.run")
-            val inspectCache = diagnosticRun != null && cacheDiagnostics.incrementAndGet() % 5 == 0
-            if (inspectCache) {
-                val cache = loader.memoryCache
-                val candidates = cache?.keys?.count { it.key == url } ?: 0
-                android.util.Log.i("JavaAllocCause",
-                    "run=$diagnosticRun module=Coil phase=MEMORY_CACHE_BEFORE " +
-                        "urlId=${url.hashCode()} size=$size candidates=$candidates " +
-                        "cacheBytes=${cache?.size ?: -1} maxBytes=${cache?.maxSize ?: -1}")
-            }
             val request = ImageRequest.Builder(context.applicationContext).data(url)
                 .size(size).scale(scale).precision(Precision.INEXACT)
                 .httpHeaders(NetworkHeaders.Builder().apply {
@@ -130,11 +119,6 @@ internal object PosterWipe {
                     .networkCachePolicy(CachePolicy.DISABLED)
                     .fetcherFactory(cacheOnlyFetcher).build())
                 if (cached is SuccessResult) {
-                    System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                        android.util.Log.i("JavaAllocCause",
-                            "run=$run module=Coil phase=FETCH reason=INFLIGHT_CACHE_PROBE " +
-                                "source=${cached.dataSource} urlId=${url.hashCode()} size=$size scale=$scale")
-                    }
                     return cached
                 }
             }
@@ -143,21 +127,6 @@ internal object PosterWipe {
                 val result = loader.execute(request
                     .networkCachePolicy(CachePolicy.ENABLED)
                     .fetcherFactory(posterFetcher).build())
-                if (inspectCache) {
-                    val cache = loader.memoryCache
-                    val cacheKey = (result as? SuccessResult)?.memoryCacheKey
-                    android.util.Log.i("JavaAllocCause",
-                        "run=$diagnosticRun module=Coil phase=MEMORY_CACHE_AFTER " +
-                            "urlId=${url.hashCode()} source=${(result as? SuccessResult)?.dataSource ?: "ERROR"} " +
-                            "keyId=${cacheKey?.key?.hashCode() ?: 0} extras=${cacheKey?.extras ?: emptyMap<String,String>()} " +
-                            "keyStored=${cacheKey != null && cache?.keys?.contains(cacheKey) == true} " +
-                            "cacheBytes=${cache?.size ?: -1} maxBytes=${cache?.maxSize ?: -1}")
-                }
-                System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                    android.util.Log.i("JavaAllocCause",
-                        "run=$run module=Coil phase=FETCH reason=COIL_EXECUTE " +
-                            "source=${(result as? SuccessResult)?.dataSource ?: "ERROR"} urlId=${url.hashCode()} size=$size scale=$scale")
-                }
                 return result
             } finally {
                 gate.mutex.unlock()
@@ -174,13 +143,10 @@ internal object PosterWipe {
     private suspend fun loadSharedImage(
         context: Context, url: String, size: Size, scale: Scale, mode: String = "DISPLAY"
     ): ImageResult {
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-        var joined = false
         val normalizedSize = canonicalSize(size)
         val key = RequestKey(url, normalizedSize, scale)
         val flight = synchronized(imageFlights) {
-            (imageFlights[key]?.also { if (allocationRun != null) joined = true } ?: run {
+            (imageFlights[key] ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
                     executeImage(context, url, normalizedSize, scale)
                 }
@@ -197,11 +163,6 @@ internal object PosterWipe {
         flight.request.start()
         try {
             val outcome = flight.request.await()
-            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-                "run=$allocationRun module=Coil phase=IMAGE_RESULT " +
-                    "reason=${if (joined) "SHARED_INFLIGHT" else "NEW_REQUEST"} mode=$mode " +
-                    "urlId=${url.hashCode()} size=$normalizedSize originalSize=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
-                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
             return outcome
         } finally {
             val cancel = synchronized(imageFlights) {

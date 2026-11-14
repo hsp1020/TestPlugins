@@ -134,10 +134,6 @@ class ElevatePlugin : Plugin() {
             stopAll()
             app = application
             ElevateJavaAllocationProfile.initialize(application)
-            System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-                android.util.Log.i("JavaAllocCause",
-                    "run=$run module=Elevate phase=PLUGIN_LOAD loaderId=${System.identityHashCode(javaClass.classLoader)}")
-            }
             playbackTrace = ElevatePlaybackTrace(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
@@ -623,10 +619,6 @@ class ElevatePlugin : Plugin() {
         subtitleSourceObserver?.stop()
         subtitleSourceObserver = null
         nativePanelEnabled = false
-        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
-            android.util.Log.i("JavaAllocCause",
-                "run=$run module=Elevate phase=PLUGIN_UNLOAD loaderId=${System.identityHashCode(javaClass.classLoader)}")
-        }
         ElevateJavaAllocationProfile.shutdown()
         app = null
     }
