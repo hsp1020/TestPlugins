@@ -67,6 +67,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var player: Media3Player? = null
     private var instance: Int? = null
     private var linkUrl: String? = null
+    private var selectedLink: Pair<*, *>? = null
     private var previousEmbedded = emptySet<SubtitleData>()
     private var lastHandledSubtitles: Set<SubtitleData>? = null
     private var lastHandledInstance: Int? = null
@@ -128,6 +129,10 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }.getOrNull()
     private val linkField = runCatching {
         CS3IPlayer::class.java.getDeclaredField("currentLink")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val selectedLinkField = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("currentSelectedLink")
             .apply { isAccessible = true }
     }.getOrNull()
 
@@ -256,6 +261,12 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private fun discardPreviousEmbedded() {
         val stale = previousEmbedded
         previousEmbedded = emptySet()
+        val f = fragment
+        if (f != null && (selectedByHost(f)?.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO ||
+                f.player.getCurrentPreferredSubtitle()?.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO)) {
+            runCatching { selectedField?.set(f, null) }
+            f.player.setPreferredSubtitles(null)
+        }
         if (stale.isEmpty()) return
         model?.let { vm ->
             if (vm.state.subtitles.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
@@ -267,13 +278,18 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             }
         }
         runCatching {
-            val helper = helperField?.get(fragment?.player) as? PlayerSubtitleHelper
+            val helper = helperField?.get(f?.player) as? PlayerSubtitleHelper
                 ?: return@runCatching
             @Suppress("UNCHECKED_CAST")
             val active = activeField?.get(helper) as? Set<SubtitleData>
-                ?: return@runCatching
-            if (active.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
+            if (active?.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale } == true) {
                 helper.setActiveSubtitles(active.filterNot {
+                    it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
+                }.toSet())
+            }
+            val all = helper.getAllSubtitles()
+            if (all.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
+                helper.setAllSubtitles(all.filterNot {
                     it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
                 }.toSet())
             }
@@ -426,12 +442,18 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val nextUrl = currentLinkUrl(f)
         val changedInstance = instance != null && instance != nextInstance
         val changedUrl = linkUrl != null && nextUrl != null && linkUrl != nextUrl
+        val nextSelectedLink = runCatching {
+            selectedLinkField?.get(f) as? Pair<*, *>
+        }.getOrNull()
+        val changedLink = selectedLink != null && nextSelectedLink != null &&
+            selectedLink != nextSelectedLink
         val changedPlayer = current != null && current !== player
-        // ExoPlayer replacement on reload is not a change of video source.
-        val changedSource = changedInstance || changedUrl
+        // A player recreation alone is not a source change.
+        val changedSource = changedInstance || changedUrl || changedLink
 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
+        if (nextSelectedLink != null) selectedLink = nextSelectedLink
         if (changedSource) {
             panelManualOverride = false
             manualOverride = false
@@ -628,6 +650,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         model = null
         instance = null
         linkUrl = null
+        selectedLink = null
         previousEmbedded = emptySet()
         lastHandledSubtitles = null
         lastHandledInstance = null
