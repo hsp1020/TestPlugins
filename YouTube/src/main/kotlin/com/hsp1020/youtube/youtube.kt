@@ -3055,6 +3055,62 @@ class YoutubeProvider(
         return episodes
     }
 
+    /** Select only channel continuation items, without materializing the whole browse JSON.
+     * The existing Map parser remains the fallback for response layouts without this array.
+     * Unlike chip pagination, channel rendering requires the original Episode metadata.
+     */
+    private fun streamChannelContinuationItems(body: String): List<*>? = try {
+        mapper.factory.createParser(body).use { parser ->
+            fun scan(depth: Int): List<*>? {
+                if (depth > 32) {
+                    parser.skipChildren()
+                    return null
+                }
+                when (parser.currentToken) {
+                    JsonToken.START_OBJECT -> {
+                        while (true) {
+                            val token = parser.nextToken() ?: return null
+                            if (token == JsonToken.END_OBJECT) break
+                            if (token != JsonToken.FIELD_NAME) {
+                                parser.skipChildren()
+                                continue
+                            }
+                            val field = parser.currentName
+                            parser.nextToken() ?: return null
+                            if (field == "continuationItems" && parser.currentToken == JsonToken.START_ARRAY) {
+                                return mapper.readValue(parser, List::class.java) as? List<*>
+                            }
+                            if (depth == 0 && field != "onResponseReceivedActions" &&
+                                field != "onResponseReceivedEndpoints" &&
+                                field != "onResponseReceivedCommands" &&
+                                field != "onResponseReceivedResults" &&
+                                field != "continuationContents"
+                            ) {
+                                parser.skipChildren()
+                            } else if (parser.currentToken == JsonToken.START_OBJECT ||
+                                parser.currentToken == JsonToken.START_ARRAY
+                            ) {
+                                scan(depth + 1)?.let { return it }
+                            }
+                        }
+                    }
+                    JsonToken.START_ARRAY -> {
+                        while (true) {
+                            val token = parser.nextToken() ?: return null
+                            if (token == JsonToken.END_ARRAY) break
+                            scan(depth + 1)?.let { return it }
+                        }
+                    }
+                    else -> Unit
+                }
+                return null
+            }
+            if (parser.nextToken() == JsonToken.START_OBJECT) scan(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     private fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
         if (obj == null || depth > 32) return null
         when (obj) {
@@ -3092,6 +3148,8 @@ class YoutubeProvider(
         val allocationRun = System.getProperty("hsp1020.java.alloc.run")
         val previousSize = if (allocationRun != null) collectTo.size else 0
         val start = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+        val totalStartNs = if (allocationRun != null) System.nanoTime() else 0L
+        val scanMetrics = if (allocationRun != null) RendererScanMetrics() else null
         items.forEachIndexed { index, item ->
             try {
                 val map = item as? Map<*, *>
@@ -3099,7 +3157,10 @@ class YoutubeProvider(
                 if (map.containsKey("continuationItemRenderer")) return@forEachIndexed
 
                 val foundRenderers = mutableListOf<Map<*, *>>()
-                findAllRenderers(map, foundRenderers)
+                val scanStartNs = if (scanMetrics != null) System.nanoTime() else 0L
+                if (scanMetrics != null) scanMetrics.calls++
+                findAllRenderers(map, foundRenderers, metrics = scanMetrics)
+                if (scanMetrics != null) scanMetrics.scanNanos += System.nanoTime() - scanStartNs
 
                 if (foundRenderers.isEmpty()) return@forEachIndexed
 
@@ -3171,11 +3232,18 @@ class YoutubeProvider(
             } catch (e: Exception) {
             }
         }
-        if (allocationRun != null) Log.i("JavaAllocCause",
-            "run=$allocationRun module=YouTube phase=RENDERER_SCAN " +
-                "reason=${if (isShortsTab) "SHORTS_ITEMS" else "VIDEO_ITEMS"} " +
-                "items=${items.size} emitted=${collectTo.size - previousSize} " +
-                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
+        if (allocationRun != null && scanMetrics != null) {
+            val totalNs = System.nanoTime() - totalStartNs
+            Log.i("JavaAllocCause",
+                "run=$allocationRun module=YouTube phase=RENDERER_SCAN " +
+                    "reason=${if (isShortsTab) "SHORTS_ITEMS" else "VIDEO_ITEMS"} " +
+                    "items=${items.size} emitted=${collectTo.size - previousSize} " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} " +
+                    "scanUs=${scanMetrics.scanNanos / 1_000L} " +
+                    "otherUs=${(totalNs - scanMetrics.scanNanos).coerceAtLeast(0L) / 1_000L} " +
+                    "scanCalls=${scanMetrics.calls} visited=${scanMetrics.visited} " +
+                    "matched=${scanMetrics.matched} maxDepth=${scanMetrics.maxDepth}")
+        }
     }
 
     private fun extractEpisodesFromData(data: Map<String, Any>?): List<Episode> {
@@ -3219,23 +3287,41 @@ class YoutubeProvider(
         return episodes
     }
 
-    private fun findAllRenderers(obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0) {
+    private class RendererScanMetrics {
+        var visited = 0
+        var matched = 0
+        var calls = 0
+        var maxDepth = 0
+        var scanNanos = 0L
+    }
+
+    private fun findAllRenderers(
+        obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0,
+        metrics: RendererScanMetrics? = null
+    ) {
         if (obj == null || depth > 32) return
+        if (metrics != null) {
+            metrics.visited++
+            if (depth > metrics.maxDepth) metrics.maxDepth = depth
+        }
         when (obj) {
             is Map<*, *> -> {
                 for ((k, v) in obj) {
                     if (k is String && TARGET_RENDERER_KEYS.contains(k)) {
                         val match = v as? Map<*, *>
-                        if (match != null) outRenderers.add(match)
+                        if (match != null) {
+                            outRenderers.add(match)
+                            if (metrics != null) metrics.matched++
+                        }
                     }
                 }
                 for (value in obj.values) {
-                    findAllRenderers(value, outRenderers, depth + 1)
+                    findAllRenderers(value, outRenderers, depth + 1, metrics)
                 }
             }
             is List<*> -> {
                 for (item in obj) {
-                    findAllRenderers(item, outRenderers, depth + 1)
+                    findAllRenderers(item, outRenderers, depth + 1, metrics)
                 }
             }
         }
@@ -4051,30 +4137,43 @@ class YoutubeProvider(
                                 val allocationRun = System.getProperty("hsp1020.java.alloc.run")
                                 val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                                 val parseStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-                                val jsonResponse = httpResponse.parsedSafe<Map<String, Any>>()
+                                val responseBody = httpResponse.textLarge
+                                var parseMode = "STREAM_ITEMS"
+                                var javaContinuationItems = streamChannelContinuationItems(responseBody)
+                                var lookupMs = 0L
+                                if (javaContinuationItems == null) {
+                                    parseMode = "FULL_FALLBACK"
+                                    val fullResponse = httpResponse.parsedSafe<Map<String, Any>>()
+                                    if (fullResponse != null) {
+                                        val lookupStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+                                        javaContinuationItems = findContinuationItemsRecursive(fullResponse)
+                                        if (allocationRun != null) {
+                                            lookupMs = android.os.SystemClock.elapsedRealtime() - lookupStart
+                                        }
+                                    }
+                                }
                                 if (allocationRun != null) {
-                                    val parseMs = android.os.SystemClock.elapsedRealtime() - parseStart
-                                    val responseChars = runCatching { httpResponse.text.length }.getOrDefault(-1)
                                     Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_JSON " +
-                                        "tab=$tabName page=$pagesFetchedLocal chars=$responseChars parseMs=$parseMs parsed=${jsonResponse != null}")
+                                        "tab=$tabName page=$pagesFetchedLocal chars=${responseBody.length} " +
+                                        "parseMs=${android.os.SystemClock.elapsedRealtime() - parseStart} " +
+                                        "mode=$parseMode parsed=${javaContinuationItems != null} lookupMs=$lookupMs")
                                 }
-                                if (jsonResponse == null) {
-                                    cacheable = false
-                                    break
-                                }
-                                val extractStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
-                                val javaContinuationItems = findContinuationItemsRecursive(jsonResponse)
                                 if (javaContinuationItems == null) {
                                     cacheable = false
                                     break
                                 }
+                                val extractStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 val previousCount = tabEpisodes.size
+                                val videosStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
+                                val videosMs = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() - videosStart else 0L
+                                val tokenStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                                 if (allocationRun != null) {
                                     Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_EXTRACT " +
                                         "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
                                         "added=${tabEpisodes.size - previousCount} extractMs=${android.os.SystemClock.elapsedRealtime() - extractStart} " +
+                                        "videosMs=$videosMs tokenMs=${android.os.SystemClock.elapsedRealtime() - tokenStart} " +
                                         "nextToken=${!currentToken.isNullOrBlank()}")
                                 }
                             } catch (e: Exception) {
