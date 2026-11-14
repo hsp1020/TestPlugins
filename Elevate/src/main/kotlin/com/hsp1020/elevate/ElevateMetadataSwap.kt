@@ -84,7 +84,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
         val actors: List<ActorData>? = null, val people: String? = null,
         val logoForeign: Boolean = false, val source: String = "TMDB",
         val originalTitle: String? = null, val englishTitle: String? = null,
-        val videos: List<AioVideo> = emptyList()
+        val videos: List<AioVideo> = emptyList(),
+        val originalLanguage: String? = null,
+        val tmdbAnimation: Boolean = false,
+        val tmdbSeasons: Map<Int, Int> = emptyMap()
     ) {
         fun withFallback(other: Metadata?): Metadata {
             if (other == null) return this
@@ -378,7 +381,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
             year, rating, minutes?.let { "$it mins" },
             certification(json, movie, locale), status, tmdbTrailers(json, locale),
             emptyMap(), logoForeign = foreign,
-            originalTitle = originalName, englishTitle = english ?: originalName)
+            originalTitle = originalName, englishTitle = english ?: originalName,
+            originalLanguage = json.string("original_language"),
+            tmdbAnimation = json.optJSONArray("genres")?.let { genres ->
+                (0 until genres.length()).any {
+                    genres.optJSONObject(it)?.optInt("id") == 16
+                }
+            } == true,
+            tmdbSeasons = json.optJSONArray("seasons")?.let { seasons ->
+                (0 until seasons.length()).mapNotNull { index ->
+                    seasons.optJSONObject(index)?.let { row ->
+                        val season = row.optInt("season_number", -1)
+                        val count = row.optInt("episode_count")
+                        if (season >= 0 && count > 0) season to count else null
+                    }
+                }.toMap()
+            }.orEmpty())
     }
 
     private fun addonLogoUrl(url: String?): String? {
@@ -852,8 +870,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
             episodeJob = scope.launch {
                 val ids = ElevateMediaIdentity.collect(nativeResponse,
                     extraSync = original?.syncData, urls = listOfNotNull(original?.url))
-                val animeLookup = if (source.source == "TMDB" &&
-                    ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids)) {
+                val anime = source.source == "TMDB" &&
+                    (ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids) ||
+                        (source.originalLanguage.equals("ja", true) &&
+                            source.tmdbAnimation))
+                val animeLookup = if (anime) {
                     val direct = ids.original?.let { raw ->
                         val kind = raw.substringBefore(':')
                         if (kind in setOf("anilist", "mal", "kitsu"))
@@ -866,66 +887,113 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         ids.kitsu?.let { "kitsu" to it }
                     ).firstOrNull()
                 } else null
-                val animeMapping = animeLookup?.let { (kind, id) ->
+                val directMapping = animeLookup?.let { (kind, id) ->
                     ElevateAnimeIdResolver.resolve(kind, id)
                 }
-                val tmdbSeason = animeMapping?.tmdbSeason
-                val tmdbStart = if (tmdbSeason != null)
-                    animeMapping?.tmdbFromEpisode ?: 1 else null
-                val tmdbEpisodes = withContext(Dispatchers.IO) {
-                    val id = if (animeLookup != null) {
-                        animeMapping?.tmdb?.takeIf { tmdbSeason != null }
-                    } else detailId
-                    if (id == null) emptyMap() else {
-                        val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
-                        // Match only true season/episode numbers; never assume a remapped
-                        // display season is the same TMDB season.
-                        val activeSeason = model.selectedSeasonIndex.value
-                            ?.let { index -> model.seasonSelections.value?.getOrNull(index)?.second }
-                        val aioBySeason = if (completeAio)
-                            source.episodes.entries.groupBy { it.key.first } else emptyMap()
-                        val seasons = if (completeAio) aioBySeason.keys.toList()
-                        else base.mapNotNull { episode ->
-                            episode.seasonIndex?.takeIf {
-                                it == episode.season && it in 0..99 && episode.episode > 0 &&
-                                    (activeSeason == null || it == activeSeason)
-                            }
-                        }.distinct().map { tmdbSeason ?: it }.distinct()
-                        val responses = seasons.map { season ->
-                            async(Dispatchers.IO) {
-                                if (source.source == "AIO" && (if (completeAio)
-                                    aioBySeason[season].orEmpty().map { it.value }
-                                else base.filter {
-                                    it.seasonIndex == season && it.season == season &&
-                                        it.episode > 0
-                                }.mapNotNull { source.episodes[season to it.episode] }).let { values ->
-                                    values.isNotEmpty() && values.all { info ->
-                                        info.name != null && info.description != null &&
-                                            info.poster != null && info.date != null &&
-                                            info.runTime != null && info.rating != null
-                                    }
-                                }) {
-                                    return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
-                                }
-                                val response = withTimeoutOrNull(10_000L) {
-                                    seasonRequests.withPermit {
-                                        ElevateTmdbMetadata.season(id, season, detailLocale)
-                                    }
-                                }
-                                val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
-                                val values = response?.optJSONArray("episodes")
-                                if (values != null) for (i in 0 until values.length()) {
-                                    val ep = values.optJSONObject(i) ?: continue
-                                    val number = ep.optInt("episode_number")
-                                        .takeIf { it > 0 } ?: continue
-                                    found[season to number] = ep.episodeMeta(true)
-                                }
-                                found
-                            }
-                        }.awaitAll()
-                        for (items in responses) result.putAll(items)
-                        result
+                val aioBySeason = if (completeAio)
+                    source.episodes.entries.groupBy { it.key.first } else emptyMap()
+                val seasons = if (completeAio) aioBySeason.keys.toList()
+                else base.mapNotNull { episode ->
+                    episode.seasonIndex?.takeIf {
+                        it == episode.season && it in 1..99 && episode.episode > 0
                     }
+                }.distinct()
+                val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
+                    else null
+                // Reuse the existing AIOStreams season resolver, not a second API client.
+                val seasonMappings = if (imdb != null) withContext(Dispatchers.IO) {
+                    seasons.associateWith { season ->
+                        ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
+                    }
+                } else emptyMap()
+                // Only infer absolute episode offsets when TMDB has one numbered season
+                // and the provider's earlier episode numbering is complete and contiguous.
+                val originalBySeason = (nativeResponse as? TvSeriesLoadResponse)
+                    ?.episodes.orEmpty().groupBy { it.season }
+                fun cumulativeStart(season: Int, tmdbCount: Int): Int? {
+                    if (season <= 1) return null
+                    var preceding = 0
+                    for (previous in 1 until season) {
+                        val numbers = originalBySeason[previous]?.mapNotNull { it.episode }
+                            ?.filter { it > 0 }?.distinct()?.sorted() ?: return null
+                        if (numbers.isEmpty() || numbers.first() != 1 ||
+                            numbers.last() != numbers.size) return null
+                        preceding += numbers.size
+                    }
+                    val last = base.filter { it.seasonIndex == season }
+                        .maxOfOrNull { it.episode } ?: return null
+                    return (preceding + 1).takeIf { preceding + last <= tmdbCount }
+                }
+                val tmdbEpisodes = withContext(Dispatchers.IO) {
+                    val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+                    val responses = seasons.mapNotNull { sourceSeason ->
+                        val mapping = seasonMappings[sourceSeason]
+                            ?: directMapping?.takeIf { it.matchesSeason(sourceSeason) }
+                        val id = if (animeLookup != null && mapping == null) null
+                            else mapping?.tmdb?.takeIf { mapping.tmdbSeason != null } ?: detailId
+                        if (id == null) return@mapNotNull null
+                        val requestedSeason = mapping?.tmdbSeason ?: sourceSeason
+                        val known = if (id == detailId) source.tmdbSeasons else emptyMap()
+                        val onlySeason = known.keys.filter { it > 0 }.singleOrNull()
+                        val actualSeason = if (anime && sourceSeason > 1 &&
+                            mapping?.tmdbFromEpisode == null &&
+                            known.isNotEmpty() && requestedSeason !in known &&
+                            onlySeason != null) onlySeason else requestedSeason
+                        if (known.isNotEmpty() && actualSeason !in known)
+                            return@mapNotNull null
+                        val start = when {
+                            mapping?.tmdbFromEpisode != null &&
+                                actualSeason == requestedSeason -> mapping.tmdbFromEpisode
+                            anime && sourceSeason > 1 && actualSeason == onlySeason ->
+                                cumulativeStart(sourceSeason, known[actualSeason] ?: return@mapNotNull null)
+                            else -> 1
+                        } ?: return@mapNotNull null
+                        async(Dispatchers.IO) {
+                            if (source.source == "AIO" && (if (completeAio)
+                                aioBySeason[sourceSeason].orEmpty().map { it.value }
+                            else base.filter {
+                                it.seasonIndex == sourceSeason && it.season == sourceSeason &&
+                                    it.episode > 0
+                            }.mapNotNull { source.episodes[sourceSeason to it.episode] }).let { values ->
+                                values.isNotEmpty() && values.all { info ->
+                                    info.name != null && info.description != null &&
+                                        info.poster != null && info.date != null &&
+                                        info.runTime != null && info.rating != null
+                                }
+                            }) return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
+                            val response = withTimeoutOrNull(10_000L) {
+                                seasonRequests.withPermit {
+                                    ElevateTmdbMetadata.season(id, actualSeason, detailLocale)
+                                }
+                            }
+                            val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+                            val values = response?.optJSONArray("episodes")
+                            if (values != null) {
+                                val byNumber = (0 until values.length()).mapNotNull { index ->
+                                    values.optJSONObject(index)?.let { ep ->
+                                        ep.optInt("episode_number").takeIf { it > 0 }
+                                            ?.let { it to ep.episodeMeta(true) }
+                                    }
+                                }.toMap()
+                                if (completeAio) {
+                                    for ((number, info) in byNumber)
+                                        found[actualSeason to number] = info
+                                } else {
+                                    base.filter {
+                                        it.seasonIndex == sourceSeason &&
+                                            it.season == sourceSeason && it.episode > 0
+                                    }.forEach { episode ->
+                                        byNumber[start + episode.episode - 1]?.let { info ->
+                                            found[sourceSeason to episode.episode] = info
+                                        }
+                                    }
+                                }
+                            }
+                            found
+                        }
+                    }.awaitAll()
+                    for (items in responses) result.putAll(items)
+                    result
                 }
                 if (generation != serial || metadata !== source ||
                     originalEpisodes !== baseRef || !fragment.isAdded) {
@@ -964,21 +1032,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     }
                     val key = season?.let { it to episode.episode }
                     val addon = key?.let { source.episodes[it] }
-                    val mappedKey = season?.let {
-                        val selectedSeason = tmdbSeason ?: it
-                        val selectedEpisode = if (tmdbSeason != null)
-                            (tmdbStart ?: 1) + episode.episode - 1 else episode.episode
-                        selectedSeason to selectedEpisode
-                    }
-                    val tmdb = (mappedKey ?: key)?.let { tmdbEpisodes[it] }
-                    val info = if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
-                        else tmdb
-                    if (animeLookup != null && info == null) return@map episode
-                    // .copy retains playback URL, episode ID, season mapping and watch progress.
+                    val tmdb = key?.let { tmdbEpisodes[it] }
+                    val info = (if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
+                        else tmdb) ?: return@map episode
+                    // Keep the original field whenever the TMDB value is missing.
                     episode.copy(
-                        name = info?.name, description = info?.description,
-                        poster = info?.poster, score = info?.rating?.let { Score.from10(it) },
-                        airDate = date(info?.date), runTime = info?.runTime
+                        name = info.name ?: episode.name,
+                        description = info.description ?: episode.description,
+                        poster = info.poster ?: episode.poster,
+                        score = info.rating?.let { Score.from10(it) } ?: episode.score,
+                        airDate = date(info.date) ?: episode.airDate,
+                        runTime = info.runTime ?: episode.runTime
                     )
                 }
                 swappedEpisodes = result

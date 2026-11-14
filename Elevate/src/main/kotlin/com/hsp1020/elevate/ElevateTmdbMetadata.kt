@@ -177,11 +177,12 @@ internal object ElevateTmdbMetadata {
         val kind = if (movie) "movie" else "tv"
         val key = "$kind:$number"
         val normalizedLocale = locale.lowercase(Locale.ROOT)
+        val detailDiskKey = key + ":" + normalizedLocale + (if (movie) "" else ":seasons")
         if (needsDetails && synchronized(cache) {
                 cache[key]?.takeIf { System.currentTimeMillis() - it.at in 0 until TTL }
                     ?.let { it.detailLocale == normalizedLocale && it.details != null } != true
             }) {
-            ElevateMetadataDiskCache.read("tmdb_detail", key + ":" + normalizedLocale)
+            ElevateMetadataDiskCache.read("tmdb_detail", detailDiskKey)
                 ?.let { disk ->
                     runCatching { JSONObject(disk.body) }.getOrNull()?.let { detail ->
                         synchronized(cache) {
@@ -246,7 +247,7 @@ internal object ElevateTmdbMetadata {
                                 for (field in listOf("name", "title", "overview", "poster_path",
                                     "backdrop_path", "genres", "vote_average", "release_date",
                                     "first_air_date", "runtime", "episode_run_time",
-                                    "status", "images", "videos", "release_dates",
+                                    "status", "seasons", "images", "videos", "release_dates",
                                     "content_ratings", "translations", "original_language",
                                     "original_title", "original_name")) {
                                     if (json.has(field)) put(field, json.get(field))
@@ -257,7 +258,7 @@ internal object ElevateTmdbMetadata {
                             } else null
                             if (foundDetail != null) {
                                 ElevateMetadataDiskCache.write("tmdb_detail",
-                                    key + ":" + normalizedLocale, foundDetail.toString(), TTL)
+                                    detailDiskKey, foundDetail.toString(), TTL)
                             }
                             synchronized(cache) {
                                 val current = cache[key]?.takeIf {
