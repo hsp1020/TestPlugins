@@ -50,7 +50,12 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             "intentFlags=0x${Integer.toHexString(activity.intent?.flags ?: 0)}")
     }
 
+    override fun onActivityPreDestroyed(activity: Activity) {
+        ReceiverRegistrationTrace.snapshot(activity, "PRE_DESTROY")
+    }
+
     override fun onActivityDestroyed(activity: Activity) {
+        ReceiverRegistrationTrace.snapshot(activity, "DESTROYED")
         val reason = destroyReason(activity)
         Log.i(TAG, "ACTIVITY_DESTROY ${activityInfo(activity)} reason=$reason")
         ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_DESTROY")
@@ -59,7 +64,9 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     }
 
     override fun onActivityStarted(activity: Activity) = Unit
-    override fun onActivityResumed(activity: Activity) = Unit
+    override fun onActivityResumed(activity: Activity) {
+        ReceiverRegistrationTrace.snapshot(activity, "RESUMED")
+    }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) {
         ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_STOP")

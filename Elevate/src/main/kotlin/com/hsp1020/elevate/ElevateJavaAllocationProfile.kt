@@ -126,6 +126,7 @@ internal object ElevateJavaAllocationProfile {
         sampleIndex = 0
         lastGc = null
         System.setProperty(RUN_PROPERTY, tag)
+        ReceiverRegistrationTrace.start(tag)
         logHeap("PROFILE_START", tag, context)
         val executor = Executors.newSingleThreadScheduledExecutor { task ->
             Thread(task, "ElevateMemorySampler").apply { isDaemon = true }
@@ -144,6 +145,7 @@ internal object ElevateJavaAllocationProfile {
     private fun stopSampling() {
         sampler?.shutdownNow()
         sampler = null
+        ReceiverRegistrationTrace.stop()
         if (System.getProperty(RUN_PROPERTY) != null) System.clearProperty(RUN_PROPERTY)
     }
 
