@@ -571,12 +571,7 @@ internal class DetailBackdropLayout(
 
     private fun artworkReady(): Boolean {
         val background = picture?.drawable
-        if (background == null || background.intrinsicWidth <= 0 || background.intrinsicHeight <= 0)
-            return SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
-        if (!hasExpectedLogo()) return true
-        val logoView = logo
-        return (logoView?.visibility == View.VISIBLE && logoView.drawable != null &&
-            logoView.width > 0 && logoView.height > 0) ||
+        return (background != null && background.intrinsicWidth > 0 && background.intrinsicHeight > 0) ||
             SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
     }
     private fun stage() {
@@ -811,7 +806,12 @@ internal class DetailBackdropLayout(
                 maxLabelWidth) else 0
         val logoFullWidth = if (hasLogo) (logo!!.width * abs(originalLogoScaleX) * 2f).roundToInt() else 0
         val timeoutReached = SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
-        if (expectedLogo && !hasLogo && timeoutReached) reservedLateLogoSlot = true
+        if (expectedLogo && !hasLogo && timeoutReached && !reservedLateLogoSlot) {
+            reservedLateLogoSlot = true
+            android.util.Log.d("ElevateArtworkTrace", "LOGO_TIMEOUT tv=$tv" +
+                " visible=${logo?.visibility} drawable=${logo?.drawable != null}" +
+                " width=${logo?.width ?: 0}")
+        }
         val labelWidth = if (reservedLateLogoSlot) maxLabelWidth
             else max(min(logoFullWidth, maxLabelWidth), titleWidth)
         val gap = if (labelWidth > 0) dp(45) else 0
@@ -907,8 +907,7 @@ internal class DetailBackdropLayout(
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             val ready = artworkReady()
-            showTitle(titleText.isNotEmpty() && ready &&
-                (!logoPending || SystemClock.uptimeMillis() - artworkRevealStart >= 6000L),
+            showTitle(titleText.isNotEmpty() && ready,
                 hideOriginal = !ready || (expectedLogo && !foreignLogo))
             visibility(ready)
 

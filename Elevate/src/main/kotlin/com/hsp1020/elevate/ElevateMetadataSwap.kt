@@ -756,8 +756,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
                 val current = resolved.first
                 if (current == null) {
-                    if (generation != serial || original !== page ||
-                        model.page.value !== pendingPage) {
+                    if (generation != serial || original !== page || !fragment.isAdded) {
                         metadataSwapTrace("ELEVATE_STALE gen=$generation stage=no_metadata")
                         return@launch
                     }
@@ -775,12 +774,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB") == provider
                 val manifestMatches = provider != "AIO" || prefs.getString(
                     ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "") == manifest
-                val pageMatches = model.page.value === pendingPage
                 if (!generationMatches || !originalMatches || !fragmentReady ||
-                    !featureStillOn || !providerMatches || !manifestMatches || !pageMatches) {
+                    !featureStillOn || !providerMatches || !manifestMatches) {
                     metadataSwapTrace("ELEVATE_STALE gen=$generation generation=$generationMatches" +
                         " original=$originalMatches fragment=$fragmentReady feature=$featureStillOn" +
-                        " provider=$providerMatches manifest=$manifestMatches page=$pageMatches")
+                        " provider=$providerMatches manifest=$manifestMatches")
                     return@launch
                 }
                 metadata = current
@@ -1367,18 +1365,23 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val allowedTypes = definition.optJSONArray("types")?.let { arr ->
                 (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
             }.orEmpty()
+            val sourceMetaPath = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
+            val sourceType = sourceMetaPath.takeIf { it.contains('/') }
+                ?.substringBefore('/')?.takeIf(String::isNotBlank)
             val candidates = if (movie) listOf("movie") else
                 if (ids.animeIds) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
-            val type = candidates.firstOrNull { it in allowedTypes }
+            val type = if (stremioManaged) sourceType?.takeIf { it in allowedTypes }
+                else candidates.firstOrNull { it in allowedTypes }
             if (type == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash" +
                     " reason=no_compatible_type movie=$movie animeIds=${ids.animeIds}" +
+                    " sourceType=${sourceType ?: "missing"} stremioManaged=$stremioManaged" +
                     " allowedTypes=${allowedTypes.joinToString(",")}")
                 return null
             }
-            val sourceId = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
-                .takeIf { it.contains('/') }?.substringAfter('/', "")
-                ?.removeSuffix(".json")?.takeIf(String::isNotBlank)?.let(Uri::decode)
+            val sourceId = sourceMetaPath.takeIf { it.contains('/') }
+                ?.substringAfter('/', "")?.removeSuffix(".json")
+                ?.takeIf(String::isNotBlank)?.let(Uri::decode)
             val prefixes = definition.optJSONArray("idPrefixes")?.let { arr ->
                 (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
             }.orEmpty()
@@ -1393,7 +1396,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash reason=no_compatible_id")
                 return null
             }
-            metadataSwapTrace("ELEVATE_ADDON_ID type=$type source=${if (stremioManaged) "stremioc_meta" else "media_identity"}")
+            metadataSwapTrace("ELEVATE_ADDON_ID type=$type source=${if (stremioManaged) "stremioc_meta" else "media_identity"}" +
+                " originalType=${sourceType ?: "absent"} idPresent=${id.isNotBlank()}")
             val version = definition.optString("version").trim()
             synchronized(metadata) {
                 val last = versions.put(uri, version)
