@@ -144,10 +144,11 @@ class ElevatePlugin : Plugin() {
                         main.post {
                             if (generation.get() == token) {
                                 try {
+                                    val actorChanged = key == ElevateFeature.ACTOR_INFORMATION.name
+                                    if (actorChanged) metadataSwap?.refresh()
                                     syncFeatures()
                                     if (key == ElevateFeaturePrefs.METADATA_SWAP_PROVIDER ||
-                                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL ||
-                                        key == ElevateFeature.ACTOR_INFORMATION.name)
+                                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL)
                                         metadataSwap?.refresh()
                                 } catch (failure: Exception) {
                                     android.util.Log.e("Elevate", "Feature update failed", failure)
@@ -345,12 +346,6 @@ class ElevatePlugin : Plugin() {
             subtitleSyncRepair?.stop()
             subtitleSyncRepair = null
         }
-        if (enabled(ElevateFeature.ACTOR_INFORMATION)) {
-            if (actorHook == null) actorHook = ElevateActorHook(application, resources).also { it.start() }
-        } else {
-            actorHook?.stop()
-            actorHook = null
-        }
         if (enabled(ElevateFeature.METADATA_SWAP)) {
             if (metadataSwap == null) {
                 metadataSwap = ElevateMetadataSwap(application).also { it.start() }
@@ -358,6 +353,12 @@ class ElevatePlugin : Plugin() {
         } else {
             metadataSwap?.stop()
             metadataSwap = null
+        }
+        if (enabled(ElevateFeature.ACTOR_INFORMATION)) {
+            if (actorHook == null) actorHook = ElevateActorHook(application, resources).also { it.start() }
+        } else {
+            actorHook?.stop()
+            actorHook = null
         }
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }

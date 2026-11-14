@@ -48,6 +48,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.WeakHashMap
 
+private fun actorTrace(message: String) {
+    android.util.Log.d("ElevateActorTrace", message)
+}
+
 /** Universal cast binding based on sync IDs, never on provider names or URL schemas. */
 internal class ElevateActorHook(
     private val appContext: Application,
@@ -100,7 +104,10 @@ internal class ElevateActorHook(
         val now = System.currentTimeMillis()
         val flight = synchronized(anilistCache) {
             anilistCache[id]?.takeIf { now - it.at in 0 until 43_200_000L }
-                ?.let { return it.result }
+                ?.let {
+                    actorTrace("ANILIST_CACHE hit=true cast=${it.result.actors.size}")
+                    return it.result
+                }
             anilistFlights[id] ?: io.async(start = CoroutineStart.LAZY) {
                 val cast = try {
                     AccountManager.aniListApi.load(null, id)?.actors
@@ -109,6 +116,7 @@ internal class ElevateActorHook(
                     null
                 }
                 val found = cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
+                actorTrace("ANILIST_RESULT cast=${found?.actors?.size ?: 0} success=${found != null}")
                 if (found != null) synchronized(anilistCache) {
                     anilistCache[id] = Cached(System.currentTimeMillis(), found)
                     if (anilistCache.size > 64) anilistCache.remove(anilistCache.keys.first())
@@ -128,6 +136,7 @@ internal class ElevateActorHook(
     }
     private suspend fun animeMapped(source: String, id: String): CastResult? {
         val mapped = ElevateAnimeIdResolver.resolve(source, id)
+        actorTrace("ANIME_MAP source=$source found=${mapped != null} anilist=${mapped?.anilist != null}")
         if (mapped == null) return null
         return mapped.anilist?.let { anilist(it) }
     }
@@ -135,7 +144,10 @@ internal class ElevateActorHook(
     private suspend fun tmdb(raw: String, movie: Boolean): CastResult? {
         val id = positive(raw)
         val apiKey = ElevateIdResolver.tmdbApiKey()
-        if (id == null || apiKey == null) return null
+        if (id == null || apiKey == null) {
+            actorTrace("TMDB_SKIP id=${id != null} apiKey=${apiKey != null}")
+            return null
+        }
         return try {
             val locale = getCurrentLocale(appContext)
             // Credits live in a separate shared cache entry, not inside details().
@@ -172,11 +184,13 @@ internal class ElevateActorHook(
                     roleString = obj.optString("character").takeIf(String::isNotBlank)) to
                     ElevateActorPersonRef(personId, name, photo, false)
             }
+            actorTrace("TMDB_RESULT cast=${pairs.size} movie=$movie")
             pairs.takeIf { it.isNotEmpty() }?.let { rows ->
                 CastResult(rows.map { it.first }, rows.map { it.second })
             }
         } catch (cancelled: CancellationException) { throw cancelled }
           catch (e: Exception) {
+            actorTrace("TMDB_ERROR type=${e.javaClass.simpleName} movie=$movie")
             null
         }
     }
@@ -193,6 +207,11 @@ internal class ElevateActorHook(
         val nativeAnime = type in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA) ||
             (type in setOf(TvType.Others, TvType.Cartoon) &&
                 (ids.anilist != null || ids.mal != null))
+        actorTrace("RESOLVE_ROUTE type=$type movie=$movie nativeAnime=$nativeAnime" +
+            " season=${selectedSeason ?: "pending"} multiSeason=$multiSeason" +
+            " anilist=${ids.anilist != null} mal=${ids.mal != null}" +
+            " kitsu=${ids.kitsu != null} tmdb=${ids.tmdb != null}" +
+            " imdb=${ids.imdb != null} simkl=${ids.simkl != null}")
         val simklMapping = if (!nativeAnime)
             ElevateMediaIdentity.simklMapping(
                 ElevateMediaIdentity.Ids(imdb = ids.imdb, tmdb = ids.tmdb, simkl = ids.simkl), movie)
@@ -204,6 +223,8 @@ internal class ElevateActorHook(
             }
             imdb?.let { ElevateAnimeIdResolver.resolveImdbSeason(it, selectedSeason) }
         } else null
+        actorTrace("RESOLVE_MAP simklAnime=${simklMapping?.segment == "anime"}" +
+            " aioSeason=${aioMapping != null}")
         if (simklMapping?.segment == "anime" || aioMapping != null) {
             if (movie) return simklMapping?.anilist?.let { anilist(it) }
                 ?: simklMapping?.mal?.let { animeMapped("mal", it) }
@@ -236,6 +257,7 @@ internal class ElevateActorHook(
                 }
                 else -> null
             }
+            actorTrace("RESOLVE_CANDIDATE source=$candidate count=${result?.actors?.size ?: 0}")
             if (result != null) return result
         }
         // A single-season anime page already carries its own title-specific IDs.
@@ -245,8 +267,10 @@ internal class ElevateActorHook(
             val seasonal = mapping?.anilist?.let { anilist(it) }
             if (seasonal != null) return seasonal
         }
-        return if (anime && !multiSeason && !ids.hasNonKitsu() && ids.kitsu != null)
+        val fallback = if (anime && !multiSeason && !ids.hasNonKitsu() && ids.kitsu != null)
             animeMapped("kitsu", ids.kitsu) else null
+        actorTrace("RESOLVE_END mapped=${fallback != null} count=${fallback?.actors?.size ?: 0}")
+        return fallback
     }
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
@@ -279,6 +303,7 @@ internal class ElevateActorHook(
         if (bindings.containsKey(fragment) || !isResultFragment(fragment)) return
         val list = root.findViewById<RecyclerView>(R.id.result_cast_items)
         if (list == null) return
+        actorTrace("ATTACH fragment=${fragment.javaClass.simpleName} list=true")
         list.visibility = View.GONE
         bindings[fragment] = Binding(fragment, list).also { it.start() }
     }
@@ -387,9 +412,20 @@ internal class ElevateActorHook(
             override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = rebound()
         }
         private val observer = Observer<Resource<ResultData>?> { state ->
-            val page = (state as? Resource.Success<ResultData>)?.value
-            if (page == null) return@Observer
-            update(page)
+            when (state) {
+                is Resource.Loading -> {
+                    actorTrace("PAGE_LOADING fragment=${fragment.javaClass.simpleName}" +
+                        " previous=${pageIdentity != null} taskActive=${loadJob?.isActive == true}")
+                    loadJob?.cancel()
+                    pageIdentity = null
+                    lastActors = null
+                    people = null
+                    list.visibility = View.GONE
+                    castText?.visibility = View.GONE
+                }
+                is Resource.Success -> update(state.value)
+                else -> Unit
+            }
         }
         private fun castEnabled(): Boolean =
             PreferenceManager.getDefaultSharedPreferences(appContext).getBoolean(
@@ -399,12 +435,12 @@ internal class ElevateActorHook(
             active = true
             list.visibility = View.GONE
             castText?.visibility = View.GONE
+            actorTrace("START fragment=${fragment.javaClass.simpleName}")
             controller.start()
             model.page.observe(fragment.viewLifecycleOwner, observer)
             model.selectedSeasonIndex.observe(fragment.viewLifecycleOwner, seasonIndexObserver)
             model.seasonSelections.observe(fragment.viewLifecycleOwner, seasonChoicesObserver)
             tree = list.viewTreeObserver.also { it.addOnGlobalLayoutListener(layoutListener) }
-            (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
         }
         private fun update(page: ResultData) {
             val response = runCatching { responseField?.get(model) as? LoadResponse }
@@ -416,10 +452,17 @@ internal class ElevateActorHook(
             val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown") +
                 "|" + (season ?: "pending") + "|" + multiSeason
             if (identity == pageIdentity) {
+                actorTrace("REUSE identityHash=${Integer.toHexString(identity.hashCode())}" +
+                    " loaded=${lastActors?.size ?: -1} active=${loadJob?.isActive == true}")
                 attachClicks()
                 return
             }
             val previousIdentity = pageIdentity
+            actorTrace("IDENTITY newHash=${Integer.toHexString(identity.hashCode())}" +
+                " previousHash=${previousIdentity?.hashCode()?.let(Integer::toHexString)}" +
+                " source=${page.syncData["metadata_swap_source"] ?: "native"}" +
+                " season=${season ?: "pending"} multiSeason=$multiSeason" +
+                " response=${response?.type} nativeActors=${page.actors?.size ?: 0}")
             pageIdentity = identity
             pageUrl = page.url
             loadJob?.cancel()
@@ -431,7 +474,10 @@ internal class ElevateActorHook(
             adapter?.submitList(emptyList())
             list.visibility = View.GONE
             castText?.visibility = View.GONE
-            if (!castEnabled()) return
+            if (!castEnabled()) {
+                actorTrace("SKIP reason=cast_disabled identityHash=${Integer.toHexString(identity.hashCode())}")
+                return
+            }
             // Episode-based anime need the native season selection before lookup.
             // Waiting prevents an initial season-1 cast from flashing on season 2.
             if (response is TvSeriesLoadResponse &&
@@ -441,14 +487,30 @@ internal class ElevateActorHook(
                     ((ids.simkl != null || ids.imdb != null || ids.tmdb != null) &&
                         response.episodes.mapNotNull { it.season }.distinct().size > 1)) &&
                 season == null) {
+                actorTrace("WAIT_SEASON identityHash=${Integer.toHexString(identity.hashCode())}" +
+                    " choices=${model.seasonSelections.value?.size ?: 0}" +
+                    " selectedIndex=${model.selectedSeasonIndex.value}")
                 return
             }
             loadJob = main.launch {
-                val loaded = resolve(page, response, ids, season, multiSeason)
+                actorTrace("LOOKUP_START identityHash=${Integer.toHexString(identity.hashCode())}")
+                val loaded = try {
+                    resolve(page, response, ids, season, multiSeason)
+                } catch (cancelled: CancellationException) {
+                    actorTrace("LOOKUP_CANCEL identityHash=${Integer.toHexString(identity.hashCode())}")
+                    throw cancelled
+                } catch (error: Exception) {
+                    actorTrace("LOOKUP_ERROR identityHash=${Integer.toHexString(identity.hashCode())}" +
+                        " type=${error.javaClass.simpleName}")
+                    null
+                }
                 // API failure is terminal: restore provider actors as the fallback.
                 val fallback = page.actors?.takeIf { it.isNotEmpty() }
                     ?: response?.actors.orEmpty()
                 val resolved = loaded ?: CastResult(fallback, null)
+                actorTrace("LOOKUP_DONE identityHash=${Integer.toHexString(identity.hashCode())}" +
+                    " loaded=${loaded?.actors?.size ?: -1} fallback=${fallback.size}" +
+                    " usedFallback=${loaded == null} people=${resolved.people?.size ?: 0}")
                 val actors = resolved.actors.map { row ->
                     val actor = row.actor.takeIf { !it.image.isNullOrBlank() }
                         ?: row.actor.copy(image = noActorImage)
@@ -461,8 +523,13 @@ internal class ElevateActorHook(
                 }
                 if (!fragment.isAdded || pageIdentity != identity ||
                     (model.page.value as? Resource.Success<ResultData>)?.value?.url != page.url ||
-                    !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION))
+                    !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) {
+                    actorTrace("LOOKUP_DISCARD identityHash=${Integer.toHexString(identity.hashCode())}" +
+                        " fragmentAdded=${fragment.isAdded} identitySame=${pageIdentity == identity}" +
+                        " pageSuccess=${model.page.value is Resource.Success}" +
+                        " enabled=${ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)}")
                     return@launch
+                }
                 people = resolved.people
                 lastActors = actors
                 (list.adapter as? ActorAdaptor)?.let { adapter ->
@@ -479,6 +546,9 @@ internal class ElevateActorHook(
                 castText?.visibility = if (castEnabled() && loaded == null &&
                     actors.isEmpty() && page.actorsText != null)
                     View.VISIBLE else View.GONE
+                actorTrace("DISPLAY identityHash=${Integer.toHexString(identity.hashCode())}" +
+                    " castCount=${actors.size} adapterCount=${(list.adapter as? ActorAdaptor)?.itemCount ?: -1}" +
+                    " visible=${list.visibility == View.VISIBLE} castText=${castText?.visibility}")
                 list.post { attachClicks() }
             }
         }
@@ -508,6 +578,8 @@ internal class ElevateActorHook(
                     adapter.getItemOrNull(it) !== actors[it]
                 })) {
                 if (!restoringCast) {
+                    actorTrace("ADAPTER_RESTORE identityHash=${pageIdentity?.hashCode()?.let(Integer::toHexString)}" +
+                        " expected=${actors.size} actual=${adapter.itemCount}")
                     restoringCast = true
                     adapter.submitList(actors, Runnable {
                         restoringCast = false
@@ -594,6 +666,9 @@ internal class ElevateActorHook(
             }
         }
         fun stop(retainForNavigation: Boolean = false, clearSavedState: Boolean = false) {
+            actorTrace("STOP fragment=${fragment.javaClass.simpleName}" +
+                " retain=$retainForNavigation clear=$clearSavedState" +
+                " actors=${lastActors?.size ?: -1}")
             active = false
             restoringCast = false
             pendingAnimation?.setAnimationListener(null)

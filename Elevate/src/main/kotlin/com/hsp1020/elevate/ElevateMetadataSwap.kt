@@ -4,8 +4,6 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.net.Uri
-import android.view.View
-import android.view.ViewTreeObserver
 import android.os.Bundle
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -525,74 +523,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
     }
 
     private inner class Screen(private val fragment: Fragment) {
-        private val root = fragment.requireView()
         private val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
-        // Hide only metadata presentation, not playback, navigation or the entire detail page.
-        // ResultTrailerPlayer inherits the PHONE fragment and uses the same detail layout.
-        private val pageViews = views(
-            "result_title", "result_description", "result_poster_holder",
-            "result_poster_background_holder", "background_poster_holder",
-            "result_meta_content_rating", "result_meta_year", "result_meta_status",
-            "result_meta_duration", "result_tag", "result_tag_holder", "result_play_trailer"
-        )
-        private val ratingView = views("result_meta_rating")
-        private val actorViews = views("result_cast_text", "result_cast_items")
-        private val episodeViews = views(
-            "result_episodes", "result_episodes_text", "result_no_episodes",
-            "result_season_button", "result_episode_select",
-            "result_season_selection", "result_range_selection"
-        )
-        private val masked = LinkedHashMap<View, Int>()
-        private var pagePending = false
-        private var episodesPending = false
-        private var swapActors = false
-        private val drawListener = ViewTreeObserver.OnPreDrawListener {
-            syncMask()
-            true
-        }
-        private var drawTree: ViewTreeObserver? = null
-
-        private fun views(vararg names: String): List<View> = names.mapNotNull { name ->
-            val id = root.resources.getIdentifier(name, "id", root.context.packageName)
-            if (id == 0) null else root.findViewById<View>(id)
-        }
-
-        private fun syncMask() {
-            if (!pagePending && !episodesPending && masked.isEmpty()) return
-            val wanted = LinkedHashSet<View>()
-            if (pagePending) {
-                wanted.addAll(pageViews)
-                if (swapActors) wanted.addAll(actorViews)
-                if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.MDB_RATINGS))
-                    wanted.addAll(ratingView)
-            }
-            if (episodesPending) wanted.addAll(episodeViews)
-            for (view in wanted) {
-                // Native binding may change visibility while loading; capture its latest state.
-                when (view.visibility) {
-                    View.VISIBLE -> {
-                        masked[view] = View.VISIBLE
-                        view.visibility = View.INVISIBLE
-                    }
-                    View.GONE -> if (masked.containsKey(view)) masked[view] = View.GONE
-                }
-            }
-            val iterator = masked.entries.iterator()
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                if (entry.key !in wanted) {
-                    if (entry.key.visibility == View.INVISIBLE)
-                        entry.key.visibility = entry.value
-                    iterator.remove()
-                }
-            }
-        }
-
-        private fun releaseMask() {
-            pagePending = false
-            episodesPending = false
-            syncMask()
-        }
+        private var pendingPage: Resource.Loading? = null
+        private var nativeResponse: LoadResponse? = null
         private var original: ResultData? = null
         private var swapped: ResultData? = null
         private var originalEpisodes: List<ResultEpisode>? = null
@@ -609,9 +542,41 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private var job: Job? = null
         private var episodeJob: Job? = null
         private var serial = 0
-        private val observer = Observer<Resource<ResultData>?> { result ->
-            val page = (result as? Resource.Success<ResultData>)?.value ?: return@Observer
-            if (page !== swapped) update(page)
+        private val observer = Observer<Resource<ResultData>?> { state ->
+            when (state) {
+                is Resource.Loading -> if (state !== pendingPage) {
+                    metadataSwapTrace("ELEVATE_NATIVE_LOADING fragment=${fragment.javaClass.simpleName}" +
+                        " urlHash=${state.url?.hashCode()?.let(Integer::toHexString)}")
+                    job?.cancel()
+                    episodeJob?.cancel()
+                    serial++
+                    original = null
+                    swapped = null
+                    originalEpisodes = null
+                    swappedEpisodes = null
+                    metadata = null
+                    pendingPage = null
+                    nativeResponse = null
+                    nativeSeries = null
+                    rebuiltSeries = null
+                    aioRebuilt = false
+                }
+                is Resource.Success -> {
+                    val page = state.value
+                    val response = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
+                    if (page === swapped || (original?.url == page.url &&
+                            (response === nativeResponse ||
+                                page.syncData["metadata_swap_source"] != null))) {
+                        metadataSwapTrace("ELEVATE_REEMIT_SKIP gen=$serial" +
+                            " own=${page === swapped} source=${page.syncData["metadata_swap_source"]}" +
+                            " responseSame=${response === nativeResponse}" +
+                            " urlHash=${Integer.toHexString(page.url.hashCode())}")
+                    } else update(page)
+                }
+                is Resource.Failure -> metadataSwapTrace(
+                    "ELEVATE_NATIVE_FAILURE gen=$serial error=${state.errorString.take(90)}")
+                else -> Unit
+            }
         }
         private val trailerObserver = Observer<List<ExtractedTrailerData>> { list ->
             if (list === suppressedTrailers) return@Observer
@@ -619,14 +584,36 @@ internal class ElevateMetadataSwap(private val application: Application) :
             if (metadata != null && swapped != null) suppressNativeTrailers()
         }
         private val episodeObserver = Observer<Resource<List<ResultEpisode>>?> { state ->
-            val list = (state as? Resource.Success<List<ResultEpisode>>)?.value
-                ?: return@Observer
-            if (list === swappedEpisodes || aioRebuilt || rebuildingHost) return@Observer
+            val list = (state as? Resource.Success<List<ResultEpisode>>)?.value ?: return@Observer
+            if (list === swappedEpisodes || aioRebuilt || rebuildingHost) {
+                metadataSwapTrace("ELEVATE_EPISODES_OWN gen=$serial rebuilt=$aioRebuilt" +
+                    " rebuilding=$rebuildingHost count=${list.size}")
+                return@Observer
+            }
             originalEpisodes = list
+            metadataSwapTrace("ELEVATE_EPISODES_NATIVE gen=$serial count=${list.size}" +
+                " waiting=${pendingPage != null} metadataReady=${metadata != null}")
+            if (pendingPage != null || metadata != null) nativeEpisodesLoading()
             updateEpisodes()
         }
 
         @Suppress("UNCHECKED_CAST")
+        private fun nativeEpisodesLoading() {
+            @Suppress("UNCHECKED_CAST")
+            val live = episodeField?.get(model) as?
+                MutableLiveData<Resource<List<ResultEpisode>>?> ?: return
+            if (live.value !is Resource.Loading) live.value = Resource.Loading()
+        }
+
+        private fun nativePageLoading(page: ResultData) {
+            @Suppress("UNCHECKED_CAST")
+            val live = pageField?.get(model) as? MutableLiveData<Resource<ResultData>?> ?: return
+            val loading = Resource.Loading(page.url)
+            pendingPage = loading
+            metadataSwapTrace("ELEVATE_PAGE_LOADING gen=$serial urlHash=${Integer.toHexString(page.url.hashCode())}")
+            live.value = loading
+        }
+
         private fun nativeEpisodes(items: List<ResultEpisode>) {
             val live = episodeField?.get(model) as?
                 MutableLiveData<Resource<List<ResultEpisode>>?> ?: return
@@ -652,16 +639,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
 
         fun start() {
-            drawTree = root.viewTreeObserver.also { it.addOnPreDrawListener(drawListener) }
             metadataSwapTrace("ELEVATE_SCREEN_START fragment=${fragment.javaClass.simpleName}" +
                 " pageState=${model.page.value?.javaClass?.simpleName}" +
                 " pageField=${pageField != null} responseField=${responseField != null}")
             model.page.observe(fragment.viewLifecycleOwner, observer)
             model.episodes.observe(fragment.viewLifecycleOwner, episodeObserver)
             model.trailers.observe(fragment.viewLifecycleOwner, trailerObserver)
-            (model.page.value as? Resource.Success<ResultData>)?.value?.let(::update)
-            (model.episodes.value as? Resource.Success<List<ResultEpisode>>)
-                ?.value?.let { originalEpisodes = it; updateEpisodes() }
         }
 
         private fun update(page: ResultData) {
@@ -672,10 +655,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 rebuiltSeries = null
                 aioRebuilt = false
             }
+            val previous = swapped
             original = page
             swapped = null
             metadata = null
             detailId = null
+            nativeResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
+            pendingPage = null
             job?.cancel()
             episodeJob?.cancel()
             val generation = ++serial
@@ -688,20 +674,28 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 " featureOn=$featureOn policy=${policy ?: "absent"}" +
                 " originalSyncKeys=${page.syncData.size}")
             if (!featureOn || policy == "false") {
-                releaseMask()
+                if (previous != null &&
+                    (model.page.value as? Resource.Success<ResultData>)?.value === previous)
+                    nativePage(model, page)
+                if (previous != null) originalEpisodes?.let(::nativeEpisodes)
                 metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=${if (!featureOn) "feature_off" else "stremioc_policy_false"}")
                 return
             }
             val manifest = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty()
             if (provider == "AIO" && manifest.isBlank()) {
-                releaseMask()
+                if (previous != null &&
+                    (model.page.value as? Resource.Success<ResultData>)?.value === previous)
+                    nativePage(model, page)
+                if (previous != null) originalEpisodes?.let(::nativeEpisodes)
                 metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=aio_manifest_empty")
                 return
             }
-            swapActors = includeActors
-            pagePending = true
-            episodesPending = true
-            syncMask()
+            nativePageLoading(page)
+            nativeEpisodesLoading()
+            metadataSwapTrace("ELEVATE_LOAD_BEGIN gen=$generation responseType=${nativeResponse?.type}" +
+                " responseHash=${nativeResponse?.let(System::identityHashCode)}" +
+                " actorOwner=${if (includeActors) "swap" else "actor_hook"}" +
+                " provider=$provider policy=${policy ?: "absent"}")
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -709,10 +703,6 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     response, extraSync = page.syncData, urls = listOf(page.url))
                 val movie = response?.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
                     runCatching { JSONObject(page.url).optString("type") == "movie" }.getOrDefault(false)
-                if (movie) {
-                    episodesPending = false
-                    syncMask()
-                }
                 val locale = getCurrentLocale(application).replace('_', '-')
                 metadataSwapTrace("ELEVATE_IDS gen=$generation provider=$provider" +
                     " responsePresent=${currentResponse != null} responseMatches=${response != null}" +
@@ -766,8 +756,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
                 val current = resolved.first
                 if (current == null) {
-                    releaseMask()
-                    metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=no_metadata")
+                    if (generation != serial || original !== page ||
+                        model.page.value !== pendingPage) {
+                        metadataSwapTrace("ELEVATE_STALE gen=$generation stage=no_metadata")
+                        return@launch
+                    }
+                    metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=no_metadata fallback=original")
+                    pendingPage = null
+                    nativePage(model, page)
+                    originalEpisodes?.let(::nativeEpisodes)
                     return@launch
                 }
                 val generationMatches = generation == serial
@@ -778,7 +775,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB") == provider
                 val manifestMatches = provider != "AIO" || prefs.getString(
                     ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "") == manifest
-                val pageMatches = (model.page.value as? Resource.Success<ResultData>)?.value === page
+                val pageMatches = model.page.value === pendingPage
                 if (!generationMatches || !originalMatches || !fragmentReady ||
                     !featureStillOn || !providerMatches || !manifestMatches || !pageMatches) {
                     metadataSwapTrace("ELEVATE_STALE gen=$generation generation=$generationMatches" +
@@ -790,9 +787,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 detailId = resolved.second
                 detailLocale = locale
                 swapped = current.toPage(page, movie, includeActors)
+                pendingPage = null
                 swapped?.let { nativePage(model, it) }
-                pagePending = false
-                syncMask()
                 metadataSwapTrace("ELEVATE_FIELDS gen=$generation movie=$movie" +
                     " titleChanged=${swapped?.title != page.title}" +
                     " plotChanged=${swapped?.plotText != page.plotText}" +
@@ -979,19 +975,16 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 " aioEpisodes=${rebuilt.episodes.size}" +
                                 " seasons=${rebuilt.episodes.mapNotNull { it.season }.distinct().size}")
                             if (published) {
-                                // postEpisodes publishes LiveData asynchronously after rebuilding.
-                                root.post {
-                                    if (generation == serial && metadata === source && aioRebuilt) {
-                                        episodesPending = false
-                                        syncMask()
-                                    }
-                                }
+                                metadataSwapTrace("ELEVATE_EPISODES_FINAL gen=$generation" +
+                                    " mode=full_aio count=${rebuilt.episodes.size}")
                                 return@launch
                             }
                     }
                     // Do not publish a partial original/AIO episode merge.
-                    episodesPending = false
-                    syncMask()
+                    metadataSwapTrace("ELEVATE_EPISODES_FALLBACK gen=$generation reason=aio_rebuild_failed")
+                    val fallback = originalEpisodes.orEmpty()
+                    swappedEpisodes = fallback
+                    nativeEpisodes(fallback)
                     return@launch
                 }
                 var matched = 0
@@ -1023,8 +1016,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     })
                 swappedEpisodes = result
                 nativeEpisodes(result)
-                episodesPending = false
-                syncMask()
+                metadataSwapTrace("ELEVATE_EPISODES_FINAL gen=$generation mode=merged count=${result.size}")
                 metadataSwapTrace("ELEVATE_UI_STATE gen=" + generation +
                     " seasonOptions=" + (model.seasonSelections.value?.size ?: 0) +
                     " selectedSeason=" + (model.selectedSeasonIndex.value ?: -1) +
@@ -1037,7 +1029,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
         fun refresh() {
             val current = original ?: return
-            releaseMask()
+            metadataSwapTrace("ELEVATE_REFRESH gen=$serial urlHash=${Integer.toHexString(current.url.hashCode())}")
             job?.cancel()
             episodeJob?.cancel()
             serial++
@@ -1045,21 +1037,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
             detailId = null
             restoreNativeSeries()
             restoreNativeTrailers()
-            val visible = (model.page.value as? Resource.Success<ResultData>)?.value
-            if (visible === swapped) nativePage(model, current)
-            else update(current)
-            val items = originalEpisodes
-            if (items != null && (model.episodes.value as?
-                    Resource.Success<List<ResultEpisode>>)?.value === swappedEpisodes) {
-                swappedEpisodes = null
-                nativeEpisodes(items)
-            }
+            val visibleEpisodes = (model.episodes.value as?
+                Resource.Success<List<ResultEpisode>>)?.value
+            if (visibleEpisodes === swappedEpisodes) swappedEpisodes = null
+            update(current)
         }
 
         fun stop() {
-            releaseMask()
-            drawTree?.takeIf { it.isAlive }?.removeOnPreDrawListener(drawListener)
-            drawTree = null
             metadataSwapTrace("ELEVATE_SCREEN_STOP gen=$serial swapped=${swapped != null}")
             job?.cancel()
             episodeJob?.cancel()

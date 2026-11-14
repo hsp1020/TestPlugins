@@ -179,6 +179,8 @@ internal class DetailBackdropLayout(
         if (appliedHolderBackground == null) previousHolderBackground = container.background
         else if (container.background !== appliedHolderBackground) return
         appliedHolderBackground = background
+        android.util.Log.d("ElevateArtworkTrace", "BACKGROUND_REPLACE tv=$tv" +
+            " drawable=${background.javaClass.simpleName}")
         container.background = background
         edge?.invalidate()
     }
@@ -238,6 +240,9 @@ internal class DetailBackdropLayout(
     }
     private fun trackBackdrop(drawable: Drawable?) {
         if (trackedArtwork === drawable) return
+        android.util.Log.d("ElevateArtworkTrace", "BACKDROP_CHANGE tv=$tv" +
+            " previous=${trackedArtwork?.javaClass?.simpleName}" +
+            " next=${drawable?.javaClass?.simpleName}")
         trackedArtwork = drawable
         val bitmap = paletteBitmap(drawable)
 
@@ -555,6 +560,11 @@ internal class DetailBackdropLayout(
     private fun visibility(show: Boolean) {
         val imageAlpha = if (show && picture?.drawable != null) originalPictureAlpha else 0f
         val logoAlpha = if (show && logo?.drawable != null) originalLogoAlpha else 0f
+        if (picture?.alpha != imageAlpha || logo?.alpha != logoAlpha)
+            android.util.Log.d("ElevateArtworkTrace", "ARTWORK_VISIBILITY tv=$tv" +
+                " ready=$show image=${picture?.drawable != null}" +
+                " logo=${logo?.drawable != null} expectedLogo=${hasExpectedLogo()}" +
+                " imageAlpha=$imageAlpha logoAlpha=$logoAlpha")
         if (picture?.alpha != imageAlpha) picture?.alpha = imageAlpha
         if (logo?.alpha != logoAlpha) logo?.alpha = logoAlpha
     }
@@ -655,6 +665,8 @@ internal class DetailBackdropLayout(
     fun start() {
         val container = holder ?: return
         if (started || picture == null) return
+        android.util.Log.d("ElevateArtworkTrace", "LAYOUT_START tv=$tv" +
+            " photo=${picture?.drawable != null} logo=${logo?.drawable != null}")
 
         val context = root.context
 
@@ -713,8 +725,12 @@ internal class DetailBackdropLayout(
     }
     private fun showTitle(show: Boolean, hideOriginal: Boolean = false) {
         val visibility = if (show) View.VISIBLE else View.GONE
-        if (titleOverlay?.visibility != visibility) titleOverlay?.visibility = visibility
         val alpha = if (show || hideOriginal) 0f else originalTitleAlpha
+        if (titleOverlay?.visibility != visibility || title?.alpha != alpha)
+            android.util.Log.d("ElevateArtworkTrace", "TITLE_CHANGE tv=$tv" +
+                " overlay=$show hideOriginal=$hideOriginal alpha=$alpha" +
+                " expectedLogo=${hasExpectedLogo()}")
+        if (titleOverlay?.visibility != visibility) titleOverlay?.visibility = visibility
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
@@ -904,6 +920,7 @@ internal class DetailBackdropLayout(
     }
     fun stop() {
         if (!started) return
+        android.util.Log.d("ElevateArtworkTrace", "LAYOUT_STOP tv=$tv")
         started = false
         paletteJob?.cancel()
         paletteScope.cancel()

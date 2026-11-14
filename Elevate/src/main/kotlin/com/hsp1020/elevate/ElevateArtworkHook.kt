@@ -26,6 +26,10 @@ import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 
+private fun artworkTrace(message: String) {
+    android.util.Log.d("ElevateArtworkTrace", message)
+}
+
 /**
  * Presentation-only hook. StremioC and other providers stay untouched:
  * StremioC can supply the optional multi-trailer and language flags through syncData.
@@ -86,11 +90,21 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             }
         )
         private val trailers = TrailerChooser(fragment, root, fragment.arguments?.getString("url"))
-        private val pageObserver = Observer<Resource<ResultData>?> {
-            root.post { if (fragment.view === root) restoreNativeArtwork() }
+        private val pageObserver = Observer<Resource<ResultData>?> { state ->
+            val data = (state as? Resource.Success<ResultData>)?.value
+            artworkTrace("PAGE fragment=${fragment.javaClass.simpleName}" +
+                " phase=${state?.javaClass?.simpleName}" +
+                " source=${data?.syncData?.get("metadata_swap_source") ?: "native"}" +
+                " urlHash=${data?.url?.hashCode()?.let(Integer::toHexString)}" +
+                " logo=${!data?.logoUrl.isNullOrBlank()}" +
+                " backdrop=${!data?.posterBackgroundImage.isNullOrBlank()}")
+            if (data != null)
+                root.post { if (fragment.view === root) restoreNativeArtwork() }
         }
         private val nativeTrailerObserver =
             Observer<List<com.lagradost.cloudstream3.ui.result.ExtractedTrailerData>> {
+                artworkTrace("NATIVE_TRAILERS fragment=${fragment.javaClass.simpleName}" +
+                    " count=${it.size} playable=${it.any { item -> item.mirros.isNotEmpty() }}")
                 restoreNativeArtwork()
                 if (it.any { item -> item.mirros.isNotEmpty() }) {
                     (fragment as? ResultFragmentPhone)?.player?.onPause()
@@ -103,29 +117,34 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
         }
         private fun restoreNativeArtwork() {
             if (fragment.view !== root || !isLayout(PHONE)) return
+            val data = page() ?: return
             val nativeTrailers = model.trailers.value.orEmpty()
             if (nativeTrailers.none { it.mirros.isNotEmpty() }) return
             val holder = find("result_poster_background_holder")
+            val recovered = holder?.visibility != View.VISIBLE || holder?.alpha != 1f
             holder?.clearAnimation()
             if (holder?.visibility != View.VISIBLE) holder?.visibility = View.VISIBLE
             if (holder?.alpha != 1f) holder?.alpha = 1f
             find("result_smallscreen_holder")?.visibility = View.INVISIBLE
+            if (recovered) artworkTrace("BACKDROP_RESTORE fragment=${fragment.javaClass.simpleName}")
 
             // Native ResultFragmentPhone.loadTrailer() deliberately calls bindLogo(null).
             // Restore the actual metadata logo once, after the native trailer observer.
-            val data = page() ?: return
             val logoUrl = data.logoUrl?.takeIf { it.isNotBlank() }
             val logoView = find("background_poster_watermark_badge") as? ImageView
             val titleView = find("result_title") as? TextView
             if (logoView != null && titleView != null && logoUrl != null &&
                 (lastRestoredLogo != logoUrl || logoView.visibility != View.VISIBLE)) {
                 lastRestoredLogo = logoUrl
+                artworkTrace("LOGO_REBIND fragment=${fragment.javaClass.simpleName}" +
+                    " logoHash=${Integer.toHexString(logoUrl.hashCode())}")
                 ResultFragment.bindLogo(
                     logoUrl, data.posterHeaders, logoView, titleView
                 )
             }
         }
         fun start() {
+            artworkTrace("START fragment=${fragment.javaClass.simpleName}")
             runCatching { backdrop.start() }
             runCatching { trailers.start() }
             model.page.observe(fragment.viewLifecycleOwner, pageObserver)
@@ -133,6 +152,7 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             restoreNativeArtwork()
         }
         fun stop(restoreNative: Boolean = false) {
+            artworkTrace("STOP fragment=${fragment.javaClass.simpleName} restore=$restoreNative")
             model.page.removeObserver(pageObserver)
             model.trailers.removeObserver(nativeTrailerObserver)
             trailers.stop()
