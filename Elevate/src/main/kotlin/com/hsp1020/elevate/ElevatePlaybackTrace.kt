@@ -54,6 +54,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
 
     override fun onActivityPostCreated(activity: Activity, state: Bundle?) {
         ElevateActivityResultOwner.track(activity, "POST_CREATE")
+        DownloadedPlayerLeakCleanup.trackLivePlayers(activity)
     }
 
     override fun onActivityPreDestroyed(activity: Activity) {
@@ -77,6 +78,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     override fun onActivityStarted(activity: Activity) {
         // Also covers Android versions without onActivityPostCreated().
         ElevateActivityResultOwner.track(activity, "STARTED")
+        DownloadedPlayerLeakCleanup.trackLivePlayers(activity)
     }
     override fun onActivityResumed(activity: Activity) {
         ReceiverRegistrationTrace.snapshot(activity, "RESUMED")
