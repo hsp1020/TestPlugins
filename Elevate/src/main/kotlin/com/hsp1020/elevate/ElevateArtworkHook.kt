@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
+import coil3.result
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -111,7 +112,6 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
                     (fragment as? ResultFragmentPhone)?.player?.onPause()
                 }
             }
-        private var lastRestoredLogo: String? = null
         private fun find(name: String): View? {
             val id = root.resources.getIdentifier(name, "id", root.context.packageName)
             return if (id == 0) null else root.findViewById(id)
@@ -120,14 +120,15 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             if (fragment.view !== root || !isLayout(PHONE)) return
             val data = page() ?: return
             val nativeTrailers = model.trailers.value.orEmpty()
-            if (nativeTrailers.none { it.mirros.isNotEmpty() }) return
-            val holder = find("result_poster_background_holder")
-            val recovered = holder?.visibility != View.VISIBLE || holder?.alpha != 1f
-            holder?.clearAnimation()
-            if (holder?.visibility != View.VISIBLE) holder?.visibility = View.VISIBLE
-            if (holder?.alpha != 1f) holder?.alpha = 1f
-            find("result_smallscreen_holder")?.visibility = View.INVISIBLE
-            if (recovered) artworkTrace("BACKDROP_RESTORE fragment=${fragment.javaClass.simpleName}")
+            if (nativeTrailers.any { it.mirros.isNotEmpty() }) {
+                val holder = find("result_poster_background_holder")
+                val recovered = holder?.visibility != View.VISIBLE || holder?.alpha != 1f
+                holder?.clearAnimation()
+                if (holder?.visibility != View.VISIBLE) holder?.visibility = View.VISIBLE
+                if (holder?.alpha != 1f) holder?.alpha = 1f
+                find("result_smallscreen_holder")?.visibility = View.INVISIBLE
+                if (recovered) artworkTrace("BACKDROP_RESTORE fragment=${fragment.javaClass.simpleName}")
+            }
 
             // Native ResultFragmentPhone.loadTrailer() deliberately calls bindLogo(null).
             // Restore the actual metadata logo once, after the native trailer observer.
@@ -135,10 +136,13 @@ internal class ElevateArtworkHook(private val app: Application) : Application.Ac
             val logoView = find("background_poster_watermark_badge") as? ImageView
             val titleView = find("result_title") as? TextView
             if (logoView != null && titleView != null && logoUrl != null &&
-                (lastRestoredLogo != logoUrl || logoView.visibility != View.VISIBLE)) {
-                lastRestoredLogo = logoUrl
+                logoView.visibility == View.GONE &&
+                logoView.result?.request?.data?.toString() != logoUrl) {
+                // Native bindLogo(null) can dispose a successfully loaded swap logo.
+                // Rebind only if that request was cancelled, never on a genuine image error.
                 artworkTrace("LOGO_REBIND fragment=${fragment.javaClass.simpleName}" +
-                    " logoHash=${Integer.toHexString(logoUrl.hashCode())}")
+                    " logoHash=${Integer.toHexString(logoUrl.hashCode())}" +
+                    " reason=disposed_or_replaced")
                 ResultFragment.bindLogo(
                     logoUrl, data.posterHeaders, logoView, titleView
                 )

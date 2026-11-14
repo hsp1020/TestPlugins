@@ -567,7 +567,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     if (page === swapped) {
                         metadataSwapTrace("ELEVATE_REEMIT_OWN gen=$serial")
                     } else if (original?.url == page.url &&
-                        response != null && response === nativeResponse) {
+                        response != null && (response === nativeResponse ||
+                            response === rebuiltSeries)) {
                         val current = metadata
                         if (current != null && swapped != null) {
                             // setMeta() republishes the same LoadResponse. Keep its updated
@@ -978,12 +979,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         val rebuilt = buildAioSeries(response, source, tmdbEpisodes)
                         if (nativeSeries == null) nativeSeries = response
                             rebuildingHost = true
+                            rebuiltSeries = rebuilt
                             responseField?.set(model, rebuilt)
                             val published = rebuildHostEpisodes(model, rebuilt)
                             if (published) {
-                                rebuiltSeries = rebuilt
                                 aioRebuilt = true
-                            } else responseField?.set(model, response)
+                            } else {
+                                rebuiltSeries = null
+                                responseField?.set(model, response)
+                            }
                             rebuildingHost = false
                             metadataSwapTrace("ELEVATE_AIO_REBUILD gen=$generation" +
                                 " published=$published originalEpisodes=${response.episodes.size}" +
