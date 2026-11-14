@@ -277,7 +277,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
     }
 
     private suspend fun tmdbLogo(
-        json: JSONObject, id: String, movie: Boolean, locale: String
+        json: JSONObject, id: String, movie: Boolean, locale: String,
+        addonLogoPreferred: Boolean
     ): Pair<String?, Boolean> {
         val preferred = locale.substringBefore('-').lowercase(Locale.ROOT)
         fun select(array: JSONArray?, lang: String): JSONObject? {
@@ -289,10 +290,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
         val logos = json.optJSONObject("images")?.optJSONArray("logos")
         val original = json.string("original_language")?.lowercase(Locale.ROOT)
-        val selected = select(logos, preferred) ?: select(logos, "en")
-            ?: original?.takeIf { it != preferred && it != "en" }?.let { lang ->
-                select(ElevateTmdbMetadata.originalLogos(id, movie, lang), lang)
-            }
+        val preferredLogo = select(logos, preferred)
+        val selected = if (addonLogoPreferred || preferredLogo != null) preferredLogo
+            else select(logos, "en")
+                ?: original?.takeIf { it != preferred && it != "en" }?.let { lang ->
+                    select(ElevateTmdbMetadata.originalLogos(id, movie, lang), lang)
+                }
         val path = selected?.string("file_path")
         return path?.let {
             "https://image.tmdb.org/t/p/w500${if (it.endsWith(".svg", true)) it.dropLast(4) + ".png" else it}"
@@ -319,7 +322,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
     }
 
     private suspend fun metadataFromTmdb(
-        json: JSONObject, id: String, movie: Boolean, locale: String
+        json: JSONObject, id: String, movie: Boolean, locale: String,
+        addonLogoPreferred: Boolean
     ): Metadata? {
         val title = json.string("title", "name") ?: return null
         val overview = json.string("overview")
@@ -327,7 +331,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             ?.let { "https://image.tmdb.org/t/p/w780$it" }
         val backdrop = json.string("backdrop_path")?.takeIf { it.startsWith("/") }
             ?.let { "https://image.tmdb.org/t/p/original$it" }
-        val (logo, foreign) = tmdbLogo(json, id, movie, locale)
+        val (logo, foreign) = tmdbLogo(json, id, movie, locale, addonLogoPreferred)
         val year = json.string("release_date", "first_air_date")?.take(4)
             ?.takeIf { it.length == 4 && it.all(Char::isDigit) }
         val rating = json.optDouble("vote_average", Double.NaN).takeIf {
@@ -558,7 +562,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         val tmdb = id?.let { key ->
                             ElevateTmdbMetadata.details(key, movie, locale,
                                 includeCredits = true)?.let { json ->
-                                metadataFromTmdb(json, key, movie, locale).let { details ->
+                                metadataFromTmdb(json, key, movie, locale,
+                                    addonLogoPreferred = provider == "AIO" &&
+                                        !aio?.logo.isNullOrBlank()).let { details ->
                                     if (details == null) null else {
                                         val (actors, people) = tmdbActors(
                                             ElevateTmdbMetadata.credits(key, movie, locale))

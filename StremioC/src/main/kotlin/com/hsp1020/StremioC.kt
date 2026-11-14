@@ -4550,7 +4550,8 @@ open class StremioC(
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
             preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
             recommendationMalId: Int? = null,
-            earlySimklJob: Deferred<List<SimklSuggestion>>? = null
+            earlySimklJob: Deferred<List<SimklSuggestion>>? = null,
+            addonLogoPreferred: Boolean = false
         ): FetchedTmdbData {
             
             var fetchedRecommendations: List<RecommendationCandidate>? = null
@@ -4751,16 +4752,18 @@ open class StremioC(
             val preferredLogo = detailRes.images?.logos.orEmpty()
                 .filter { logo ->
                     val language = logo.iso_639_1?.lowercase()
-                    !logo.file_path.isNullOrBlank() && (language == preferred || language == "en")
+                    !logo.file_path.isNullOrBlank() &&
+                        (language == preferred || (!addonLogoPreferred && language == "en"))
                 }
                 .maxWithOrNull(compareBy<TmdbLogo> {
                     when (it.iso_639_1?.lowercase()) { preferred -> 3; "en" -> 2; else -> 1 }
                 }.thenBy { it.vote_average ?: 0.0 })
-            // Only request the original language when the existing preferred/English
-            // response has no logo. Keep the addon's established final-logo priority.
+            // If the addon logo wins, TMDB is consulted only to decide whether
+            // the app-language logo exists; no English/original fallback is needed.
             val originalLanguage = detailRes.original_language?.lowercase()
                 ?.takeIf { it.matches(Regex("[a-z]{2,3}")) && it != preferred && it != "en" }
-            val originalLogo = if (preferredLogo == null && originalLanguage != null) {
+            val originalLogo = if (!addonLogoPreferred &&
+                preferredLogo == null && originalLanguage != null) {
                 val url = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr/images",
                     "include_image_language" to originalLanguage)
                 runSuspendCatching {
@@ -5001,6 +5004,19 @@ open class StremioC(
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val originalName = detailedEntry.name ?: this@CatalogEntry.name
             val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
+            // Skip unsupported SVG URLs, including an SVG wrapped by an art proxy.
+            fun isSvgLogo(url: String): Boolean {
+                val parsed = url.toHttpUrlOrNull() ?: return url.substringBefore('?')
+                    .endsWith(".svg", ignoreCase = true)
+                return parsed.encodedPath.endsWith(".svg", ignoreCase = true) ||
+                    parsed.queryParameter("url")?.toHttpUrlOrNull()?.encodedPath
+                        ?.endsWith(".svg", ignoreCase = true) == true
+            }
+            // Prefer the active addon's meta.logo regardless of which addon supplies it.
+            val addonLogo = detailedEntry.logo?.takeIf { it.isNotBlank() && !isSvgLogo(it) }
+            val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
+                this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
+                .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
             val genreTargets = (detailedEntry.links.orEmpty() + this@CatalogEntry.links.orEmpty())
                 .mapNotNull { link ->
                     val name = link.name?.takeIf { it in finalGenre.orEmpty() }
@@ -5108,7 +5124,9 @@ open class StremioC(
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                            recommendationMalId, resolvedSimklJob)
+                            recommendationMalId, resolvedSimklJob,
+                            addonLogoPreferred = !eligibleNonstandardId &&
+                                (addonLogo != null || fallbackAddonLogo != null))
                     }
                 } catch (e: Exception) {
                 }
@@ -5236,26 +5254,13 @@ open class StremioC(
                 this@CatalogEntry.kitsuIdExt != null || finalKitsuId != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
-            // Skip unsupported SVG URLs, including an SVG wrapped by an art proxy.
-            fun isSvgLogo(url: String): Boolean {
-                val parsed = url.toHttpUrlOrNull() ?: return url.substringBefore('?')
-                    .endsWith(".svg", ignoreCase = true)
-                return parsed.encodedPath.endsWith(".svg", ignoreCase = true) ||
-                    parsed.queryParameter("url")?.toHttpUrlOrNull()?.encodedPath
-                        ?.endsWith(".svg", ignoreCase = true) == true
-            }
-            // Prefer the active addon's meta.logo regardless of which addon supplies it.
-            val addonLogo = detailedEntry.logo?.takeIf { it.isNotBlank() && !isSvgLogo(it) }
-            val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
-                this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
-                .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
             val finalLogo = if (eligibleNonstandardId)
                 tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo ?: fallbackAddonLogo
             else addonLogo ?: fallbackAddonLogo
                 ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
 
-            // Keep TMDB's preferred-language/English selection for the title
-            // fallback even when a custom AIOMetadata logo is displayed.
+            // With an addon logo, only the app-language TMDB logo decides whether
+            // to show the title alongside it; without one, use normal TMDB fallback.
             val finalLogoFallback = stremioLogoNeedsTitle(
                 finalLogo, tmdbData?.fetchedLogo, tmdbData?.fetchedLogoFallback == true
             )
