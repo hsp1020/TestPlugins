@@ -1018,14 +1018,19 @@ class YoutubeProvider(
     ) {
         val rendererValue = mapper.readValue(parser, Any::class.java) ?: return
         state.processedAny = true
-        val wrapper = mapOf<String, Any>(field to rendererValue)
-        processRecursive(
-            wrapper,
-            state.results,
-            state.seenIds,
-            playlistMode = false,
-            isSearch = false
-        )
+        if (rendererValue is Map<*, *>) {
+            val result = collectFromRenderer(
+                rendererValue, state.seenIds, isSearch = false, rendererField = field
+            )
+            if (result != null) {
+                state.results.add(result)
+                return
+            }
+            // A synthetic wrapper would recurse into its renderer after a miss.
+            processRecursive(rendererValue, state.results, state.seenIds, false, depth = 1)
+        } else {
+            processRecursive(mapOf(field to rendererValue), state.results, state.seenIds, false)
+        }
     }
 
     private fun streamContinuationRendererToken(
@@ -1609,21 +1614,22 @@ class YoutubeProvider(
         if (obj == null) return ""
         if (obj is String) return obj
         if (obj is Map<*, *>) {
-            return obj.getString("simpleText")
-                ?: obj.getString("text")
-                ?: obj.getString("content")
-                ?: obj.getString("label")
-                ?: (obj.getListKey("runs") ?: YoutubeUtils.getListKeyFromAny(obj, "runs"))?.joinToString("") { run ->
+            obj.getString("simpleText")?.let { return it }
+            obj.getString("text")?.let { return it }
+            obj.getString("content")?.let { return it }
+            obj.getString("label")?.let { return it }
+            val runs = obj.getListKey("runs") ?: YoutubeUtils.getListKeyFromAny(obj, "runs")
+            if (runs != null) {
+                val result = StringBuilder()
+                for (run in runs) {
                     when (run) {
-                        is String -> run
-                        is Map<*, *> -> (run["text"] as? String)
-                            ?: run.getString("simpleText")
-                            ?: ""
-
-                        else -> ""
+                        is String -> result.append(run)
+                        is Map<*, *> -> result.append((run["text"] as? String)
+                            ?: run.getString("simpleText") ?: "")
                     }
-                }.orEmpty()
-                ?: obj.getMapKey("text")?.let { getText(it) }.orEmpty()
+                }
+                return result.toString()
+            }
         }
         return ""
     }
@@ -1667,14 +1673,18 @@ class YoutubeProvider(
                 }
             }
 
-            for ((_, value) in obj) {
-                val found = findMembersBadgeRecursive(value, depth + 1)
-                if (found != null) return found
+            for (value in obj.values) {
+                if (value is Map<*, *> || value is List<*>) {
+                    val found = findMembersBadgeRecursive(value, depth + 1)
+                    if (found != null) return found
+                }
             }
         } else if (obj is List<*>) {
             for (item in obj) {
-                val found = findMembersBadgeRecursive(item, depth + 1)
-                if (found != null) return found
+                if (item is Map<*, *> || item is List<*>) {
+                    val found = findMembersBadgeRecursive(item, depth + 1)
+                    if (found != null) return found
+                }
             }
         }
 
@@ -1762,27 +1772,33 @@ class YoutubeProvider(
 
     /** Inspect the nested JSON without constructing Map.toString() output. */
     private fun containsReelWatchEndpoint(value: Any?): Boolean = when (value) {
-        null -> false
         is Map<*, *> -> value.any { (key, nested) ->
-            containsReelWatchEndpoint(key) || containsReelWatchEndpoint(nested)
+            (key is String && key.contains("reelWatchEndpoint")) ||
+                containsReelWatchEndpoint(nested)
         }
         is Collection<*> -> value.any { containsReelWatchEndpoint(it) }
-        else -> value.toString().contains("reelWatchEndpoint")
+        is String -> value.contains("reelWatchEndpoint")
+        else -> false
     }
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
         playlistId: String? = null,
-        isSearch: Boolean
+        isSearch: Boolean,
+        rendererField: String? = null
     ): SearchResponse? {
         if (renderer == null) return null
 
-        val videoData = renderer.getMapKey("videoRenderer")
-            ?: renderer.getMapKey("compactVideoRenderer")
-            ?: renderer.getMapKey("gridVideoRenderer")
-            ?: renderer.getMapKey("playlistVideoRenderer")       
-            ?: renderer.getMapKey("playlistPanelVideoRenderer")  
+        val videoData = when (rendererField) {
+            "videoRenderer", "compactVideoRenderer", "gridVideoRenderer",
+            "playlistVideoRenderer", "playlistPanelVideoRenderer" -> renderer
+            else -> renderer.getMapKey("videoRenderer")
+                ?: renderer.getMapKey("compactVideoRenderer")
+                ?: renderer.getMapKey("gridVideoRenderer")
+                ?: renderer.getMapKey("playlistVideoRenderer")
+                ?: renderer.getMapKey("playlistPanelVideoRenderer")
+        }
 
         if (videoData != null) {
             val videoId = videoData.getString("videoId")
@@ -1852,10 +1868,13 @@ class YoutubeProvider(
             return null
         }
 
-        val richContent = renderer.getMapKey("richItemRenderer")?.getMapKey("content")
-        val shortsData = renderer.getMapKey("reelItemRenderer")
-            ?: renderer.getMapKey("shortsLockupViewModel")
-            ?: richContent?.getMapKey("shortsLockupViewModel")
+        val richContent = (if (rendererField == "richItemRenderer") renderer
+            else renderer.getMapKey("richItemRenderer"))?.getMapKey("content")
+        val shortsData = if (rendererField == "reelItemRenderer" ||
+            rendererField == "shortsLockupViewModel") renderer else
+            renderer.getMapKey("reelItemRenderer")
+                ?: renderer.getMapKey("shortsLockupViewModel")
+                ?: richContent?.getMapKey("shortsLockupViewModel")
 
         if (shortsData != null) {
             val onTap = shortsData.getMapKey("onTap")
@@ -1916,7 +1935,8 @@ class YoutubeProvider(
             }
         }
 
-        val lockup = renderer.getMapKey("lockupViewModel")
+        val lockup = if (rendererField == "lockupViewModel") renderer
+            else renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
             val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
@@ -2067,7 +2087,8 @@ class YoutubeProvider(
             }
         }
 
-        val channelData = renderer.getMapKey("channelRenderer")
+        val channelData = if (rendererField == "channelRenderer") renderer
+            else renderer.getMapKey("channelRenderer")
         if (channelData != null) {
             val id = channelData.getString("channelId")
             if (!id.isNullOrBlank() && seenIds.add(id)) {
@@ -3059,7 +3080,7 @@ class YoutubeProvider(
      * The existing Map parser remains the fallback for response layouts without this array.
      * Unlike chip pagination, channel rendering requires the original Episode metadata.
      */
-    private fun streamChannelContinuationItems(body: String): List<*>? = try {
+    private fun streamChannelContinuationItems(body: ByteArray): List<*>? = try {
         mapper.factory.createParser(body).use { parser ->
             fun scan(depth: Int): List<*>? {
                 if (depth > 32) {
@@ -3306,6 +3327,7 @@ class YoutubeProvider(
         }
         when (obj) {
             is Map<*, *> -> {
+                // Keep the original two-pass order: direct keys before descendants.
                 for ((k, v) in obj) {
                     if (k is String && TARGET_RENDERER_KEYS.contains(k)) {
                         val match = v as? Map<*, *>
@@ -3316,12 +3338,16 @@ class YoutubeProvider(
                     }
                 }
                 for (value in obj.values) {
-                    findAllRenderers(value, outRenderers, depth + 1, metrics)
+                    if (value is Map<*, *> || value is List<*>) {
+                        findAllRenderers(value, outRenderers, depth + 1, metrics)
+                    }
                 }
             }
             is List<*> -> {
                 for (item in obj) {
-                    findAllRenderers(item, outRenderers, depth + 1, metrics)
+                    if (item is Map<*, *> || item is List<*>) {
+                        findAllRenderers(item, outRenderers, depth + 1, metrics)
+                    }
                 }
             }
         }
@@ -4137,7 +4163,7 @@ class YoutubeProvider(
                                 val allocationRun = System.getProperty("hsp1020.java.alloc.run")
                                 val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                                 val readStartNs = if (allocationRun != null) System.nanoTime() else 0L
-                                val responseBody = httpResponse.textLarge
+                                val responseBody = httpResponse.body().bytes()
                                 val readUs = if (allocationRun != null) (System.nanoTime() - readStartNs) / 1_000L else 0L
                                 val streamStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                 var parseMode = "STREAM_ITEMS"
@@ -4148,7 +4174,10 @@ class YoutubeProvider(
                                 if (javaContinuationItems == null) {
                                     parseMode = "FULL_FALLBACK"
                                     val fallbackStartNs = if (allocationRun != null) System.nanoTime() else 0L
-                                    val fullResponse = httpResponse.parsedSafe<Map<String, Any>>()
+                                    @Suppress("UNCHECKED_CAST")
+                                    val fullResponse = runCatching {
+                                        mapper.readValue(responseBody, Map::class.java) as? Map<String, Any>
+                                    }.getOrNull()
                                     if (allocationRun != null) fallbackUs = (System.nanoTime() - fallbackStartNs) / 1_000L
                                     if (fullResponse != null) {
                                         val lookupStartNs = if (allocationRun != null) System.nanoTime() else 0L
@@ -4158,7 +4187,7 @@ class YoutubeProvider(
                                 }
                                 if (allocationRun != null) {
                                     Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_JSON " +
-                                        "tab=$tabName page=$pagesFetchedLocal chars=${responseBody.length} " +
+                                        "tab=$tabName page=$pagesFetchedLocal bytes=${responseBody.size} " +
                                         "readUs=$readUs streamUs=$streamUs fallbackUs=$fallbackUs lookupUs=$lookupUs " +
                                         "mode=$parseMode parsed=${javaContinuationItems != null}")
                                 }
