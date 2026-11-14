@@ -23,11 +23,11 @@ internal object ElevateTmdbMetadata {
         val detailLocale: String?, val details: JSONObject?
     )
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val cache = LinkedHashMap<String, Entry>()
+    private val cache = LinkedHashMap<String, Entry>(128, 0.75f, true)
     private val flights = mutableMapOf<String, Deferred<Entry?>>()
-    private val originLogoCache = LinkedHashMap<String, Pair<Long, JSONArray>>()
+    private val originLogoCache = LinkedHashMap<String, Pair<Long, JSONArray>>(128, 0.75f, true)
     private val originLogoFlights = mutableMapOf<String, Deferred<JSONArray?>>()
-    private val seasonCache = LinkedHashMap<String, Pair<Long, JSONObject>>()
+    private val seasonCache = LinkedHashMap<String, Pair<Long, JSONObject>>(128, 0.75f, true)
     private val seasonFlights = mutableMapOf<String, Deferred<JSONObject?>>()
 
     private fun language(raw: String?): String? {

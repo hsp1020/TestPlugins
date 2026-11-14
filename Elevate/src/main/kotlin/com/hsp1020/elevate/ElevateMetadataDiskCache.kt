@@ -14,6 +14,7 @@ internal object ElevateMetadataDiskCache {
     private const val MAX_FILE_BYTES = 2L * 1024 * 1024
     private const val MAX_TOTAL_BYTES = 50L * 1024 * 1024
     private val lock = Any()
+    private var cleanedOldTemps = false
     private val limits = mapOf("manifest" to 100, "meta" to 200,
         "tmdb_detail" to 700, "tmdb_season" to 300, "tmdb_logo" to 200)
     private var quotaChecked = false
@@ -44,11 +45,19 @@ internal object ElevateMetadataDiskCache {
                 val ttl = reader.readLine()?.toLongOrNull() ?: return@use null
                 val now = System.currentTimeMillis()
                 if (ttl <= 0 || at > now || now - at >= ttl) return@use null
-                val body = reader.readText()
-                if (body.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES)
+                val body = StringBuilder()
+                val chunk = CharArray(8192)
+                while (true) {
+                    val size = reader.read(chunk)
+                    if (size < 0) break
+                    if (body.length + size > MAX_RAW_BYTES) return@use null
+                    body.append(chunk, 0, size)
+                }
+                val value = body.toString()
+                if (value.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES)
                     return@use null
                 target.setLastModified(now)
-                Entry(body, at, ttl)
+                Entry(value, at, ttl)
             }
         } catch (_: Exception) { null }
     }
@@ -71,6 +80,12 @@ internal object ElevateMetadataDiskCache {
                 }
                 if (temp.length() > MAX_FILE_BYTES) return@withContext
                 synchronized(lock) {
+                    if (!cleanedOldTemps) {
+                        cleanedOldTemps = true
+                        val cutoff = System.currentTimeMillis() - 10L * 60 * 1000
+                        dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") &&
+                            it != temp && it.lastModified() < cutoff }?.forEach { it.delete() }
+                    }
                     if (temp.renameTo(file(dir, kind, key))) {
                         writesSinceQuota++
                         val now = android.os.SystemClock.elapsedRealtime()

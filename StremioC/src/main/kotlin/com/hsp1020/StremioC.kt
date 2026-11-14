@@ -210,11 +210,19 @@ private object MetadataDiskCache {
         // Writers publish complete files using atomic rename. Reading a completed
         // file does not need the writer's global eviction/quota monitor.
         val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
-        if (!file.isFile) return@withContext null
+        if (!file.isFile || file.length() > MAX_ENTRY_BYTES) return@withContext null
         try {
-            val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use {
-                it.readText()
-            }
+            val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { reader ->
+                val text = StringBuilder()
+                val chunk = CharArray(8192)
+                while (true) {
+                    val size = reader.read(chunk)
+                    if (size < 0) break
+                    if (text.length + size > MAX_RAW_BYTES + 64) return@use null
+                    text.append(chunk, 0, size)
+                }
+                text.toString()
+            } ?: return@withContext null
             val stamp = body.substringBefore('\n').toLongOrNull()
             val now = System.currentTimeMillis()
             val firstNewline = body.indexOf('\n')
@@ -235,8 +243,10 @@ private object MetadataDiskCache {
                 null
             } else {
                 file.setLastModified(now)
-                Entry(body.substring(if (kind == "meta") secondNewline + 1
-                    else firstNewline + 1), stamp, ttl)
+                val json = body.substring(if (kind == "meta") secondNewline + 1
+                    else firstNewline + 1)
+                if (json.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES) null
+                else Entry(json, stamp, ttl)
             }
         } catch (_: Exception) {
             // An eviction racing this read is a cache miss, never a playback error.

@@ -17,8 +17,6 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.SeasonData
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
-import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
@@ -102,7 +100,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 duration = duration ?: other.duration,
                 certification = certification ?: other.certification,
                 ongoing = ongoing ?: other.ongoing,
-                trailers = other.trailers.ifEmpty { trailers },
+                trailers = trailers.ifEmpty { other.trailers },
                 episodes = episodes, actors = actors ?: other.actors,
                 people = people ?: other.people,
                 logoForeign = (logo ?: other.logo) != null &&
@@ -609,14 +607,14 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val generation = ++serial
             val featureOn = prefs.getBoolean(ElevateFeature.METADATA_SWAP.name, false)
             val policy = page.syncData["metadata_swap_allowed"]
+            val provider = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB")
             metadataSwapTrace("ELEVATE_GATE gen=$generation pageHash=${Integer.toHexString(page.url.hashCode())}" +
                 " featureOn=$featureOn policy=${policy ?: "absent"}" +
                 " originalSyncKeys=${page.syncData.size}")
-            if (!featureOn || policy == "false") {
-                metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=${if (!featureOn) "feature_off" else "stremioc_policy_false"}")
+            if (!featureOn || policy == "false" || (provider == "AIO" && policy != "true")) {
+                metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=${if (!featureOn) "feature_off" else "stremioc_policy_denied"}")
                 return
             }
-            val provider = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB")
             val manifest = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty()
             if (provider == "AIO" && manifest.isBlank()) {
                 metadataSwapTrace("ELEVATE_SKIP gen=$generation reason=aio_manifest_empty")
@@ -664,7 +662,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         }
                         metadataSwapTrace("ELEVATE_TMDB_RESULT gen=$generation found=${tmdb != null}" +
                             " logo=${!tmdb?.logo.isNullOrBlank()} cast=${tmdb?.actors?.size ?: 0}")
-                        (if (provider == "AIO") aio?.withFallback(tmdb) ?: tmdb
+                        (if (provider == "AIO") aio?.withFallback(tmdb)
                             else tmdb) to id
                     }
                 } catch (cancelled: CancellationException) {
@@ -723,64 +721,54 @@ internal class ElevateMetadataSwap(private val application: Application) :
             tmdb: Map<Pair<Int, Int>, EpisodeMeta>
         ): TvSeriesLoadResponse? {
             if (source.videos.isEmpty()) return null
-            val special = source.videos.keys.any { it.first == 0 }
             val existingSpecial = response.seasonNames.orEmpty()
                 .firstOrNull { it.name?.endsWith(" S") == true }?.season
-            val specialSeason = if (special)
+            val specialSeason = if (source.videos.keys.any { it.first == 0 })
                 (source.videos.keys.maxOfOrNull { it.first } ?: 0) + 1 else null
-            val nativeByKey = response.episodes.associateBy {
-                (if (existingSpecial != null && it.season == existingSpecial) 0
-                    else it.season ?: 1) to (it.episode ?: 1)
+            fun nativeKey(episode: Episode): Pair<Int, Int> =
+                (if (existingSpecial != null && episode.season == existingSpecial) 0
+                    else episode.season ?: 1) to (episode.episode ?: 1)
+            val nativeByKey = response.episodes.associateBy(::nativeKey)
+            val template = response.episodes.firstOrNull {
+                it.data.trim().startsWith("{")
             }
-            val template = response.episodes.firstOrNull { it.data.trim().startsWith("{") }
             val seed = template?.let { runCatching { JSONObject(it.data) }.getOrNull() }
-                ?: run {
-                    val url = response.url
-                    val base = url.substringBefore("/meta/", "")
-                    val id = Uri.decode(url.substringBefore('?').substringAfterLast('/')
-                        .removeSuffix(".json"))
-                    if (base.isBlank() || id.isBlank()) return null
-                    JSONObject().put("type", "series").put("id", id)
-                        .put("addonUrl", base)
-                        .put("isAnime", response.type == TvType.Anime)
-                }
-            if (seed.optString("id").isBlank() || seed.optString("addonUrl").isBlank()) return null
-            val provider = if (template == null)
-                APIHolder.getApiFromNameNull(response.apiName) ?: return null else null
-            val result = ArrayList<Episode>(source.videos.size)
-            val sourceSorted = source.videos.entries.sortedWith(
+            val result = ArrayList<Episode>(maxOf(response.episodes.size, source.videos.size))
+            val applied = HashSet<Pair<Int, Int>>()
+            val sorted = source.videos.entries.sortedWith(
                 compareBy<Map.Entry<Pair<Int, Int>, AioVideo>>(
                     { if (it.key.first == 0) Int.MAX_VALUE else it.key.first },
                     { it.key.second }
                 )
             )
-            for ((key, video) in sourceSorted) {
+            for ((key, video) in sorted) {
                 val (season, number) = key
                 val native = nativeByKey[key]
-                val info = video.meta.withFallback(tmdb[key])
-                val displayedSeason = if (season == 0) specialSeason ?: 0 else season
+                val displaySeason = if (season == 0) specialSeason ?: 0 else season
                 val episode = if (native != null) native.copy() else {
-                    val payload = JSONObject(seed.toString())
-                    payload.put("season", displayedSeason).put("episode", number)
-                    val parsedId = Regex("^(tt[0-9]+):([0-9]+):([0-9]+)$")
-                        .matchEntire(video.id.orEmpty())
-                    val mappedSeason = video.imdbSeason
-                        ?: parsedId?.groupValues?.get(2)?.toIntOrNull() ?: season
-                    val mappedEpisode = video.imdbEpisode
-                        ?: parsedId?.groupValues?.get(3)?.toIntOrNull() ?: number
-                    payload.put("imdbSeason", mappedSeason)
-                    payload.put("imdbEpisode", mappedEpisode)
+                    // An additional episode needs an actual AIO video ID and the
+                    // original StremioC playback contract. Never fabricate either.
+                    val id = video.id?.takeIf(String::isNotBlank) ?: continue
+                    val base = seed?.takeIf { it.optString("addonUrl").isNotBlank() }
+                        ?: continue
+                    val originalEpisode = template ?: continue
+                    val payload = JSONObject(base.toString())
+                    payload.put("id", id)
+                    payload.put("season", displaySeason)
+                    payload.put("episode", number)
+                    payload.remove("imdbSeason")
+                    payload.remove("imdbEpisode")
+                    video.imdbSeason?.let { payload.put("imdbSeason", it) }
+                    video.imdbEpisode?.let { payload.put("imdbEpisode", it) }
                     video.imdbId?.takeIf { it.matches(Regex("tt[0-9]+")) }
                         ?.let { payload.put("imdbId", it) }
                     payload.remove("embeddedStreams")
                     payload.remove("embeddedStreamTitle")
                     video.streams?.let { payload.put("embeddedStreams", it.toString()) }
-                    info.name?.let { payload.put("embeddedStreamTitle", it) }
-                    if (video.id != null) payload.put("aioEpisodeId", video.id)
-                    if (template != null) template.copy(data = payload.toString())
-                    else provider!!.newEpisode(payload.toString(), fix = false)
+                    originalEpisode.copy(data = payload.toString())
                 }
-                episode.season = displayedSeason
+                val info = video.meta.withFallback(tmdb[key])
+                episode.season = displaySeason
                 episode.episode = number
                 episode.name = info.name ?: native?.name ?: "Episode $number"
                 episode.posterUrl = info.poster ?: native?.posterUrl
@@ -789,7 +777,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 episode.date = date(info.date) ?: native?.date
                 episode.runTime = info.runTime ?: native?.runTime
                 result.add(episode)
+                applied.add(key)
             }
+            // An incomplete AIO video list must not remove original playable episodes.
+            response.episodes.filterTo(result) { nativeKey(it) !in applied }
+            if (result.isEmpty()) return null
             val names = response.seasonNames.orEmpty()
                 .filterNot { existingSpecial != null && it.season == existingSpecial }
                 .let { list -> if (specialSeason != null)
@@ -828,7 +820,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         // display season is the same TMDB season.
                         val activeSeason = model.selectedSeasonIndex.value
                             ?.let { index -> model.seasonSelections.value?.getOrNull(index)?.second }
-                        val seasons = if (completeAio) source.videos.keys.map { it.first }.distinct()
+                        val aioBySeason = if (completeAio)
+                            source.episodes.entries.groupBy { it.key.first } else emptyMap()
+                        val seasons = if (completeAio) aioBySeason.keys.toList()
                         else base.mapNotNull { episode ->
                             episode.seasonIndex?.takeIf {
                                 it == episode.season && it in 0..99 && episode.episode > 0 &&
@@ -841,7 +835,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         val responses = seasons.map { season ->
                             async(Dispatchers.IO) {
                                 if (source.source == "AIO" && (if (completeAio)
-                                    source.episodes.filterKeys { it.first == season }.values
+                                    aioBySeason[season].orEmpty().map { it.value }
                                 else base.filter {
                                     it.seasonIndex == season && it.season == season &&
                                         it.episode > 0
@@ -904,10 +898,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             metadataSwapTrace("ELEVATE_AIO_REBUILD gen=$generation" +
                                 " published=$published originalEpisodes=${response.episodes.size}" +
                                 " aioEpisodes=${rebuilt.episodes.size}" +
-                                " seasons=${rebuilt.episodes.mapNotNull { it.season }.distinct().size}" +
-                                " preserved=${response.episodes.count { old ->
-                                    rebuilt.episodes.any { it.data == old.data && it.episode == old.episode && it.season == old.season }
-                                }}")
+                                " seasons=${rebuilt.episodes.mapNotNull { it.season }.distinct().size}")
                             if (published) return@launch
                         }
                     }
