@@ -146,7 +146,8 @@ class ElevatePlugin : Plugin() {
                                 try {
                                     syncFeatures()
                                     if (key == ElevateFeaturePrefs.METADATA_SWAP_PROVIDER ||
-                                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL)
+                                        key == ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL ||
+                                        key == ElevateFeature.ACTOR_INFORMATION.name)
                                         metadataSwap?.refresh()
                                 } catch (failure: Exception) {
                                     android.util.Log.e("Elevate", "Feature update failed", failure)
