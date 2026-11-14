@@ -4136,27 +4136,31 @@ class YoutubeProvider(
                                 val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
                                 val allocationRun = System.getProperty("hsp1020.java.alloc.run")
                                 val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
-                                val parseStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+                                val readStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                 val responseBody = httpResponse.textLarge
+                                val readUs = if (allocationRun != null) (System.nanoTime() - readStartNs) / 1_000L else 0L
+                                val streamStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                 var parseMode = "STREAM_ITEMS"
                                 var javaContinuationItems = streamChannelContinuationItems(responseBody)
-                                var lookupMs = 0L
+                                val streamUs = if (allocationRun != null) (System.nanoTime() - streamStartNs) / 1_000L else 0L
+                                var fallbackUs = 0L
+                                var lookupUs = 0L
                                 if (javaContinuationItems == null) {
                                     parseMode = "FULL_FALLBACK"
+                                    val fallbackStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                     val fullResponse = httpResponse.parsedSafe<Map<String, Any>>()
+                                    if (allocationRun != null) fallbackUs = (System.nanoTime() - fallbackStartNs) / 1_000L
                                     if (fullResponse != null) {
-                                        val lookupStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+                                        val lookupStartNs = if (allocationRun != null) System.nanoTime() else 0L
                                         javaContinuationItems = findContinuationItemsRecursive(fullResponse)
-                                        if (allocationRun != null) {
-                                            lookupMs = android.os.SystemClock.elapsedRealtime() - lookupStart
-                                        }
+                                        if (allocationRun != null) lookupUs = (System.nanoTime() - lookupStartNs) / 1_000L
                                     }
                                 }
                                 if (allocationRun != null) {
                                     Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_JSON " +
                                         "tab=$tabName page=$pagesFetchedLocal chars=${responseBody.length} " +
-                                        "parseMs=${android.os.SystemClock.elapsedRealtime() - parseStart} " +
-                                        "mode=$parseMode parsed=${javaContinuationItems != null} lookupMs=$lookupMs")
+                                        "readUs=$readUs streamUs=$streamUs fallbackUs=$fallbackUs lookupUs=$lookupUs " +
+                                        "mode=$parseMode parsed=${javaContinuationItems != null}")
                                 }
                                 if (javaContinuationItems == null) {
                                     cacheable = false
@@ -4170,6 +4174,17 @@ class YoutubeProvider(
                                 val tokenStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                                 if (allocationRun != null) {
+                                    var chipDirectItems = 0
+                                    var continuationItems = 0
+                                    javaContinuationItems.forEach { item ->
+                                        val fields = item as? Map<*, *> ?: return@forEach
+                                        if (fields.containsKey("continuationItemRenderer")) continuationItems++
+                                        if (chipResultRendererKeys.any { fields.containsKey(it) }) chipDirectItems++
+                                    }
+                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CHIP_SCHEMA " +
+                                        "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
+                                        "chipDirectItems=$chipDirectItems continuationItems=$continuationItems " +
+                                        "addedEpisodes=${tabEpisodes.size - previousCount}")
                                     Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_EXTRACT " +
                                         "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
                                         "added=${tabEpisodes.size - previousCount} extractMs=${android.os.SystemClock.elapsedRealtime() - extractStart} " +
