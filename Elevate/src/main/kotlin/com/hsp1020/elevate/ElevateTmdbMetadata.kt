@@ -16,7 +16,6 @@ import java.util.Locale
 internal object ElevateTmdbMetadata {
     private const val TTL = 24L * 60 * 60 * 1000
     private const val SEASON_TTL = 12L * 60 * 60 * 1000
-    private fun trace(message: String) = android.util.Log.d("MetadataSwapTrace", message)
     private data class Entry(
         val at: Long, val detailLoaded: Boolean, val originalLanguage: String?,
         val creditsLocale: String?, val credits: JSONObject?,
@@ -78,7 +77,6 @@ internal object ElevateTmdbMetadata {
         val task = synchronized(originLogoCache) {
             originLogoCache[key]?.takeIf { now - it.first in 0 until TTL }
                 ?.let {
-                    trace("ELEVATE_TMDB_CACHE kind=logo source=ram")
                     return it.second
                 }
             originLogoFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
@@ -90,7 +88,6 @@ internal object ElevateTmdbMetadata {
                                 if (originLogoCache.size > 128)
                                     originLogoCache.remove(originLogoCache.keys.first())
                             }
-                            trace("ELEVATE_TMDB_CACHE kind=logo source=disk")
                             return@async logos
                         }
                     }
@@ -108,7 +105,6 @@ internal object ElevateTmdbMetadata {
                                 originLogoCache.remove(originLogoCache.keys.first())
                         }
                         ElevateMetadataDiskCache.write("tmdb_logo", key, logos.toString(), TTL)
-                        trace("ELEVATE_TMDB_CACHE kind=logo source=network")
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                   catch (_: Exception) { null }
@@ -133,7 +129,6 @@ internal object ElevateTmdbMetadata {
         val now = System.currentTimeMillis()
         val task = synchronized(seasonCache) {
             seasonCache[key]?.takeIf { now - it.first in 0 until SEASON_TTL }?.let {
-                trace("ELEVATE_TMDB_CACHE kind=season source=ram season=" + season)
                 return it.second
             }
             seasonFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
@@ -145,7 +140,6 @@ internal object ElevateTmdbMetadata {
                                 if (seasonCache.size > 128)
                                     seasonCache.remove(seasonCache.keys.first())
                             }
-                            trace("ELEVATE_TMDB_CACHE kind=season source=disk season=" + season)
                             return@async json
                         }
                     }
@@ -159,7 +153,6 @@ internal object ElevateTmdbMetadata {
                             if (seasonCache.size > 128) seasonCache.remove(seasonCache.keys.first())
                         }
                         ElevateMetadataDiskCache.write("tmdb_season", key, json.toString(), SEASON_TTL)
-                        trace("ELEVATE_TMDB_CACHE kind=season source=network season=" + season)
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                   catch (_: Exception) { null }
@@ -204,7 +197,6 @@ internal object ElevateTmdbMetadata {
                                 if (cache.size > 128) cache.remove(cache.keys.first())
                             }
                         }
-                        trace("ELEVATE_TMDB_CACHE kind=detail source=disk")
                     }
                 }
         }
@@ -217,7 +209,6 @@ internal object ElevateTmdbMetadata {
                 val hasFullDetails = previous?.detailLocale == normalizedLocale && previous?.details != null
                 if (hasDetails && (!needsCredits || hasCredits) &&
                     (!needsDetails || hasFullDetails)) {
-                    if (needsDetails) trace("ELEVATE_TMDB_CACHE kind=detail source=ram")
                     return previous
                 }
                 val active = flights[key]
@@ -267,7 +258,6 @@ internal object ElevateTmdbMetadata {
                             if (foundDetail != null) {
                                 ElevateMetadataDiskCache.write("tmdb_detail",
                                     key + ":" + normalizedLocale, foundDetail.toString(), TTL)
-                                trace("ELEVATE_TMDB_CACHE kind=detail source=network")
                             }
                             synchronized(cache) {
                                 val current = cache[key]?.takeIf {

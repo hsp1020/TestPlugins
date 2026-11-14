@@ -9,7 +9,6 @@ import android.graphics.Rect
 import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
-import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewTreeObserver
@@ -276,7 +275,7 @@ internal object ElevateActorInformation {
         private val stateKey = "elevate_actor_info_return"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main +
             CoroutineExceptionHandler { _, error ->
-                Log.e("ElevateActorTrace", "DIALOG_COROUTINE_FAILURE", error)
+                Unit
             })
         private var dialog: AppCompatDialog? = null
         private var originActorFocus: View? = null
@@ -927,7 +926,6 @@ internal object ElevateActorInformation {
                                                     openCredit(originProvider, credit, it)
                                                 } catch (error: Throwable) {
                                                     if (error is VirtualMachineError || error is ThreadDeath) throw error
-                                                    Log.e("ElevateActorTrace", "CREDIT_CLICK_FAILURE id=${credit.id} media=${credit.media}", error)
                                                 }
                                             }
                                             if (isLayout(TV)) setOnFocusChangeListener { focusedView, focused ->
@@ -1090,7 +1088,6 @@ internal object ElevateActorInformation {
                     val searchId = activity.resources.getIdentifier(
                         "navigation_search", "id", activity.packageName)
                     if (searchId == 0) {
-                        Log.e("ElevateActorTrace", "CREDIT_NAV_UNAVAILABLE id=${credit.id} missing=searchDestination")
                         return@launch
                     }
                     val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
@@ -1110,8 +1107,6 @@ internal object ElevateActorInformation {
                 } catch (error: Throwable) {
                     if (error is VirtualMachineError || error is ThreadDeath) throw error
                     detailHandoff?.close()
-                    Log.e("ElevateActorTrace",
-                        "CREDIT_NAV_FAILURE id=${credit.id} media=${credit.media}", error)
                 } finally {
                     creditClickInFlight = false
                 }
