@@ -184,22 +184,6 @@ internal class ElevateActorHook(
     /** Provider actors remain available only after Elevate API resolution has failed. */
     private suspend fun resolve(page: ResultData, response: LoadResponse?, ids: Ids,
         selectedSeason: Int?, multiSeason: Boolean): CastResult? {
-        if (page.syncData["metadata_swap_source"] == "AIO" &&
-            !page.actors.isNullOrEmpty()) {
-            val actors = page.actors.orEmpty()
-            val raw = page.syncData["tmdb_people"]
-            val array = runCatching { org.json.JSONArray(raw ?: "[]") }.getOrNull()
-            val people = actors.indices.map { i ->
-                val person = array?.optJSONObject(i)
-                ElevateActorPersonRef(
-                    person?.optInt("id")?.takeIf { it > 0 },
-                    person?.optString("name")?.takeIf(String::isNotBlank)
-                        ?: actors[i].actor.name,
-                    actors[i].actor.image, person?.optBoolean("crew") == true
-                )
-            }
-            return CastResult(actors, people)
-        }
         val type = response?.type
         val kind = runCatching {
             JSONObject(response?.url ?: page.url).optString("type").lowercase()
@@ -430,8 +414,7 @@ internal class ElevateActorHook(
             val multiSeason = (model.seasonSelections.value?.size ?: 0) > 1
             val ids = ids(page, response)
             val identity = page.url + "|" + ids + "|" + (response?.type ?: "unknown") +
-                "|" + (season ?: "pending") + "|" + multiSeason +
-                "|" + page.syncData["metadata_swap_source"]
+                "|" + (season ?: "pending") + "|" + multiSeason
             if (identity == pageIdentity) {
                 attachClicks()
                 return

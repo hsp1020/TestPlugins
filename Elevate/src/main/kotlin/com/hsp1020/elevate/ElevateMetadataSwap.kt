@@ -111,7 +111,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             )
         }
 
-        fun toPage(original: ResultData, movie: Boolean): ResultData {
+        fun toPage(original: ResultData, movie: Boolean, includeActors: Boolean): ResultData {
             val sync = HashMap(original.syncData)
             sync["metadata_swap_source"] = source
             sync["logo_expected"] = (!logo.isNullOrBlank()).toString()
@@ -146,7 +146,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 onGoingText = ongoing?.let {
                     txt(if (it) R.string.status_ongoing else R.string.status_completed)
                 },
-                actors = actors, actorsText = null
+                actors = if (includeActors) actors else original.actors,
+                actorsText = if (includeActors) null else original.actorsText
             )
         }
     }
@@ -383,7 +384,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             originalTitle = originalName, englishTitle = english ?: originalName)
     }
 
-    private fun metadataFromAddon(json: JSONObject): Metadata? {
+    private fun metadataFromAddon(json: JSONObject, includeActors: Boolean): Metadata? {
         val meta = json.optJSONObject("meta") ?: json
         val title = meta.string("name", "title")
         if (title == null && meta.string("description", "overview", "poster",
@@ -408,7 +409,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 else -> null
             }
         }
-        val (actors, people) = addonActors(meta)
+        val (actors, people) = if (includeActors) addonActors(meta) else null to null
         val videos = addonVideos(meta)
         return Metadata(title, meta.string("description", "overview"),
             meta.string("poster"), meta.string("background", "backdrop"),
@@ -611,6 +612,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val featureOn = prefs.getBoolean(ElevateFeature.METADATA_SWAP.name, false)
             val policy = page.syncData["metadata_swap_allowed"]
             val provider = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB")
+            val includeActors = !ElevateFeaturePrefs.enabled(
+                application, ElevateFeature.ACTOR_INFORMATION)
             metadataSwapTrace("ELEVATE_GATE gen=$generation pageHash=${Integer.toHexString(page.url.hashCode())}" +
                 " featureOn=$featureOn policy=${policy ?: "absent"}" +
                 " originalSyncKeys=${page.syncData.size}")
@@ -640,13 +643,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     " original=${ids.original != null} locale=$locale")
                 val resolved = try {
                     withContext(Dispatchers.IO) {
-                        val aioIds = if (provider == "AIO" && policy != "true" &&
+                        val aioIds = if (provider == "AIO" &&
                             ids.original == null && ids.imdb == null && ids.tmdb == null &&
                             !ids.animeIds && ids.simkl != null)
                             ElevateMediaIdentity.enrichSimkl(ids, movie) else ids
                         val aio = if (provider == "AIO")
                             Addon.load(manifest, movie, aioIds, page.url, locale, policy == "true")
-                                ?.let { metadataFromAddon(it) }
+                                ?.let { metadataFromAddon(it, includeActors) }
                         else null
                         if (provider == "AIO") metadataSwapTrace(
                             "ELEVATE_AIO_RESULT gen=$generation parsed=${aio != null}" +
@@ -656,11 +659,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             " idHash=${id?.hashCode()?.let(Integer::toHexString) ?: "none"}")
                         val tmdb = id?.let { key ->
                             ElevateTmdbMetadata.details(key, movie, locale,
-                                includeCredits = true)?.let { json ->
+                                includeCredits = includeActors)?.let { json ->
                                 metadataFromTmdb(json, key, movie, locale,
                                     addonLogoPreferred = provider == "AIO" &&
                                         !aio?.logo.isNullOrBlank()).let { details ->
-                                    if (details == null) null else {
+                                    if (details == null || !includeActors) details else {
                                         val (actors, people) = tmdbActors(
                                             ElevateTmdbMetadata.credits(key, movie, locale))
                                         details.copy(actors = actors, people = people)
@@ -705,7 +708,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 metadata = current
                 detailId = resolved.second
                 detailLocale = locale
-                swapped = current.toPage(page, movie)
+                swapped = current.toPage(page, movie, includeActors)
                 swapped?.let { nativePage(model, it) }
                 metadataSwapTrace("ELEVATE_FIELDS gen=$generation movie=$movie" +
                     " titleChanged=${swapped?.title != page.title}" +
