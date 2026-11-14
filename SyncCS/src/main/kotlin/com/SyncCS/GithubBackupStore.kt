@@ -400,6 +400,29 @@ internal class GithubBackupStore(
         return verifiedRoot(JSONObject(String(blob(sha), Charsets.UTF_8)), cipher)
     }
 
+    /**
+     * Verify the just-published CAS head and authenticated manifest without
+     * immediately decrypting every unchanged preference a second time.
+     * Updated buckets were already integrity-checked by publishPartial().
+     */
+    fun verifyPublishedRoot(revision: String, expectedGeneration: Int, cipher: SyncCipher) {
+        val branch = ensurePrivateRepository()
+        check(this.revision(branch) == revision) { "Published GitHub revision was not verified" }
+        val (_, entries) = index(revision)
+        val root = rootAt(entries, cipher)
+        check(root.generation == expectedGeneration) {
+            "Published GitHub generation was not verified"
+        }
+        for (bucket in 0 until 16) {
+            check(entries.containsKey(shard(bucket))) { "Missing published GitHub shard" }
+            if (root.overlays[bucket].isNotEmpty()) {
+                check(entries.containsKey(overlayPath(bucket))) {
+                    "Missing published GitHub overlay"
+                }
+            }
+        }
+    }
+
     private fun checkedRows(
         files: Map<String, String>, path: String, expected: String, index: Int
     ): JSONObject {

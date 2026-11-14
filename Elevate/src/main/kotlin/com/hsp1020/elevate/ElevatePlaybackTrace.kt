@@ -52,9 +52,12 @@ internal class ElevatePlaybackTrace(private val application: Application) :
 
     override fun onActivityPreDestroyed(activity: Activity) {
         ReceiverRegistrationTrace.snapshot(activity, "PRE_DESTROY")
+        DownloadedPlayerLeakCleanup.onDestroy(activity)
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        // Fallback on older Android versions; callback removal is idempotent.
+        DownloadedPlayerLeakCleanup.onDestroy(activity)
         ReceiverRegistrationTrace.snapshot(activity, "DESTROYED")
         val reason = destroyReason(activity)
         Log.i(TAG, "ACTIVITY_DESTROY ${activityInfo(activity)} reason=$reason")

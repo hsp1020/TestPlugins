@@ -267,11 +267,13 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         val allowed = deletions + nested
 
 
-        github.update(current, cipher, target, allowed, archives)
-        latest = github.current(cipher)
-            ?: error("Could not verify the newly committed GitHub snapshot.")
-        verifiedState = latest!!.revision to latest!!.generation
-        lastFlushPublished = latest!!.revision != current.revision
+        val published = github.update(current, cipher, target, allowed, archives)
+        // The writer has already checked the changed shard digests and the
+        // Git CAS. Re-validate the authenticated manifest, not 30k+ values.
+        github.verifyPublishedRoot(published, current.generation, cipher)
+        latest = null // Any subsequent full read must fetch this new revision.
+        verifiedState = published to current.generation
+        lastFlushPublished = published != current.revision
         stagedChanges.clear()
         archives.clear()
         verifiedDeletionPaths.clear()

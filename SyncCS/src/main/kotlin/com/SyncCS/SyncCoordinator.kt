@@ -637,12 +637,49 @@ internal object SyncCoordinator {
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
-            val planned = SyncPreferencePlanner.reconcile(
+            var planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
                 replacedProfileUuids, marked, priorLists, firstRemoteRestore,
                 pull.full, completeLocal)
-            SyncData.excludeUnreferencedHeaderRestores(local, planned.apply, planned.upload)
 
+            // New locally discovered settings can expand beyond the initial
+            // selected SQLite keys. Read only those additional keys and replan
+            // with their actual prior values BEFORE any GitHub publication.
+            // Never relax SyncBaselineStore's destructive-write verification.
+            if (!completeLocal) {
+                var selectionPass = 0
+                while (true) {
+                    val selected = priorBaseline?.selectedKeys ?: break
+                    val additional = (planned.next.keys + versions.keys) - selected
+                    if (additional.isEmpty()) break
+                    check(++selectionPass <= 3) {
+                        "SyncCS incremental key selection did not converge"
+                    }
+                    val previousState = priorBaseline.state
+                    val widened = SyncBaselineStore.snapshot(
+                        context, startedUser, selected + additional
+                    ) ?: error("SyncCS baseline unavailable during incremental selection")
+                    check(widened.state == previousState) {
+                        "SyncCS baseline changed during incremental selection"
+                    }
+                    priorBaseline = widened
+                    base = widened.hashes
+                    // Incoming Git versions override stored local versions.
+                    val incomingVersions = versions.toMap()
+                    versions.clear()
+                    versions.putAll(widened.versions)
+                    versions.putAll(incomingVersions)
+                    planned = SyncPreferencePlanner.reconcile(
+                        remoteValues, local, base, profileMerge.target, activeProfiles,
+                        replacedProfileUuids, marked, priorLists, firstRemoteRestore,
+                        pull.full, completeLocal)
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=SyncCS phase=BASELINE_SCOPE_EXTENDED " +
+                            "newKeys=${additional.size} selectedKeys=${selected.size + additional.size} " +
+                            "pass=$selectionPass")
+                }
+            }
+            SyncData.excludeUnreferencedHeaderRestores(local, planned.apply, planned.upload)
             val apply = planned.apply
             val upload = planned.upload
             if (allocationRun != null) android.util.Log.i("JavaAllocCause",
@@ -650,7 +687,6 @@ internal object SyncCoordinator {
                     "apply=${apply.size} upload=${upload.size} baseline=${base.size}")
             val next = planned.next
             val conflicts = planned.conflicts
-
 
 
 

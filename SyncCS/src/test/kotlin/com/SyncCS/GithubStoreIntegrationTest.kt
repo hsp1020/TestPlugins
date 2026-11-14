@@ -203,6 +203,22 @@ class GithubStoreIntegrationTest {
         }
     }
 
+    @Test fun verifyPublishedRootAfterPartialWriteKeepsCorrectData() {
+        val api = FakeGit()
+        val writer = store(api, "A")
+        val reader = store(api, "B")
+        val cipher = cipher()
+        val key = "d/0/video_pos_dur/verify"
+        val first = writer.initialize(cipher, mapOf(key to "100"))
+        val updated = writer.publishPartial(first, 1, cipher,
+            mapOf(key to "200"), emptySet())
+        writer.verifyPublishedRoot(updated, 1, cipher)
+        assertEquals("200", reader.current(cipher)!!.values[key])
+        assertThrows(IllegalStateException::class.java) {
+            writer.verifyPublishedRoot(updated, 2, cipher)
+        }
+    }
+
     @Test fun moreThanEightCommitsRemainsIncremental() {
         val api = FakeGit()
         val writer = store(api, "A")

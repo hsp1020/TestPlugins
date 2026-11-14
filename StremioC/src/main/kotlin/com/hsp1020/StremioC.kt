@@ -1221,7 +1221,8 @@ open class StremioC(
         private suspend fun traceStreamPlay(
             route: String, provider: MainAPI,
             payload: String, casting: Boolean,
-            subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
+            subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit,
+            crossRouteSeen: MutableSet<Int>? = null
         ): Boolean {
             val run = System.getProperty("hsp1020.java.alloc.run")
                 ?: return provider.loadLinks(payload, casting, subtitleCallback, callback)
@@ -1237,6 +1238,8 @@ open class StremioC(
             val links = java.util.concurrent.atomic.AtomicInteger()
             val subtitles = java.util.concurrent.atomic.AtomicInteger()
             val uniqueLinks = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+            val crossRouteDuplicates = java.util.concurrent.atomic.AtomicInteger()
+            val sources = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
             android.util.Log.i("JavaAllocCause",
                 "run=$run module=StremioC phase=STREAMPLAY_START request=$requestId " +
                     "route=$route provider=${provider.name} payloadId=${payload.hashCode()} " +
@@ -1247,7 +1250,11 @@ open class StremioC(
             }
             val measuredLink: (ExtractorLink) -> Unit = { link ->
                 links.incrementAndGet()
-                uniqueLinks.add(link.url.hashCode())
+                val linkId = link.url.hashCode()
+                if (uniqueLinks.add(linkId) && crossRouteSeen != null &&
+                    !crossRouteSeen.add(linkId)) crossRouteDuplicates.incrementAndGet()
+                sources.computeIfAbsent(link.source) { java.util.concurrent.atomic.AtomicInteger() }
+                    .incrementAndGet()
                 callback(link)
             }
             return try {
@@ -1255,8 +1262,9 @@ open class StremioC(
                 android.util.Log.i("JavaAllocCause",
                     "run=$run module=StremioC phase=STREAMPLAY_END request=$requestId " +
                         "route=$route result=$result links=${links.get()} " +
-                        "uniqueLinkIds=${uniqueLinks.size} subtitles=${subtitles.get()} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                        "uniqueLinkIds=${uniqueLinks.size} crossRouteDuplicate=${crossRouteDuplicates.get()} " +
+                        "sources=${sources.entries.sortedByDescending { it.value.get() }.take(12).joinToString(",") { "${it.key}:${it.value.get()}" }} " +
+                        "subtitles=${subtitles.get()} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
                 result
             } catch (error: Throwable) {
                 android.util.Log.w("JavaAllocCause",
@@ -2988,12 +2996,15 @@ open class StremioC(
         val subtitleEmitted = java.util.concurrent.atomic.AtomicInteger()
         val subtitleDuplicate = java.util.concurrent.atomic.AtomicInteger()
         val subtitleCallbackNs = java.util.concurrent.atomic.AtomicLong()
-        fun emitUniqueSubtitle(sub: SubtitleFile) {
+        val subtitleOrigins = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicIntegerArray>()
+        fun emitUniqueSubtitle(sub: SubtitleFile, origin: String = "unknown") {
             if (sub.url.isBlank() || sub.lang.trim().let {
                     it.isBlank() || it.equals("und", true)
                 }) return
             if (seenStremioSubtitles.add(sub.url)) {
                 if (allocationRun != null) {
+                    subtitleOrigins.computeIfAbsent(origin) { java.util.concurrent.atomic.AtomicIntegerArray(2) }
+                        .incrementAndGet(0)
                     val start = System.nanoTime()
                     try { subtitleCallback(sub) } finally {
                         subtitleCallbackNs.addAndGet(System.nanoTime() - start)
@@ -3004,7 +3015,11 @@ open class StremioC(
                                 "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L}")
                     }
                 } else subtitleCallback(sub)
-            } else if (allocationRun != null) subtitleDuplicate.incrementAndGet()
+            } else if (allocationRun != null) {
+                subtitleDuplicate.incrementAndGet()
+                subtitleOrigins.computeIfAbsent(origin) { java.util.concurrent.atomic.AtomicIntegerArray(2) }
+                    .incrementAndGet(1)
+            }
         }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
@@ -3089,21 +3104,18 @@ open class StremioC(
             }
         }
 
-        val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
-            emitUniqueSubtitle(sub)
-        }
-
         fun stremioSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
-            stremioSubtitleCallback(sub)
+            emitUniqueSubtitle(sub, if (allocationRun == null) "" else "stremio:$group:${addonUrl.hashCode()}")
         }
         fun integratedSubtitleFrom(group: Int): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group)
-            emitUniqueSubtitle(sub)
+            emitUniqueSubtitle(sub, if (allocationRun == null) "" else
+                "integration:$group:${sub.lang.substringAfterLast(" — ", "unknown").take(45)}")
         }
         fun extractorSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
-            emitUniqueSubtitle(sub)
+            emitUniqueSubtitle(sub, if (allocationRun == null) "" else "extractor:$group:${addonUrl.hashCode()}")
         }
 
         val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())
@@ -3500,11 +3512,19 @@ open class StremioC(
         )
         mappingDeferred.cancel()
         }
-        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
-            "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
-                "emitted=${subtitleEmitted.get()} duplicate=${subtitleDuplicate.get()} " +
-                "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L} " +
-                "groups=${(0..3).joinToString(",") { subtitleGroups.get(it).toString() }}")
+        if (allocationRun != null) {
+            android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
+                    "emitted=${subtitleEmitted.get()} duplicate=${subtitleDuplicate.get()} " +
+                    "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L} " +
+                    "groups=${(0..3).joinToString(",") { subtitleGroups.get(it).toString() }}")
+            subtitleOrigins.entries.sortedByDescending { it.value.get(0) + it.value.get(1) }
+                .take(40).forEach { (origin, counts) ->
+                    android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=StremioC phase=SUBTITLE_ORIGIN " +
+                            "origin=$origin emitted=${counts.get(0)} duplicate=${counts.get(1)}")
+                }
+        }
         return true
     }
 
@@ -4120,13 +4140,15 @@ open class StremioC(
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await())
             val streamPlayProvider = getStreamPlayProvider()
+            val crossRouteSeen = if (System.getProperty("hsp1020.java.alloc.run") != null)
+                java.util.concurrent.ConcurrentHashMap.newKeySet<Int>() else null
 
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(60000L) {
                         withIntegratedSource("streamplay") { traceStreamPlay("non-anime", streamPlayProvider, 
                             streamPlayPayload(loadData, targetType, media).toJson(),
-                            isCasting, subtitleCallback, callback
+                            isCasting, subtitleCallback, callback, crossRouteSeen
                         ) }
                     }
                 }
@@ -4163,7 +4185,7 @@ open class StremioC(
                             )
                             withTimeoutOrNull(60000L) {
                                 withIntegratedSource("anime") { traceStreamPlay("dedicated-anime", animeProvider, 
-                                    animePayload.toJson(), isCasting, subtitleCallback, callback
+                                    animePayload.toJson(), isCasting, subtitleCallback, callback, crossRouteSeen
                                 ) }
                             }
                         } catch (e: CancellationException) {
@@ -4178,7 +4200,7 @@ open class StremioC(
                             if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
                                 withIntegratedSource("streamplay") { traceStreamPlay("anime-standard", streamPlayProvider, 
                                     streamPlayPayload(loadData, targetType, media).toJson(),
-                                    isCasting, subtitleCallback, callback
+                                    isCasting, subtitleCallback, callback, crossRouteSeen
                                 ) }
                             }
                         } catch (e: CancellationException) {
@@ -4196,7 +4218,7 @@ open class StremioC(
                                         streamPlayPayload(
                                             loadData, targetType, media, generalAnimeRoute = true
                                         ).toJson(),
-                                        isCasting, subtitleCallback, callback
+                                        isCasting, subtitleCallback, callback, crossRouteSeen
                                     ) }
                                 }
                             } catch (e: CancellationException) {
@@ -4214,7 +4236,7 @@ open class StremioC(
                                     withIntegratedSource("streamplay") { traceStreamPlay("anime-imdb", streamPlayProvider, 
                                         streamPlayPayload(loadData, targetType, media,
                                             generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
-                                        isCasting, subtitleCallback, callback
+                                        isCasting, subtitleCallback, callback, crossRouteSeen
                                     ) }
                                 }
                             }
