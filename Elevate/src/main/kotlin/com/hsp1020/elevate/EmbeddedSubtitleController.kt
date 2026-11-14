@@ -32,17 +32,31 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
 import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
+import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
 
 @OptIn(UnstableApi::class)
 internal class EmbeddedSubtitleController(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
+    companion object {
+        private var activeController: WeakReference<EmbeddedSubtitleController>? = null
+
+        fun beforeSourceChange(candidate: GeneratorPlayer, nextLink: VideoLink) {
+            activeController?.get()?.prepareSourceChange(candidate, nextLink)
+        }
+
+        fun afterSourceChange(candidate: GeneratorPlayer) {
+            activeController?.get()?.takeIf { it.fragment === candidate }?.synchronizeSource()
+        }
+    }
+
     private var host: FragmentActivity? = null
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
@@ -67,7 +81,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var player: Media3Player? = null
     private var instance: Int? = null
     private var linkUrl: String? = null
-    private var selectedLink: Pair<*, *>? = null
     private var previousEmbedded = emptySet<SubtitleData>()
     private var lastHandledSubtitles: Set<SubtitleData>? = null
     private var lastHandledInstance: Int? = null
@@ -129,10 +142,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }.getOrNull()
     private val linkField = runCatching {
         CS3IPlayer::class.java.getDeclaredField("currentLink")
-            .apply { isAccessible = true }
-    }.getOrNull()
-    private val selectedLinkField = runCatching {
-        GeneratorPlayer::class.java.getDeclaredField("currentSelectedLink")
             .apply { isAccessible = true }
     }.getOrNull()
 
@@ -258,16 +267,35 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         }
     }
 
+    private fun prepareSourceChange(candidate: GeneratorPlayer, nextLink: VideoLink) {
+        if (fragment !== candidate) return
+        previousEmbedded = previousEmbedded + model?.state?.subtitles.orEmpty().filter {
+            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO
+        }
+        discardPreviousEmbedded()
+        // The upcoming loadLink() is the source change; do not clean its new tracks again.
+        linkUrl = nextLink.first?.url
+    }
+
     private fun discardPreviousEmbedded() {
         val stale = previousEmbedded
         previousEmbedded = emptySet()
-        val f = fragment
-        if (f != null && (selectedByHost(f)?.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO ||
-                f.player.getCurrentPreferredSubtitle()?.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO)) {
-            runCatching { selectedField?.set(f, null) }
-            f.player.setPreferredSubtitles(null)
-        }
         if (stale.isEmpty()) return
+        if (manualSubtitleOrigin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
+            manualOverride = false
+            panelManualOverride = false
+            manualSubtitleUrl = null
+            manualSubtitleOrigin = null
+        }
+        val f = fragment
+        if (f != null) {
+            if (selectedByHost(f)?.let {
+                    it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
+                } == true) runCatching { selectedField?.set(f, null) }
+            if (f.player.getCurrentPreferredSubtitle()?.let {
+                    it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
+                } == true) f.player.setPreferredSubtitles(null)
+        }
         model?.let { vm ->
             if (vm.state.subtitles.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
                 vm.modifyState {
@@ -442,23 +470,20 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val nextUrl = currentLinkUrl(f)
         val changedInstance = instance != null && instance != nextInstance
         val changedUrl = linkUrl != null && nextUrl != null && linkUrl != nextUrl
-        val nextSelectedLink = runCatching {
-            selectedLinkField?.get(f) as? Pair<*, *>
-        }.getOrNull()
-        val changedLink = selectedLink != null && nextSelectedLink != null &&
-            selectedLink != nextSelectedLink
         val changedPlayer = current != null && current !== player
-        // A player recreation alone is not a source change.
-        val changedSource = changedInstance || changedUrl || changedLink
+        // ExoPlayer replacement on reload is not a change of video source.
+        val changedSource = changedInstance || changedUrl
 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
-        if (nextSelectedLink != null) selectedLink = nextSelectedLink
         if (changedSource) {
-            panelManualOverride = false
-            manualOverride = false
-            manualSubtitleUrl = null
-            manualSubtitleOrigin = null
+            // A new episode has its own selection state; a mirror change does not.
+            if (changedInstance) {
+                panelManualOverride = false
+                manualOverride = false
+                manualSubtitleUrl = null
+                manualSubtitleOrigin = null
+            }
             selectionDialog = null
             selectionBeforeDialog = null
             discardPreviousEmbedded()
@@ -546,6 +571,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     fun start() {
+        activeController = WeakReference(this)
         cleanExtraCaptions = SubtitlesFragment.getCurrentSavedStyle().removeCaptions
         SubtitlesFragment.applyStyleEvent += captionStyleListener
         application.registerActivityLifecycleCallbacks(this)
@@ -553,6 +579,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     fun stop() {
+        if (activeController?.get() === this) activeController = null
         SubtitlesFragment.applyStyleEvent -= captionStyleListener
         application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
@@ -650,7 +677,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         model = null
         instance = null
         linkUrl = null
-        selectedLink = null
         previousEmbedded = emptySet()
         lastHandledSubtitles = null
         lastHandledInstance = null

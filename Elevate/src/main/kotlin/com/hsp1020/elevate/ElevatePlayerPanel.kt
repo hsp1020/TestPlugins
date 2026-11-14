@@ -1267,9 +1267,12 @@ internal class ElevatePlayerPanel(
             Row(title, {
                 if (link != selected) runCatching {
                     val wasPlaying = fragment.playerView?.player?.playWhenReady == true
-                    GeneratorPlayer::class.java.getDeclaredMethod(
+                    val loadLink = GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
-                    ).apply { isAccessible = true }.invoke(fragment, link, true)
+                    ).apply { isAccessible = true }
+                    if (link != currentLink()) EmbeddedSubtitleController.beforeSourceChange(fragment, link)
+                    loadLink.invoke(fragment, link, true)
+                    EmbeddedSubtitleController.afterSourceChange(fragment)
                     if (fragment.playerView?.player?.playWhenReady != wasPlaying) {
                         fragment.player.handleEvent(
                             if (wasPlaying) CSPlayerEvent.Play else CSPlayerEvent.Pause,
