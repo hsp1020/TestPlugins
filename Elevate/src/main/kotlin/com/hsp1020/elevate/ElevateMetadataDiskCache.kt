@@ -14,6 +14,13 @@ internal object ElevateMetadataDiskCache {
     private const val MAX_FILE_BYTES = 2L * 1024 * 1024
     private const val MAX_TOTAL_BYTES = 50L * 1024 * 1024
     private val lock = Any()
+    private val limits = mapOf("manifest" to 100, "meta" to 200,
+        "tmdb_detail" to 700, "tmdb_season" to 300, "tmdb_logo" to 200)
+    private var quotaChecked = false
+    private var writesSinceQuota = 0
+    private var lastQuotaCheckMs = 0L
+    private const val QUOTA_CHECK_WRITES = 16
+    private const val QUOTA_CHECK_INTERVAL_MS = 30_000L
 
     internal data class Entry(val body: String, val at: Long, val ttlMs: Long)
 
@@ -65,14 +72,33 @@ internal object ElevateMetadataDiskCache {
                 if (temp.length() > MAX_FILE_BYTES) return@withContext
                 synchronized(lock) {
                     if (temp.renameTo(file(dir, kind, key))) {
-                        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }
-                            .orEmpty().sortedBy { it.lastModified() }
-                        var bytes = files.sumOf { it.length() }
-                        var count = files.size
-                        for (entry in files) {
-                            if (bytes <= MAX_TOTAL_BYTES && count <= 1200) break
-                            bytes -= entry.length()
-                            if (entry.delete()) count--
+                        writesSinceQuota++
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (!quotaChecked || writesSinceQuota >= QUOTA_CHECK_WRITES ||
+                            now - lastQuotaCheckMs >= QUOTA_CHECK_INTERVAL_MS) {
+                            val files = dir.listFiles()?.filter {
+                                it.isFile && it.name.endsWith(".gz")
+                            }.orEmpty()
+                            val count = files.count { it.name.startsWith("${kind}_") }
+                            if (files.sumOf { it.length() } > MAX_TOTAL_BYTES ||
+                                count > (limits[kind] ?: 1200)) {
+                                for ((group, limit) in limits) {
+                                    files.filter { it.name.startsWith("${group}_") }
+                                        .sortedByDescending { it.lastModified() }
+                                        .drop(limit).forEach { it.delete() }
+                                }
+                                val remain = files.filter { it.exists() }
+                                    .sortedBy { it.lastModified() }
+                                var total = remain.sumOf { it.length() }
+                                for (entry in remain) {
+                                    if (total <= MAX_TOTAL_BYTES) break
+                                    val bytes = entry.length()
+                                    if (entry.delete()) total -= bytes
+                                }
+                            }
+                            quotaChecked = true
+                            writesSinceQuota = 0
+                            lastQuotaCheckMs = now
                         }
                     }
                 }
