@@ -73,6 +73,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
     }
 
     private data class AioVideo(
+        val season: Int?, val number: Int?,
         val meta: EpisodeMeta, val id: String?, val imdbId: String?,
         val imdbSeason: Int?, val imdbEpisode: Int?, val streams: JSONArray?
     )
@@ -86,7 +87,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
         val actors: List<ActorData>? = null, val people: String? = null,
         val logoForeign: Boolean = false, val source: String = "TMDB",
         val originalTitle: String? = null, val englishTitle: String? = null,
-        val videos: Map<Pair<Int, Int>, AioVideo> = emptyMap()
+        val videos: List<AioVideo> = emptyList()
     ) {
         fun withFallback(other: Metadata?): Metadata {
             if (other == null) return this
@@ -100,7 +101,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 duration = duration ?: other.duration,
                 certification = certification ?: other.certification,
                 ongoing = ongoing ?: other.ongoing,
-                trailers = trailers.ifEmpty { other.trailers },
+                trailers = other.trailers.ifEmpty { trailers },
                 episodes = episodes, actors = actors ?: other.actors,
                 people = people ?: other.people,
                 logoForeign = (logo ?: other.logo) != null &&
@@ -201,22 +202,19 @@ internal class ElevateMetadataSwap(private val application: Application) :
         )
     }
 
-    private fun addonVideos(meta: JSONObject): Map<Pair<Int, Int>, AioVideo> {
-        val array = meta.optJSONArray("videos") ?: return emptyMap()
-        val result = LinkedHashMap<Pair<Int, Int>, AioVideo>()
-        for (i in 0 until array.length()) {
-            val ep = array.optJSONObject(i) ?: continue
-            val season = ep.optInt("season", -1).takeIf { it in 0..99 } ?: continue
-            val number = ep.optInt("episode", ep.optInt("number", -1))
-                .takeIf { it > 0 } ?: continue
-            result[season to number] = AioVideo(
-                ep.episodeMeta(false), ep.string("id"), ep.string("imdb_id"),
-                ep.optInt("imdbSeason").takeIf { it > 0 },
+    private fun addonVideos(meta: JSONObject): List<AioVideo> {
+        val array = meta.optJSONArray("videos") ?: return emptyList()
+        return (0 until array.length()).mapNotNull { i ->
+            val ep = array.optJSONObject(i) ?: return@mapNotNull null
+            val season = ep.optInt("season").takeIf { ep.has("season") && !ep.isNull("season") }
+            val number = ep.optInt("episode", ep.optInt("number"))
+                .takeIf { (ep.has("episode") && !ep.isNull("episode")) ||
+                    (ep.has("number") && !ep.isNull("number")) }
+            AioVideo(season, number, ep.episodeMeta(false), ep.string("id"),
+                ep.string("imdb_id"), ep.optInt("imdbSeason").takeIf { it > 0 },
                 ep.optInt("imdbEpisode").takeIf { it > 0 },
-                ep.optJSONArray("streams")?.takeIf { it.length() > 0 }
-            )
+                ep.optJSONArray("streams")?.takeIf { it.length() > 0 })
         }
-        return result
     }
 
     private fun addonActors(meta: JSONObject): Pair<List<ActorData>?, String?> {
@@ -418,7 +416,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 ?: meta.optJSONObject("_providerArt")?.string("logo")),
             meta.names("genres").ifEmpty { meta.names("genre") },
             year, rating, meta.string("runtime"), age, status,
-            addonTrailers(meta), videos.mapValues { it.value.meta }, actors, people, source = "AIO",
+            addonTrailers(meta), videos.mapNotNull { video ->
+                val season = video.season
+                val number = video.number
+                if (season != null && number != null)
+                    (season to number) to video.meta else null
+            }.toMap(), actors, people, source = "AIO",
             originalTitle = meta.string("original_title", "originalTitle"),
             englishTitle = meta.string("english_title", "englishTitle"), videos = videos)
     }
@@ -638,7 +641,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val resolved = try {
                     withContext(Dispatchers.IO) {
                         val aio = if (provider == "AIO")
-                            Addon.load(manifest, movie, ids, locale)?.let { metadataFromAddon(it) }
+                            Addon.load(manifest, movie, ids.animeIds, page.url, locale)
+                                ?.let { metadataFromAddon(it) }
                         else null
                         if (provider == "AIO") metadataSwapTrace(
                             "ELEVATE_AIO_RESULT gen=$generation parsed=${aio != null}" +
@@ -719,74 +723,58 @@ internal class ElevateMetadataSwap(private val application: Application) :
             response: TvSeriesLoadResponse,
             source: Metadata,
             tmdb: Map<Pair<Int, Int>, EpisodeMeta>
-        ): TvSeriesLoadResponse? {
-            if (source.videos.isEmpty()) return null
-            val existingSpecial = response.seasonNames.orEmpty()
-                .firstOrNull { it.name?.endsWith(" S") == true }?.season
-            val specialSeason = if (source.videos.keys.any { it.first == 0 })
-                (source.videos.keys.maxOfOrNull { it.first } ?: 0) + 1 else null
-            fun nativeKey(episode: Episode): Pair<Int, Int> =
-                (if (existingSpecial != null && episode.season == existingSpecial) 0
-                    else episode.season ?: 1) to (episode.episode ?: 1)
-            val nativeByKey = response.episodes.associateBy(::nativeKey)
-            val template = response.episodes.firstOrNull {
-                it.data.trim().startsWith("{")
-            }
-            val seed = template?.let { runCatching { JSONObject(it.data) }.getOrNull() }
-            val result = ArrayList<Episode>(maxOf(response.episodes.size, source.videos.size))
-            val applied = HashSet<Pair<Int, Int>>()
-            val sorted = source.videos.entries.sortedWith(
-                compareBy<Map.Entry<Pair<Int, Int>, AioVideo>>(
-                    { if (it.key.first == 0) Int.MAX_VALUE else it.key.first },
-                    { it.key.second }
-                )
-            )
-            for ((key, video) in sorted) {
-                val (season, number) = key
-                val native = nativeByKey[key]
-                val displaySeason = if (season == 0) specialSeason ?: 0 else season
-                val episode = if (native != null) native.copy() else {
-                    // An additional episode needs an actual AIO video ID and the
-                    // original StremioC playback contract. Never fabricate either.
-                    val id = video.id?.takeIf(String::isNotBlank) ?: continue
-                    val base = seed?.takeIf { it.optString("addonUrl").isNotBlank() }
-                        ?: continue
-                    val originalEpisode = template ?: continue
-                    val payload = JSONObject(base.toString())
-                    payload.put("id", id)
-                    payload.put("season", displaySeason)
-                    payload.put("episode", number)
-                    payload.remove("imdbSeason")
-                    payload.remove("imdbEpisode")
-                    video.imdbSeason?.let { payload.put("imdbSeason", it) }
-                    video.imdbEpisode?.let { payload.put("imdbEpisode", it) }
-                    video.imdbId?.takeIf { it.matches(Regex("tt[0-9]+")) }
-                        ?.let { payload.put("imdbId", it) }
-                    payload.remove("embeddedStreams")
-                    payload.remove("embeddedStreamTitle")
-                    video.streams?.let { payload.put("embeddedStreams", it.toString()) }
-                    originalEpisode.copy(data = payload.toString())
-                }
-                val info = video.meta.withFallback(tmdb[key])
-                episode.season = displaySeason
+        ): TvSeriesLoadResponse {
+            val path = response.url.substringBefore('?').substringAfter("/meta/", "")
+            val type = path.substringBefore('/')
+            val originalId = Uri.decode(path.substringAfterLast('/').removeSuffix(".json"))
+            val addonUrl = response.url.substringBefore("/meta/", "")
+            val specialSeason = if (source.videos.any { it.season == 0 })
+                (source.videos.mapNotNull { it.season?.takeIf { n -> n > 0 } }
+                    .maxOrNull() ?: 0) + 1 else null
+            val episodes = source.videos.mapIndexed { index, video ->
+                val season = if (video.season == 0) specialSeason else video.season
+                val number = video.number ?: index + 1
+                val payload = JSONObject().put("type", type)
+                    .put("id", video.id ?: originalId)
+                    .put("season", season).put("episode", number)
+                    .put("addonUrl", addonUrl)
+                    .put("isAnime", response.type == TvType.Anime)
+                    .put("watchProgressAllowed",
+                        response.syncData["watch_progress_allowed"] == "true")
+                    .put("watchProgressPreferKitsu",
+                        response.syncData["watch_progress_prefer_kitsu"] == "true")
+                response.syncData["imdb"]?.let { payload.put("imdbId", it) }
+                response.syncData["tmdb"]?.toIntOrNull()?.let { payload.put("tmdbId", it) }
+                response.syncData["mal"]?.toIntOrNull()?.let { payload.put("malId", it) }
+                response.syncData["anilist"]?.toIntOrNull()?.let { payload.put("anilistId", it) }
+                response.syncData["kitsu"]?.let { payload.put("kitsuId", it) }
+                if (originalId.startsWith("mal:") || originalId.startsWith("kitsu:") ||
+                    originalId.startsWith("anilist:"))
+                    payload.put("originalAnimeId", originalId)
+                video.imdbSeason?.let { payload.put("imdbSeason", it) }
+                video.imdbEpisode?.let { payload.put("imdbEpisode", it) }
+                video.imdbId?.let { payload.put("imdbId", it) }
+                video.streams?.let { payload.put("embeddedStreams", it.toString()) }
+                val key = video.season?.let { s -> video.number?.let { n -> s to n } }
+                val info = video.meta.withFallback(key?.let(tmdb::get))
+                info.name?.let { payload.put("embeddedStreamTitle", it) }
+                @Suppress("DEPRECATION_ERROR")
+                val episode = Episode(payload.toString())
+                episode.season = season
                 episode.episode = number
-                episode.name = info.name ?: native?.name ?: "Episode $number"
-                episode.posterUrl = info.poster ?: native?.posterUrl
-                episode.description = info.description ?: native?.description
-                episode.score = info.rating?.let { Score.from10(it) } ?: native?.score
-                episode.date = date(info.date) ?: native?.date
-                episode.runTime = info.runTime ?: native?.runTime
-                result.add(episode)
-                applied.add(key)
+                episode.name = info.name ?: "Episode $number"
+                episode.posterUrl = info.poster
+                episode.description = info.description
+                episode.score = info.rating?.let { Score.from10(it) }
+                episode.date = date(info.date)
+                episode.runTime = info.runTime
+                episode
             }
-            // An incomplete AIO video list must not remove original playable episodes.
-            response.episodes.filterTo(result) { nativeKey(it) !in applied }
-            if (result.isEmpty()) return null
-            val names = response.seasonNames.orEmpty()
-                .filterNot { existingSpecial != null && it.season == existingSpecial }
-                .let { list -> if (specialSeason != null)
-                    list + SeasonData(specialSeason, "Season S") else list }
-            return response.copy(episodes = result, seasonNames = names, comingSoon = false)
+            val names = source.videos.mapNotNull { it.season }.distinct().map { season ->
+                if (season == 0) SeasonData(specialSeason ?: 0, "Season S")
+                else SeasonData(season)
+            }
+            return response.copy(episodes = episodes, seasonNames = names, comingSoon = false)
         }
 
         private fun restoreNativeSeries() {
@@ -804,10 +792,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
         private fun updateEpisodes() {
             val source = metadata ?: return
-            val base = originalEpisodes ?: return
+            val baseRef = originalEpisodes
+            if (source.source != "AIO" && baseRef == null) return
+            val base = baseRef.orEmpty()
             val generation = serial
-            val completeAio = source.source == "AIO" && source.videos.isNotEmpty() &&
-                original?.syncData?.get("metadata_swap_allowed") == "true"
+            val completeAio = source.source == "AIO"
             metadataSwapTrace("ELEVATE_EPISODES_START gen=$generation originalCount=${base.size}" +
                 " source=${source.source} tmdbIdAvailable=${detailId != null}")
             episodeJob?.cancel()
@@ -874,7 +863,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     }
                 }
                 if (generation != serial || metadata !== source ||
-                    originalEpisodes !== base || !fragment.isAdded) {
+                    originalEpisodes !== baseRef || !fragment.isAdded) {
                     metadataSwapTrace("ELEVATE_EPISODES_STALE gen=$generation")
                     return@launch
                 }
@@ -885,8 +874,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         ?: (runCatching { responseField?.get(model) as? TvSeriesLoadResponse }.getOrNull())
                     if (response != null && response.url == original?.url) {
                         val rebuilt = buildAioSeries(response, source, tmdbEpisodes)
-                        if (rebuilt != null && rebuilt.episodes.isNotEmpty()) {
-                            if (nativeSeries == null) nativeSeries = response
+                        if (nativeSeries == null) nativeSeries = response
                             rebuildingHost = true
                             responseField?.set(model, rebuilt)
                             val published = rebuildHostEpisodes(model, rebuilt)
@@ -900,8 +888,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 " aioEpisodes=${rebuilt.episodes.size}" +
                                 " seasons=${rebuilt.episodes.mapNotNull { it.season }.distinct().size}")
                             if (published) return@launch
-                        }
                     }
+                    // Do not publish a partial original/AIO episode merge.
+                    return@launch
                 }
                 var matched = 0
                 var unmatched = 0
@@ -1251,7 +1240,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             throw cancelled
         } catch (_: Exception) { null }
 
-        suspend fun load(rawManifest: String, movie: Boolean, ids: ElevateMediaIdentity.Ids, locale: String): JSONObject? {
+        suspend fun load(rawManifest: String, movie: Boolean, anime: Boolean,
+            sourceUrl: String, locale: String): JSONObject? {
             val manifest = manifestUrl(rawManifest)
             if (manifest == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP reason=invalid_manifest")
@@ -1286,7 +1276,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
             }.orEmpty()
             val candidates = if (movie) listOf("movie") else
-                if (ids.animeIds) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
+                if (anime) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
             val type = candidates.firstOrNull { it in allowedTypes }
             if (type == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash" +
@@ -1294,16 +1284,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     " allowedTypes=${allowedTypes.joinToString(",")}")
                 return null
             }
-            val prefixes = definition.optJSONArray("idPrefixes")?.let { arr ->
-                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
-            }.orEmpty()
-            val values = listOfNotNull(ids.original, ids.imdb, ids.tmdb?.let { "tmdb:$it" },
-                ids.mal?.let { "mal:$it" }, ids.anilist?.let { "anilist:$it" },
-                ids.kitsu?.let { "kitsu:$it" }).distinct().filter { id ->
-                prefixes.isEmpty() || prefixes.any { id.startsWith(it, ignoreCase = true) }
-            }
-            metadataSwapTrace("ELEVATE_ADDON_CANDIDATES manifestHash=$manifestHash" +
-                " type=$type ids=${values.size} prefixes=${prefixes.size}")
+            val id = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
+                .substringAfter('/', "").removeSuffix(".json")
+                .takeIf { it.isNotBlank() }?.let(Uri::decode) ?: return null
+            metadataSwapTrace("ELEVATE_ADDON_ID type=$type source=stremioc_meta")
             val version = definition.optString("version").trim()
             synchronized(metadata) {
                 val last = versions.put(uri, version)
@@ -1321,21 +1305,18 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         " remaining=${metadata.size} bytes=$metaBytes")
                 }
             }
-            for (id in values.take(4)) {
-                val url = manifest.buildUpon().encodedPath(
-                    manifest.encodedPath.orEmpty().removeSuffix("/manifest.json") +
-                        "/meta/$type/${Uri.encode(id)}.json"
-                ).build().toString()
-                val key = version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
-                val result = shared(key, "meta", metadata, metaFlights) {
-                    request(url, movie)
-                }
-                val found = result?.optJSONObject("meta") != null
-                metadataSwapTrace("ELEVATE_ADDON_META manifestHash=$manifestHash type=$type" +
-                    " idHash=${Integer.toHexString(id.hashCode())} received=${result != null}" +
-                    " validMeta=$found")
-                if (found) return result
+            val url = manifest.buildUpon().encodedPath(
+                manifest.encodedPath.orEmpty().removeSuffix("/manifest.json") +
+                    "/meta/$type/${Uri.encode(id)}.json"
+            ).build().toString()
+            val key = version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
+            val result = shared(key, "meta", metadata, metaFlights) {
+                request(url, movie)
             }
+            val found = result?.optJSONObject("meta") != null
+            metadataSwapTrace("ELEVATE_ADDON_META manifestHash=$manifestHash type=$type" +
+                " received=${result != null} validMeta=$found")
+            if (found) return result
             metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash reason=no_valid_meta")
             return null
         }
