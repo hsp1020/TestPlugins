@@ -21,7 +21,7 @@ internal object ElevateAnimeIdResolver {
         val simkl: String? = null, val tvdb: String? = null,
         val tvdbSeason: Int? = null, val tmdbSeason: Int? = null,
         val traktSeason: Int? = null,
-        val imdbSeason: Int? = null
+        val imdbSeason: Int? = null, val tmdbFromEpisode: Int? = null
     ) {
         fun matchesSeason(season: Int): Boolean =
             ElevateWatchHistoryRules.consistentSeason(season,
@@ -169,7 +169,8 @@ internal object ElevateAnimeIdResolver {
                             data.optJSONObject("tvdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 },
-                            data.optJSONObject("imdb")?.optInt("seasonNumber")?.takeIf { it > 0 }
+                            data.optJSONObject("imdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
+                            data.optJSONObject("tmdb")?.optInt("fromEpisode")?.takeIf { it > 0 }
                         )
                         break
                     }

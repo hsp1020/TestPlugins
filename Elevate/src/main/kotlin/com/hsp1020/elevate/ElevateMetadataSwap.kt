@@ -585,12 +585,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
             if (metadata != null && swapped != null) suppressNativeTrailers()
         }
         private val episodeObserver = Observer<Resource<List<ResultEpisode>>?> { state ->
-            val list = (state as? Resource.Success<List<ResultEpisode>>)?.value ?: return@Observer
-            if (list === swappedEpisodes || aioRebuilt || rebuildingHost) {
+            if (state is Resource.Loading) {
+                if (metadata != null && !rebuildingHost)
+                    swappedEpisodes?.let(::nativeEpisodes)
                 return@Observer
             }
+            val list = (state as? Resource.Success<List<ResultEpisode>>)?.value ?: return@Observer
+            if (list === swappedEpisodes || aioRebuilt || rebuildingHost) return@Observer
             originalEpisodes = list
-            if (pendingPage != null || metadata != null) nativeEpisodesLoading()
+            if (pendingPage != null && swappedEpisodes == null) nativeEpisodesLoading()
             updateEpisodes()
         }
 
@@ -635,8 +638,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
 
         fun start() {
-            model.page.observe(fragment.viewLifecycleOwner, observer)
             model.episodes.observe(fragment.viewLifecycleOwner, episodeObserver)
+            model.page.observe(fragment.viewLifecycleOwner, observer)
             model.trailers.observe(fragment.viewLifecycleOwner, trailerObserver)
         }
 
@@ -679,7 +682,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 return
             }
             nativePageLoading(page)
-            nativeEpisodesLoading()
+            if (originalEpisodes == null ||
+                page.syncData["metadata_swap_source"] != provider) nativeEpisodesLoading()
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -836,8 +840,31 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val generation = serial
             episodeJob?.cancel()
             episodeJob = scope.launch {
+                val ids = ElevateMediaIdentity.collect(nativeResponse,
+                    extraSync = original?.syncData, urls = listOfNotNull(original?.url))
+                val animeLookup = if (source.source == "TMDB" &&
+                    ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids)) {
+                    val direct = ids.original?.let { raw ->
+                        val kind = raw.substringBefore(':')
+                        if (kind in setOf("anilist", "mal", "kitsu"))
+                            kind to raw.substringAfter(':').substringBefore(':')
+                        else null
+                    }
+                    direct ?: listOfNotNull(
+                        ids.anilist?.let { "anilist" to it },
+                        ids.mal?.let { "mal" to it },
+                        ids.kitsu?.let { "kitsu" to it }
+                    ).firstOrNull()
+                } else null
+                val animeMapping = animeLookup?.let { (kind, id) ->
+                    ElevateAnimeIdResolver.resolve(kind, id)
+                }
+                val tmdbSeason = animeMapping?.tmdbSeason
+                val tmdbStart = animeMapping?.tmdbFromEpisode
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
-                    val id = detailId
+                    val id = if (animeLookup != null) {
+                        animeMapping?.tmdb?.takeIf { tmdbSeason != null }
+                    } else detailId
                     if (id == null) emptyMap() else {
                         val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                         // Match only true season/episode numbers; never assume a remapped
@@ -852,7 +879,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 it == episode.season && it in 0..99 && episode.episode > 0 &&
                                     (activeSeason == null || it == activeSeason)
                             }
-                        }.distinct()
+                        }.distinct().map { tmdbSeason ?: it }.distinct()
                         val responses = seasons.map { season ->
                             async(Dispatchers.IO) {
                                 if (source.source == "AIO" && (if (completeAio)
@@ -926,9 +953,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     }
                     val key = season?.let { it to episode.episode }
                     val addon = key?.let { source.episodes[it] }
-                    val tmdb = key?.let { tmdbEpisodes[it] }
+                    val mappedKey = season?.let {
+                        (tmdbSeason ?: it) to (episode.episode + (tmdbStart ?: 1) - 1)
+                    }
+                    val tmdb = (mappedKey ?: key)?.let { tmdbEpisodes[it] }
                     val info = if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
                         else tmdb
+                    if (animeLookup != null && info == null) return@map episode
                     // .copy retains playback URL, episode ID, season mapping and watch progress.
                     episode.copy(
                         name = info?.name, description = info?.description,
@@ -965,7 +996,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             model.trailers.removeObserver(trailerObserver)
             restoreNativeSeries()
             restoreNativeTrailers()
-            if ((model.episodes.value as? Resource.Success<List<ResultEpisode>>)
+            if (model.episodes.value is Resource.Loading ||
+                (model.episodes.value as? Resource.Success<List<ResultEpisode>>)
                     ?.value === swappedEpisodes)
                 originalEpisodes?.let(::nativeEpisodes)
             val visible = (model.page.value as? Resource.Success<ResultData>)?.value
