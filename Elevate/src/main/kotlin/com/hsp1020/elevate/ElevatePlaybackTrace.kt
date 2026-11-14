@@ -29,12 +29,14 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         if (running) return
         running = true
         application.registerActivityLifecycleCallbacks(this)
+        ElevateActivityResultOwner.bootstrap()
     }
 
     fun stop() {
         if (!running) return
         running = false
         application.unregisterActivityLifecycleCallbacks(this)
+        ElevateActivityResultOwner.reset()
         previousDestroyed.clear()
     }
 
@@ -50,12 +52,18 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             "intentFlags=0x${Integer.toHexString(activity.intent?.flags ?: 0)}")
     }
 
+    override fun onActivityPostCreated(activity: Activity, state: Bundle?) {
+        ElevateActivityResultOwner.track(activity, "POST_CREATE")
+    }
+
     override fun onActivityPreDestroyed(activity: Activity) {
+        ElevateActivityResultOwner.onDestroy(activity)
         ReceiverRegistrationTrace.snapshot(activity, "PRE_DESTROY")
         DownloadedPlayerLeakCleanup.onDestroy(activity)
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        ElevateActivityResultOwner.onDestroy(activity)
         // Fallback on older Android versions; callback removal is idempotent.
         DownloadedPlayerLeakCleanup.onDestroy(activity)
         ReceiverRegistrationTrace.snapshot(activity, "DESTROYED")
@@ -66,7 +74,10 @@ internal class ElevatePlaybackTrace(private val application: Application) :
             "activity=${System.identityHashCode(activity)},taskId=${activity.taskId},reason=$reason"
     }
 
-    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityStarted(activity: Activity) {
+        // Also covers Android versions without onActivityPostCreated().
+        ElevateActivityResultOwner.track(activity, "STARTED")
+    }
     override fun onActivityResumed(activity: Activity) {
         ReceiverRegistrationTrace.snapshot(activity, "RESUMED")
     }

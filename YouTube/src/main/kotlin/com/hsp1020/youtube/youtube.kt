@@ -2385,6 +2385,28 @@ class YoutubeProvider(
         return extractYtInitialDataInternal(html, setOf("contents"))
     }
 
+    /** Channel pages consume tabs, channel metadata, and native sort chips.
+     * Keep action/continuation roots for layouts that expose page tokens there.
+     * Unexpected browse layouts use the original full parser unchanged.
+     */
+    private fun extractChannelInitialData(html: String): Map<String, Any>? {
+        val scoped = extractYtInitialDataInternal(html, setOf(
+            "contents", "header", "metadata", "microformat", "continuationContents",
+            "onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands"
+        ))
+        val browseTabs = safeGet(scoped, "contents", "twoColumnBrowseResultsRenderer", "tabs")
+            ?: safeGet(scoped, "contents", "singleColumnBrowseResultsRenderer", "tabs")
+        val filtered = browseTabs is List<*>
+        val result = if (filtered) scoped else extractYtInitialData(html)
+        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+            Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_JSON_SCOPE " +
+                "mode=${if (filtered) "FILTERED" else "FULL_FALLBACK"} " +
+                "keys=${result?.keys?.joinToString(",") ?: "none"} hasTabs=$filtered " +
+                "htmlChars=${html.length}")
+        }
+        return result
+    }
+
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
@@ -3727,7 +3749,7 @@ class YoutubeProvider(
                 } else null
                 val html = response?.text.orEmpty()
                 val data = if (response != null) {
-                    extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
+                    extractChannelInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
                 } else null
                 if (data != null) rememberChannelSortLabels(cleanUrl, data)
                 val channelTabs = (safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs")
@@ -3849,6 +3871,11 @@ class YoutubeProvider(
                         else snapshot?.pagesFetched ?: 1
                     if (snapshot != null && (snapshot.pagesFetched >= tabPageTarget ||
                             snapshot.nextToken.isNullOrBlank())) {
+                        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+                            Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_TAB_CACHE " +
+                                "tab=$tabName episodes=${snapshot.episodes.size} pages=${snapshot.pagesFetched} " +
+                                "nextToken=${!snapshot.nextToken.isNullOrBlank()}")
+                        }
                         return snapshot.episodes.map { it.copy() }
                     }
                     val tabEpisodes = snapshot?.episodes?.map { it.copy() }?.toMutableList()
@@ -3861,7 +3888,7 @@ class YoutubeProvider(
                         // The channel header already fetched and parsed /videos.
                         var tabData = if (tabUrl == channelUrl && data != null) data else {
                             val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
-                            extractYtInitialData(tabHtml) ?: return emptyList()
+                            extractChannelInitialData(tabHtml) ?: return emptyList()
                         }
 
                         var initialItems: List<*>? = null
@@ -3925,7 +3952,7 @@ class YoutubeProvider(
                         // Some channel header responses contain metadata but an empty tab grid.
                         // Retry /videos only in that case; normally the existing HTML is reused.
                         if (initialItems.isNullOrEmpty() && tabUrl == channelUrl) {
-                            val refreshedData = extractYtInitialData(
+                            val refreshedData = extractChannelInitialData(
                                 app.get(tabUrl, interceptor = ytInterceptor).text
                             )
                             if (refreshedData != null) {
@@ -4058,6 +4085,12 @@ class YoutubeProvider(
                             )
                         }
                     }
+                    System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+                        Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_TAB_RESULT " +
+                            "tab=$tabName episodes=${tabEpisodes.size} pages=$pagesFetchedLocal " +
+                            "targetPages=$tabPageTarget nextToken=${!currentToken.isNullOrBlank()} " +
+                            "cacheable=$cacheable")
+                    }
                     return tabEpisodes
                 }
                 
@@ -4077,6 +4110,12 @@ class YoutubeProvider(
 
                 val videosEpisodes = pair.first
                 val shortsEpisodes = pair.second
+                System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+                    Log.i("JavaAllocCause", "run=$run module=YouTube phase=CHANNEL_PAGE_RESULT " +
+                        "titleFallback=${title == "YouTube Channel"} poster=${!poster.isNullOrBlank()} " +
+                        "description=${channelDescription != "\u200b"} " +
+                        "videos=${videosEpisodes.size} shorts=${shortsEpisodes.size}")
+                }
 
                 val allEpisodes = mutableListOf<Episode>()
 
