@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -102,6 +103,7 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
         private var player: Media3Player? = null
         private var removeObservers: (() -> Unit)? = null
         private var independentProbeStarted = false
+        private var playbackFileUri: Uri? = null
         private val processCpuStartMs = Process.getElapsedCpuTime()
         private var tickNo = 0
 
@@ -146,11 +148,14 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
             if (!independentProbeStarted) {
                 independentProbeStarted = true
                 val file = vm?.state?.generatorState?.meta as? ExtractorUri
-                if (file != null) {
-                    ElevateOfflineFileProbe.start(activity.applicationContext, file.uri,
+                val uri = playbackFileUri ?: file?.uri?.takeIf { it.scheme == "content" || it.scheme == "file" }
+                if (uri != null) {
+                    log("PROBE_URI", "source=${if (playbackFileUri != null) "media3" else "generator"} " +
+                        "scheme=${uri.scheme} authority=${uri.authority}")
+                    ElevateOfflineFileProbe.start(activity.applicationContext, uri,
                         id, startedMs, player?.currentPosition ?: 0L)
                 } else {
-                    log("PROBE_NOT_STARTED", "reason=no_offline_uri")
+                    log("PROBE_NOT_STARTED", "reason=no_resolved_playback_uri")
                 }
             }
         }
@@ -212,6 +217,12 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                     val info = args?.getOrNull(1) as? LoadEventInfo
                     val data = args?.getOrNull(2) as? MediaLoadData
                     val spec = info?.dataSpec
+                    val actualUri = spec?.uri
+                    if (data?.dataType == C.DATA_TYPE_MEDIA &&
+                        data?.trackType == C.TRACK_TYPE_UNKNOWN &&
+                        (actualUri?.scheme == "content" || actualUri?.scheme == "file")) {
+                        playbackFileUri = actualUri
+                    }
                     log("MEDIA3_${method.name}", "task=${info?.loadTaskId} durationMs=${info?.loadDurationMs} " +
                         "bytes=${info?.bytesLoaded} type=${data?.dataType} trackType=${data?.trackType} " +
                         "mime=${data?.trackFormat?.sampleMimeType} startMs=${data?.mediaStartTimeMs} " +
