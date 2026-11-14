@@ -7,6 +7,9 @@ import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import java.util.zip.Deflater
 import android.content.Context
 import android.os.Bundle
 import android.util.TypedValue
@@ -145,9 +148,9 @@ internal fun Spinner.useElevateSettingsDropdown(
 }
 
 class ElevateSettingsFragment : DialogFragment() {
-    private var pendingAllocationExport: File? = null
+    private var pendingAllocationExport: Pair<File, File>? = null
     private val exportAllocation = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
+        ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
         val source = pendingAllocationExport
         pendingAllocationExport = null
@@ -157,11 +160,18 @@ class ElevateSettingsFragment : DialogFragment() {
             val result = runCatching {
                 val output = app.contentResolver.openOutputStream(uri)
                     ?: error("Destination unavailable")
-                output.use { stream -> source.inputStream().use { it.copyTo(stream) } }
+                ZipOutputStream(output.buffered()).use { zip ->
+                    zip.setLevel(Deflater.BEST_SPEED)
+                    for (file in listOf(source.first, source.second)) {
+                        zip.putNextEntry(ZipEntry(file.name))
+                        file.inputStream().buffered().use { it.copyTo(zip) }
+                        zip.closeEntry()
+                    }
+                }
             }
             Handler(Looper.getMainLooper()).post {
                 context?.let { ctx ->
-                    Toast.makeText(ctx, if (result.isSuccess) "Profile exported"
+                    Toast.makeText(ctx, if (result.isSuccess) "Perfetto + HPROF ZIP exported"
                         else "Export failed: " + result.exceptionOrNull()?.javaClass?.simpleName,
                         Toast.LENGTH_LONG).show()
                 }
@@ -524,9 +534,9 @@ class ElevateSettingsFragment : DialogFragment() {
             setPadding(0, dp(16), 0, dp(6))
         })
         content.addView(TextView(ctx).apply {
-            text = "Android 15+. Start 180-second allocation sampling, reproduce the issue, " +
-                "Stop and export Perfetto. Samples memory and GC every 5 seconds only while recording. " +
-                "Heap Dump is a separate one-shot request which may pause the app."
+            text = "Android 15+. Start the 180-second allocation sampling, reproduce the issue, " +
+                "then press Stop once. Perfetto is saved first, followed automatically by a Java heap " +
+                "dump (HPROF); the app may pause during the dump. Export both together as one ZIP."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, 0, 0, dp(6))
         })
@@ -549,33 +559,21 @@ class ElevateSettingsFragment : DialogFragment() {
             Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
             if (result.startsWith("Recording requested")) dismiss()
         }
-        allocationButton("Stop / finish allocation profile") {
-            val result = ElevateJavaAllocationProfile.stop()
+        allocationButton("Stop / save Perfetto + HPROF") {
+            val result = ElevateJavaAllocationProfile.stop(ctx.applicationContext)
             allocationStatus.text = result
             Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
         }
-        allocationButton("Request Java heap dump (HPROF)") {
-            AlertDialog.Builder(ctx)
-                .setTitle("Capture Java heap dump?")
-                .setMessage("The app may briefly pause and the heap dump may be large. " +
-                    "Use separately from allocation profiling and only when memory is stable.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Capture") { _, _ ->
-                    val result = ElevateJavaAllocationProfile.heapDump(ctx.applicationContext)
-                    allocationStatus.text = result
-                    Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
-                }.show()
-        }
-        allocationButton("Export Perfetto / HPROF") {
-            val files = ElevateJavaAllocationProfile.profiles(ctx)
-            if (files.isEmpty()) {
-                Toast.makeText(ctx, "No completed profiles. Check status and retry.", Toast.LENGTH_LONG).show()
+        allocationButton("Export Perfetto + HPROF ZIP") {
+            val sessions = ElevateJavaAllocationProfile.completedSessions(ctx)
+            if (sessions.isEmpty()) {
+                Toast.makeText(ctx, "No complete pair yet. Check profiling status.", Toast.LENGTH_LONG).show()
             } else {
                 AlertDialog.Builder(ctx)
-                    .setTitle("Choose memory profile")
-                    .setItems(files.map { it.name }.toTypedArray()) { _, index ->
-                        pendingAllocationExport = files[index]
-                        exportAllocation.launch(files[index].name)
+                    .setTitle("Choose memory diagnostic session")
+                    .setItems(sessions.map { it.first.name.removeSuffix(".perfetto-trace") }.toTypedArray()) { _, index ->
+                        pendingAllocationExport = sessions[index]
+                        exportAllocation.launch(sessions[index].first.name.removeSuffix(".perfetto-trace") + ".zip")
                     }.show()
             }
         }
