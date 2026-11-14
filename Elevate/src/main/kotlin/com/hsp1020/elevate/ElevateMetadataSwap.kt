@@ -156,7 +156,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             swapped = null
             job?.cancel()
             val generation = ++serial
-            if (!prefs.getBoolean(ElevateFeature.METADATA_SWAP.name, false)) return
+            if (!prefs.getBoolean(ElevateFeature.METADATA_SWAP.name, false) ||
+                page.syncData["metadata_swap_allowed"] == "false") return
             val provider = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_PROVIDER, "TMDB")
             val manifest = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty()
             if (provider == "AIO" && manifest.isBlank()) return

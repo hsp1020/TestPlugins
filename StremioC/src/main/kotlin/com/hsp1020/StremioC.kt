@@ -372,12 +372,10 @@ open class StremioC(
             setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
         } else emptySet()
 
-    private fun libraryMetadataBase(): String? = CloudStreamApp.context?.let { context ->
-        context.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
-            .getString("METADATA_SWAP_ADDON_URL", null)?.takeIf(String::isNotBlank)
-            ?: context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                .getString("history_sync_url", null)
-    }?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
+    private fun libraryMetadataBase(): String? = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("history_sync_url", null)
+        ?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
 
     private fun libraryItemId(url: String, host: String, vararg sections: String): String? =
         runCatching {
@@ -682,19 +680,8 @@ open class StremioC(
         return loadProviderDynamically("phisher", "com.phisher98.StreamPlayAnime")
     }
 
-    fun getUnifiedMetaUrl(type: String, id: String): String {
-        val (syncUrl, syncMap, _) = getSyncSettings()
-        val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
-        val isSyncEnabled = syncMap[currentCleanUrl] ?: false
-
-        return if (isSyncEnabled && syncUrl.isNotBlank()) {
-            val cleanBase = syncUrl.cleanBaseUrl()
-            "$cleanBase/meta/$type/${id.urlEncode()}.json"
-        } else {
-            val cleanBase = mainUrl.cleanBaseUrl()
-            "$cleanBase/meta/$type/${id.urlEncode()}.json"
-        }
-    }
+    fun getUnifiedMetaUrl(type: String, id: String): String =
+        "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
 
     fun getTargetApiName(): String {
         val (_, syncMap, _) = getSyncSettings()
@@ -1104,6 +1091,12 @@ open class StremioC(
                 ?: (url.isBlank() || stremioManifestUrl(url) !in settings.disabledCatalogUrls)
         }
 
+        /** Expose only the catalog's metadata setting; Elevate owns its swap source and requests. */
+    private fun isMetadataSwapAllowed(catalogUrl: String?): Boolean {
+        val catalog = catalogUrl?.takeIf { it.isNotBlank() }?.cleanBaseUrl()?.lowercase() ?: return false
+        return getSyncSettings().syncMap[catalog] == true
+    }
+
         /** Encode the catalog's progress permission into returned metadata. */
     private fun isWatchProgressAllowed(catalogUrl: String?): Boolean {
         val catalog = catalogUrl?.takeIf { it.isNotBlank() }?.cleanBaseUrl()?.lowercase() ?: return false
@@ -1130,9 +1123,7 @@ open class StremioC(
                 }
                 val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyList())
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                val syncUrl = context.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
-                    .getString("METADATA_SWAP_ADDON_URL", null)?.takeIf(String::isNotBlank)
-                    ?: prefs.getString("history_sync_url", "").orEmpty()
+                val syncUrl = prefs.getString("history_sync_url", "").orEmpty()
                 val json = prefs.getString("stremio_saved_links", null)
                 val map = mutableMapOf<String, Boolean>()
                 val progressMap = mutableMapOf<String, Boolean>()
@@ -5275,6 +5266,7 @@ open class StremioC(
                     .mapNotNull { it?.trim()?.lowercase()?.takeIf { code ->
                         code.matches(Regex("[a-z]{2,3}")) && code != "und"
                     } }.firstOrNull()?.let { syncData["original_language"] = it }
+                syncData["metadata_swap_allowed"] = StremioC.isMetadataSwapAllowed(provider.mainUrl).toString()
                 syncData["watch_progress_allowed"] = StremioC.isWatchProgressAllowed(provider.mainUrl).toString()
                 syncData["watch_progress_prefer_kitsu"] = (isAnimeMedia && finalKitsuId != null).toString()
                 syncData["trailer_choices"] = serializeStremioTrailers(finalTrailers)

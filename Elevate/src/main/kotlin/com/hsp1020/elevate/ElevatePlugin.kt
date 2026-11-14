@@ -753,8 +753,7 @@ private class NativeDetailSearchHook(private val app: Application) : Application
     }
 
     private fun attachSearch(fragment: Fragment, root: View) {
-        val marked = fragment.arguments?.getBoolean(MARKER) == true ||
-            fragment.arguments?.getBoolean("stremioc_detail_search") == true
+        val marked = fragment.arguments?.getBoolean(MARKER) == true
         if (!marked && !searchSession) return
         searchSession = true
         val fresh = marked && freshSearchPending
@@ -808,8 +807,7 @@ private class NativeDetailSearchHook(private val app: Application) : Application
     }
 
     private fun holdDetailReveal(search: Fragment) {
-        if (search.arguments?.getBoolean(MARKER) != true &&
-            search.arguments?.getBoolean("stremioc_detail_search") != true) return
+        if (search.arguments?.getBoolean(MARKER) != true) return
         val activity = search.activity ?: return
         fun find(name: String): View? {
             val id = activity.resources.getIdentifier(name, "id", activity.packageName)

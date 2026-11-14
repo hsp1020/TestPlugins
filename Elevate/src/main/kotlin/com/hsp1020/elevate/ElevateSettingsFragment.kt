@@ -300,12 +300,6 @@ class ElevateSettingsFragment : DialogFragment() {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(8), 0, 0, dp(12))
-                        if (!preferences.contains(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL)) {
-                            val oldUrl = ctx.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                                .getString("history_sync_url", "").orEmpty().trim()
-                            if (oldUrl.isNotEmpty()) preferences.edit()
-                                .putString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, oldUrl).apply()
-                        }
                         val addonInput = EditText(ctx).apply {
                             hint = "AIOMetadata manifest.json URL"
                             inputType = android.text.InputType.TYPE_CLASS_TEXT or
