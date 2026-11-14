@@ -393,7 +393,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                 originLanguage = normalizedLanguage(resolved)
                 val activePlayer = player ?: return@launch
                 if (activePlayer === sourcePlayer &&
-                    activePlayer.trackSelectionParameters != initialParameters) {
+                    audioSelectionChanged(initialParameters, activePlayer.trackSelectionParameters)) {
                     val before = initialParameters
                     val after = activePlayer.trackSelectionParameters
                     ElevateDownloadStartupTrace.mark("AUDIO_ABORT", "reason=parameters_changed " +
@@ -426,6 +426,25 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                 "app=$appLanguage original=$originLanguage")
         choose(current, fallback)
     }
+
+    // Ignore subtitle/video changes while metadata is loading, but preserve
+    // an explicit manual audio choice and audio track preferences.
+    private fun audioSelectionChanged(
+        before: androidx.media3.common.TrackSelectionParameters,
+        after: androidx.media3.common.TrackSelectionParameters
+    ): Boolean =
+        before.preferredAudioLanguages != after.preferredAudioLanguages ||
+        before.preferredAudioLabels != after.preferredAudioLabels ||
+        before.preferredAudioRoleFlags != after.preferredAudioRoleFlags ||
+        before.preferredAudioMimeTypes != after.preferredAudioMimeTypes ||
+        before.maxAudioChannelCount != after.maxAudioChannelCount ||
+        before.maxAudioBitrate != after.maxAudioBitrate ||
+        before.forceHighestSupportedBitrate != after.forceHighestSupportedBitrate ||
+        before.forceLowestBitrate != after.forceLowestBitrate ||
+        before.overrides.filterKeys { it.type == C.TRACK_TYPE_AUDIO } !=
+            after.overrides.filterKeys { it.type == C.TRACK_TYPE_AUDIO } ||
+        (C.TRACK_TYPE_AUDIO in before.disabledTrackTypes) !=
+            (C.TRACK_TYPE_AUDIO in after.disabledTrackTypes)
 
     private fun choose(current: Media3Player, match: Pair<Tracks.Group, Int>) {
         selected = true
