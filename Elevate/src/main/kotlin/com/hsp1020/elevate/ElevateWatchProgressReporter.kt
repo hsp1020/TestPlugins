@@ -71,7 +71,8 @@ internal class ElevateWatchProgressReporter(private val application: Application
         val anime: Boolean, val progressAllowed: Boolean?, val preferKitsu: Boolean,
         val originalAnimeId: String?,
         val ids: Map<String, String>, val imdbNumbers: Pair<Int?, Int?>?, val urlId: String?,
-        val expectedDurationMs: Long?, val offline: ExtractorUri? = null
+        val expectedDurationMs: Long?, val offline: ExtractorUri? = null,
+        val parentId: Int? = null
     ) { val key: String get() = url + "#" + id }
 
     /** An explicit per-catalog policy is honored without inspecting the provider class. */
@@ -134,10 +135,10 @@ internal class ElevateWatchProgressReporter(private val application: Application
             return Item(id, "download:$parentId", "Download", movie,
                 if (movie) null else file.season, if (movie) null else file.episode,
                 file.tvType in setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA),
-                null, false, null, emptyMap(), null, null, null, file)
+                null, false, null, emptyMap(), null, null, null, file, file.parentId)
         }
         val episode = state.meta as? ResultEpisode ?: run { return null }
-        val collected = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
+        val collected = ElevateMediaIdentity.collect(response, episode.data)
         val ids = collected.asMap().toMutableMap()
         val policy = progressPolicy(response.syncData, episode.data)
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
@@ -151,7 +152,8 @@ internal class ElevateWatchProgressReporter(private val application: Application
             if (movie) null else episode.season, if (movie) null else episode.episode,
             ElevateMediaIdentity.anime(response, episode, collected),
             policy.first, policy.second, originalAnimeId(episode.data, collected), ids, imdbNumbers, urlId,
-            expectedMinutes?.takeIf { it in 1 until 1_440 }?.toLong()?.times(60_000L))
+            expectedMinutes?.takeIf { it in 1 until 1_440 }?.toLong()?.times(60_000L),
+            parentId = episode.parentId)
     }
 
     private fun progressEndpointBase(): String? {
@@ -644,6 +646,12 @@ internal class ElevateWatchProgressReporter(private val application: Application
         if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) return
         val item = report.item.offline?.let { resolveDownloaded(report.item) ?: return }
             ?: report.item
+        val saved = DataStoreHelper.getLastWatched(item.parentId)
+        Log.i("ElevateWatchProgress", "stage=LOCAL_RESUME event=${report.event}" +
+            " parentId=${item.parentId} currentEpisodeId=${item.id}" +
+            " currentSeason=${item.season} currentEpisode=${item.episode}" +
+            " savedEpisodeId=${saved?.episodeId} savedSeason=${saved?.season}" +
+            " savedEpisode=${saved?.episode} savedUpdatedAt=${saved?.updateTime}")
         if (item.progressAllowed == false) return
         val ids = item.ids.toMutableMap()
         // Reuse the same verified AIOStreams season mapping as Watch History Sync.
@@ -651,13 +659,6 @@ internal class ElevateWatchProgressReporter(private val application: Application
             val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
             val season = item.imdbNumbers?.first ?: item.season
             val tmdb = ids["tmdb"]
-            // Multi-season IMDb episodes must not inherit a title-wide season-1 anime ID.
-            // Only the existing AIOStreams season mapping may supply tracker IDs here.
-            if (imdb != null && season != null && season > 1) {
-                ids.remove("kitsu")
-                ids.remove("mal")
-                ids.remove("anilist")
-            }
             val source = item.originalAnimeId?.substringBefore(':')
                 ?.takeIf { it in setOf("kitsu", "mal", "anilist") }
             val needsMapping = season == null || season > 1 ||
@@ -745,12 +746,16 @@ internal class ElevateWatchProgressReporter(private val application: Application
             body.put("played", report.played ?: (report.duration > 0L &&
                 report.position.toDouble() / report.duration >= 0.80))
         val type = if (item.movie) "movie" else "series"
+        Log.i("ElevateWatchProgress", "stage=HTTP_REQUEST event=${report.event}" +
+            " metaId=$base videoId=$videoId season=$season episode=$episode")
         val response = app.post(
             report.target + "/playback/" + type + "/" + Uri.encode(videoId) + ".json",
             headers = mapOf("Content-Type" to "application/json"),
             requestBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()),
             timeout = 15L
         )
+        Log.i("ElevateWatchProgress", "stage=HTTP_RESPONSE event=${report.event}" +
+            " metaId=$base videoId=$videoId status=${response.okhttpResponse.code}")
         response.okhttpResponse.close()
     }
 }
