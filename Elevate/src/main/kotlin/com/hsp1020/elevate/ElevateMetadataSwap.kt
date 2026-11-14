@@ -14,6 +14,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.SeasonData
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
@@ -989,20 +990,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
             update(current)
         }
 
-        fun stop() {
+        fun stop(restoreOriginal: Boolean = false) {
             job?.cancel()
             episodeJob?.cancel()
             serial++
             model.page.removeObserver(observer)
             model.episodes.removeObserver(episodeObserver)
             model.trailers.removeObserver(trailerObserver)
-            restoreNativeSeries()
-            restoreNativeTrailers()
-            if ((model.episodes.value as? Resource.Success<List<ResultEpisode>>)
-                    ?.value === swappedEpisodes)
-                originalEpisodes?.let(::nativeEpisodes)
-            val visible = (model.page.value as? Resource.Success<ResultData>)?.value
-            if (visible === swapped) original?.let { nativePage(model, it) }
+            if (restoreOriginal) {
+                restoreNativeSeries()
+                restoreNativeTrailers()
+                if ((model.episodes.value as? Resource.Success<List<ResultEpisode>>)
+                        ?.value === swappedEpisodes)
+                    originalEpisodes?.let(::nativeEpisodes)
+                val visible = (model.page.value as? Resource.Success<ResultData>)?.value
+                if (visible === swapped) original?.let { nativePage(model, it) }
+            }
             swapped = null
             original = null
             originalEpisodes = null
@@ -1039,8 +1042,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         scan(activity.supportFragmentManager)
     }
 
-    private fun detach() {
-        screens.values.toList().forEach { it.stop() }
+    private fun detach(restoreOriginal: Boolean = false) {
+        screens.values.toList().forEach { it.stop(restoreOriginal) }
         screens.clear()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
         host = null
@@ -1049,17 +1052,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
     fun refresh() = screens.values.toList().forEach { it.refresh() }
     fun start() {
         application.registerActivityLifecycleCallbacks(this)
-        (com.lagradost.cloudstream3.CommonActivity.activity as? FragmentActivity)?.let(::attach)
+        (com.lagradost.cloudstream3.CommonActivity.activity as? MainActivity)?.let(::attach)
     }
     fun stop() {
         application.unregisterActivityLifecycleCallbacks(this)
-        detach()
+        detach(restoreOriginal = true)
         scope.cancel()
     }
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityStarted(activity: Activity) = Unit
     override fun onActivityResumed(activity: Activity) {
-        (activity as? FragmentActivity)?.let(::attach)
+        (activity as? MainActivity)?.let(::attach)
     }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit

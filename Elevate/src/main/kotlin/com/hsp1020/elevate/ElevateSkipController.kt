@@ -436,7 +436,7 @@ internal class ElevateSkipController(private val application: Application) :
 
     private fun publish() {
         val vm = model ?: return
-        val combined = ElevateSkipRepository.merge(custom, native)
+        val combined = ElevateSkipRepository.merge(custom)
         val instance = activeInstance
         val episode = activeEpisode
         if (instance < 0 || activeKey == null) return
@@ -1114,8 +1114,7 @@ internal object ElevateSkipRepository {
         return result.values.sortedBy { it.timestamp.startMs }
     }
 
-    fun merge(elevate: List<VideoSkipStamp>, native: List<VideoSkipStamp>): List<VideoSkipStamp> =
-        choose(elevate, native.filterNot { it.source.startsWith("Elevate/") })
+    fun merge(elevate: List<VideoSkipStamp>): List<VideoSkipStamp> = choose(elevate)
 
     private fun stamps(source: String, intervals: List<SkipStamp>, i: Identity): List<VideoSkipStamp> =
         intervals.filter { valid(it, i.duration) }.map { stamp ->
