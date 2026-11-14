@@ -663,25 +663,44 @@ internal class ElevateWatchProgressReporter(private val application: Application
                 ?.takeIf { it in setOf("kitsu", "mal", "anilist") }
             val needsMapping = season == null || season > 1 ||
                 imdb == null || ids["kitsu"] == null
-            val direct = source?.takeIf { needsMapping }?.let { kind ->
+            Log.i("ElevateWatchProgress", "stage=MAP_INPUT event=${report.event}" +
+                " imdb=$imdb season=$season episode=${item.episode}" +
+                " itemSeason=${item.season} originalAnimeId=${item.originalAnimeId}" +
+                " source=$source needsMapping=$needsMapping" +
+                " currentKitsu=${ids["kitsu"]} preferKitsu=${item.preferKitsu}")
+            val directCandidate = source?.takeIf { needsMapping }?.let { kind ->
                 item.originalAnimeId?.let { id ->
                     ElevateAnimeIdResolver.resolveTrackingSource(kind, id)
                 }
-            }?.takeIf { mapped ->
+            }
+            val directValid = directCandidate?.let { mapped ->
                 (imdb == null || mapped.imdb == null || mapped.imdb == imdb) &&
                     (tmdb == null || mapped.tmdb == null || mapped.tmdb == tmdb) &&
                     (season == null || mapped.matchesSeason(season))
-            }
-            val mapped = direct ?: if (imdb != null && season != null && season > 0 &&
-                (season > 1 || ids["kitsu"] == null)) {
-                ElevateAnimeIdResolver.resolveTrackingImdbSeason(imdb, season)
-                    ?.takeIf { it.matchesSeason(season) }
-            } else null
+            } == true
+            val direct = directCandidate?.takeIf { directValid }
+            val fallbackAttempted = direct == null && imdb != null && season != null &&
+                season > 0 && (season > 1 || ids["kitsu"] == null)
+            val fallbackCandidate = if (fallbackAttempted && imdb != null && season != null)
+                ElevateAnimeIdResolver.resolveTrackingImdbSeason(imdb, season) else null
+            val fallbackValid = fallbackCandidate?.let { mapped ->
+                season != null && mapped.matchesSeason(season)
+            } == true
+            val mapped = direct ?: fallbackCandidate?.takeIf { fallbackValid }
             mapped?.let {
                 it.kitsu?.let { value -> ids["kitsu"] = value }
                 it.mal?.let { value -> ids["mal"] = value }
                 it.anilist?.let { value -> ids["anilist"] = value }
             }
+            Log.i("ElevateWatchProgress", "stage=MAP_RESULT event=${report.event}" +
+                " directAttempted=${source != null && needsMapping}" +
+                " directKitsu=${directCandidate?.kitsu} directSeasons=" +
+                "${directCandidate?.let { listOf(it.imdbSeason, it.tvdbSeason, it.tmdbSeason, it.traktSeason) }}" +
+                " directValid=$directValid fallbackAttempted=$fallbackAttempted" +
+                " fallbackKitsu=${fallbackCandidate?.kitsu} fallbackSeasons=" +
+                "${fallbackCandidate?.let { listOf(it.imdbSeason, it.tvdbSeason, it.tmdbSeason, it.traktSeason) }}" +
+                " fallbackValid=$fallbackValid selectedKitsu=${mapped?.kitsu}" +
+                " finalKitsu=${ids["kitsu"]} finalMal=${ids["mal"]}")
         }
         if (ids["imdb"]?.matches(Regex("tt[0-9]+")) != true &&
             ids["tmdb"]?.toLongOrNull()?.let { it > 0L } != true) {

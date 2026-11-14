@@ -417,7 +417,40 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
         }
         val (actors, people) = if (includeActors) addonActors(meta) else null to null
+        val rawVideos = meta.optJSONArray("videos")
+        if (rawVideos != null) {
+            val rows = (0 until rawVideos.length()).mapNotNull { rawVideos.optJSONObject(it) }
+            val focus = rows.firstOrNull { row ->
+                val rawSeason = row.optInt("season").takeIf {
+                    row.has("season") && !row.isNull("season")
+                }
+                val imdbSeason = row.optInt("imdbSeason").takeIf { it > 0 }
+                imdbSeason != null && imdbSeason != rawSeason
+            } ?: rows.firstOrNull { !it.has("season") || it.isNull("season") }
+                ?: rows.firstOrNull()
+            android.util.Log.i("ElevateAioSeason", "stage=SOURCE_META" +
+                " metaId=${meta.optString("id")} videos=${rows.size}" +
+                " missingSeason=${rows.count { !it.has("season") || it.isNull("season") }}" +
+                " seasons=${rows.groupingBy { row ->
+                    if (!row.has("season") || row.isNull("season")) "null"
+                    else row.optString("season")
+                }.eachCount()}" +
+                " sampleId=${focus?.optString("id")} sampleSeason=${focus?.opt("season")}" +
+                " sampleEpisode=${focus?.opt("episode")} sampleImdbSeason=${focus?.opt("imdbSeason")}" +
+                " sampleImdbEpisode=${focus?.opt("imdbEpisode")}")
+        }
         val videos = addonVideos(meta)
+        if (rawVideos != null) {
+            val focus = videos.firstOrNull {
+                it.imdbSeason != null && it.imdbSeason != it.season
+            } ?: videos.firstOrNull { it.season == null } ?: videos.firstOrNull()
+            android.util.Log.i("ElevateAioSeason", "stage=PARSED_META" +
+                " metaId=${meta.optString("id")} videos=${videos.size}" +
+                " seasons=${videos.groupingBy { it.season }.eachCount()}" +
+                " sampleId=${focus?.id} sampleSeason=${focus?.season}" +
+                " sampleEpisode=${focus?.number} sampleImdbSeason=${focus?.imdbSeason}" +
+                " sampleImdbEpisode=${focus?.imdbEpisode}")
+        }
         return Metadata(title, meta.string("description", "overview"),
             meta.string("poster"), meta.string("background", "backdrop"),
             sequenceOf(meta.string("logo"), meta.string("logoUrl"),
@@ -541,6 +574,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private var rebuiltSeries: TvSeriesLoadResponse? = null
         private var aioRebuilt = false
         private var rebuildingHost = false
+        private var tracedHostEpisodes = false
         private val suppressedTrailers = emptyList<ExtractedTrailerData>()
         private var nativeTrailerBackup: List<ExtractedTrailerData>? = null
         private var metadata: Metadata? = null
@@ -606,6 +640,20 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val list = state.value
                     if (list === swappedEpisodes) return@Observer
                     if (rebuildingHost || aioRebuilt) {
+                        if (!tracedHostEpisodes && rebuiltSeries != null) {
+                            tracedHostEpisodes = true
+                            val sample = list.firstOrNull { it.season == null && it.episode > 0 }
+                                ?: list.firstOrNull()
+                            val payload = sample?.data?.let {
+                                runCatching { JSONObject(it) }.getOrNull()
+                            }
+                            android.util.Log.i("ElevateAioSeason", "stage=HOST_RESULT" +
+                                " videos=${list.size} seasons=${list.groupingBy { it.season }.eachCount()}" +
+                                " sampleSeason=${sample?.season} sampleEpisode=${sample?.episode}" +
+                                " samplePayloadSeason=${payload?.opt("season")}" +
+                                " sampleImdbSeason=${payload?.opt("imdbSeason")}" +
+                                " sampleImdbEpisode=${payload?.opt("imdbEpisode")}")
+                        }
                         // Preserve the host's rebuilt episode list across sync/PiP refreshes.
                         swappedEpisodes = list
                         return@Observer
@@ -668,6 +716,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             swapped = null
             metadata = null
             detailId = null
+            tracedHostEpisodes = false
             nativeResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
             pendingPage = null
             job?.cancel()
@@ -819,6 +868,21 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 episode.runTime = info.runTime
                 episode
             }
+            val sampleIndex = source.videos.indexOfFirst {
+                it.imdbSeason != null && it.imdbSeason != it.season
+            }.takeIf { it >= 0 } ?: source.videos.indexOfFirst {
+                it.season == null
+            }.takeIf { it >= 0 } ?: 0
+            val sampleVideo = source.videos.getOrNull(sampleIndex)
+            val sampleEpisode = episodes.getOrNull(sampleIndex)
+            android.util.Log.i("ElevateAioSeason", "stage=BUILT_EPISODES" +
+                " metaId=$originalId videos=${episodes.size}" +
+                " sourceSeasons=${source.videos.groupingBy { it.season }.eachCount()}" +
+                " builtSeasons=${episodes.groupingBy { it.season }.eachCount()}" +
+                " sampleId=${sampleVideo?.id} sampleSourceSeason=${sampleVideo?.season}" +
+                " sampleBuiltSeason=${sampleEpisode?.season} sampleEpisode=${sampleEpisode?.episode}" +
+                " sampleImdbSeason=${sampleVideo?.imdbSeason}" +
+                " sampleImdbEpisode=${sampleVideo?.imdbEpisode}")
             val names = source.videos.mapNotNull { it.season }.distinct().map { season ->
                 if (season == 0) SeasonData(specialSeason ?: 0,
                     "${fragment.getString(R.string.season)} S")
@@ -941,6 +1005,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             rebuiltSeries = rebuilt
                             responseField?.set(model, rebuilt)
                             val published = rebuildHostEpisodes(model, rebuilt)
+                            val hostResult = (model.episodes.value as?
+                                Resource.Success<List<ResultEpisode>>)?.value
+                            val hostSample = hostResult?.firstOrNull {
+                                it.season == null && it.episode > 0
+                            } ?: hostResult?.firstOrNull()
+                            android.util.Log.i("ElevateAioSeason", "stage=HOST_REBUILD" +
+                                " published=$published videos=${hostResult?.size}" +
+                                " seasons=${hostResult?.groupingBy { it.season }?.eachCount()}" +
+                                " sampleSeason=${hostSample?.season} sampleEpisode=${hostSample?.episode}")
                             if (published) {
                                 aioRebuilt = true
                             } else {
