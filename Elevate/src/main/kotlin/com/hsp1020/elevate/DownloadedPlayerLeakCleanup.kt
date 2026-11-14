@@ -110,7 +110,7 @@ internal object DownloadedPlayerLeakCleanup {
                 fragments[fragment]?.detach()
             }
 
-            override fun onFragmentPreDestroyed(fm: FragmentManager, fragment: Fragment) {
+            override fun onFragmentDestroyed(fm: FragmentManager, fragment: Fragment) {
                 val tracked = fragments.remove(fragment) ?: return
                 (fragment as? AbstractPlayerFragment<*>)?.let {
                     tracked.remember(it.playerView?.player, activityId)
