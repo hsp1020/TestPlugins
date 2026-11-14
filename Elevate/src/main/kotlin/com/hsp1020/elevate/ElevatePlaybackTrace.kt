@@ -6,7 +6,7 @@ import android.os.Bundle
 import android.os.Process
 import android.util.Log
 
-/** Activity creation and destruction evidence; no player polling or heap sampling. */
+/** Activity lifecycle evidence; optional memory checkpoints during a manual profile only. */
 internal class ElevatePlaybackTrace(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private companion object { const val TAG = "ElevateMedia3Trace" }
@@ -53,6 +53,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     override fun onActivityDestroyed(activity: Activity) {
         val reason = destroyReason(activity)
         Log.i(TAG, "ACTIVITY_DESTROY ${activityInfo(activity)} reason=$reason")
+        ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_DESTROY")
         previousDestroyed[activity.javaClass.name] =
             "activity=${System.identityHashCode(activity)},taskId=${activity.taskId},reason=$reason"
     }
@@ -60,6 +61,8 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     override fun onActivityStarted(activity: Activity) = Unit
     override fun onActivityResumed(activity: Activity) = Unit
     override fun onActivityPaused(activity: Activity) = Unit
-    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) {
+        ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_STOP")
+    }
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 }

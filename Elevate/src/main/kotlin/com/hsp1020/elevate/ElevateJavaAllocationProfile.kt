@@ -42,6 +42,15 @@ internal object ElevateJavaAllocationProfile {
     private var stopRequested = false
     private var traceFile: File? = null
     private var dumping = false
+    private var traceResolved = false
+    private var heapResolved = false
+    private var heapFile: File? = null
+    private var runStartedMs = 0L
+    private var stopRequestedMs = 0L
+    private var heapStartedMs = 0L
+    private var heapFinishedMs = 0L
+    private var traceCallbackMs = 0L
+    private var stopReason = ""
     private var sampler: ScheduledExecutorService? = null
     private var sampleIndex = 0
     private var lastGc: LongArray? = null
@@ -152,7 +161,16 @@ internal object ElevateJavaAllocationProfile {
                 awaitingResult = true
                 stopRequested = false
                 traceFile = null
+                heapFile = null
                 dumping = false
+                traceResolved = false
+                heapResolved = false
+                runStartedMs = SystemClock.elapsedRealtime()
+                stopRequestedMs = 0L
+                heapStartedMs = 0L
+                heapFinishedMs = 0L
+                traceCallbackMs = 0L
+                stopReason = ""
                 manager.requestProfiling(
                     ProfilingManager.PROFILING_TYPE_HEAP_PROFILE,
                     params, tag, signal, null, null
@@ -178,70 +196,123 @@ internal object ElevateJavaAllocationProfile {
     }
 
 
-    /** One Stop finishes Perfetto; its successful result automatically starts the HPROF. */
-    fun stop(context: Context): String {
+    /** Stop requests Perfetto finalization and immediately captures the matching heap. */
+    fun stop(context: Context): String = stop(context, "manual")
+
+    private fun stop(context: Context, reason: String): String {
         val (tag, signal) = synchronized(lock) {
             val activeTag = requestTag ?: return state
             if (!awaitingResult || stopRequested) return state
             stopRequested = true
+            stopRequestedMs = SystemClock.elapsedRealtime()
+            stopReason = reason
             val activeSignal = stopSignal
             stopSignal = null
-            state = "Finishing Perfetto; Java heap dump follows automatically..."
+            state = "Finishing Perfetto and capturing Java heap dump..."
             activeTag to activeSignal
         }
+        Log.i(TAG, "TIMING phase=STOP_REQUEST run=$tag reason=$reason wallMs=${System.currentTimeMillis()} " +
+            "elapsedMs=${SystemClock.elapsedRealtime()} sinceStartMs=${stopRequestedMs - runStartedMs}")
         logHeap("PROFILE_STOP", tag, context.applicationContext)
         stopSampling()
-        try {
-            signal?.cancel()
-        } catch (error: Exception) {
-            Log.w(TAG, "Unable to stop allocation profile", error)
+        // The profiling result is asynchronous. Never wait for its file copy before HPROF.
+        if (reason == "manual") {
+            try {
+                signal?.cancel()
+            } catch (error: Exception) {
+                Log.w(TAG, "Perfetto stop request failed run=$tag", error)
+            }
         }
-        // The 180-second profile may have finished before Stop was pressed.
-        captureHeapAfterTrace(context.applicationContext, tag)
+        captureHeap(context.applicationContext, tag)
         return statusText()
     }
 
-    /** Only runs after a valid Perfetto result is saved and Stop was requested. */
-    private fun captureHeapAfterTrace(context: Context, tag: String) {
+    private fun captureHeap(context: Context, tag: String) {
         synchronized(lock) {
-            if (requestTag != tag || !stopRequested || traceFile == null || dumping) return
+            if (requestTag != tag || dumping || heapResolved) return
             dumping = true
-            state = "Perfetto saved; capturing Java heap dump..."
         }
         Thread({
             val dir = File(context.filesDir, "elevate-java-allocation-profiles")
             var temp: File? = null
-            val message = try {
+            var saved: File? = null
+            try {
                 require(dir.isDirectory || dir.mkdirs()) { "Cannot create profile directory" }
                 temp = File.createTempFile("heap-", ".hprof", dir)
+                val start = SystemClock.elapsedRealtime()
+                synchronized(lock) { if (requestTag == tag) heapStartedMs = start }
+                Log.i(TAG, "TIMING phase=HPROF_START run=$tag wallMs=${System.currentTimeMillis()} " +
+                    "elapsedMs=$start afterStopMs=${start - stopRequestedMs}")
                 Debug.dumpHprofData(temp.absolutePath)
+                val end = SystemClock.elapsedRealtime()
+                synchronized(lock) { if (requestTag == tag) heapFinishedMs = end }
+                Log.i(TAG, "TIMING phase=HPROF_END run=$tag wallMs=${System.currentTimeMillis()} " +
+                    "elapsedMs=$end durationMs=${end - start}")
                 require(temp.isFile && temp.length() > 0L) { "Heap dump is empty" }
                 val target = File(dir, tag.replaceFirst(PREFIX, DUMP_PREFIX) + ".hprof")
                 require(temp.renameTo(target)) { "Cannot save heap dump" }
+                saved = target
                 temp = null
-                pruneOldSessions(context)
-                "Saved Perfetto + HPROF for run=$tag; ready to export as ZIP"
             } catch (error: Throwable) {
                 Log.e(TAG, "Java heap dump failed run=$tag", error)
-                "Perfetto saved; HPROF failed: ${error.javaClass.simpleName}"
             } finally {
                 temp?.delete()
-            }
-            synchronized(lock) {
-                if (requestTag == tag) {
-                    state = message
-                    stopSignal = null
-                    requestTag = null
-                    awaitingResult = false
-                    stopRequested = false
-                    traceFile = null
-                    dumping = false
+                synchronized(lock) {
+                    if (requestTag == tag) {
+                        heapFile = saved
+                        heapResolved = true
+                    }
                 }
+                Log.i(TAG, "RESULT run=$tag phase=HPROF saved=${saved != null}")
+                logHeap("HEAP_DUMP_RESULT", tag, context)
+                finishSessionIfReady(context, tag)
             }
-            Log.i(TAG, "RESULT run=$tag $message")
-            logHeap("HEAP_DUMP_RESULT", tag, context)
         }, "ElevateJavaHeapDump").start()
     }
+
+    private fun finishSessionIfReady(context: Context, tag: String) {
+        val summary = synchronized(lock) {
+            if (tag != requestTag || !traceResolved || !heapResolved) return
+            val traceOk = traceFile != null
+            val heapOk = heapFile != null
+            val timing = "run=$tag\\nstopReason=$stopReason\\n" +
+                "runStartElapsedMs=$runStartedMs\\nstopRequestElapsedMs=$stopRequestedMs\\n" +
+                "perfettoResultCallbackElapsedMs=$traceCallbackMs\\n" +
+                "hprofStartElapsedMs=$heapStartedMs\\nhprofEndElapsedMs=$heapFinishedMs\\n" +
+                "stopToHprofStartMs=${if (heapStartedMs > 0L) heapStartedMs - stopRequestedMs else -1L}\\n" +
+                "stopToPerfettoCallbackMs=${if (traceCallbackMs > 0L) traceCallbackMs - stopRequestedMs else -1L}\\n" +
+                "perfettoSaved=$traceOk\\nhprofSaved=$heapOk\\n" +
+                "NOTE: Perfetto actual end time is not exposed by ProfilingManager; " +
+                "the stop request and result callback are separate timestamps.\\n"
+            state = when {
+                traceOk && heapOk -> "Saved Perfetto + HPROF for run=$tag; ready to export as ZIP"
+                traceOk -> "Perfetto saved; HPROF capture failed"
+                heapOk -> "HPROF saved; Perfetto result failed"
+                else -> "Perfetto and HPROF capture failed"
+            }
+            requestTag = null
+            awaitingResult = false
+            stopSignal = null
+            dumping = false
+            Triple(state, timing, traceOk || heapOk)
+        }
+        val (message, timing, anyFile) = summary
+        if (anyFile) {
+            runCatching {
+                File(context.filesDir, "elevate-java-allocation-profiles")
+                    .resolve("elevate-java-timing-" + tag.removePrefix(PREFIX) + ".txt")
+                    .writeText(timing)
+                pruneOldSessions(context)
+            }.onFailure { Log.w(TAG, "Timing manifest save failed run=$tag", it) }
+        }
+        Log.i(TAG, "SESSION_RESULT run=$tag $message")
+    }
+
+    fun timingFile(context: Context, trace: File): File? =
+        File(context.applicationContext.filesDir, "elevate-java-allocation-profiles")
+            .resolve("elevate-java-timing-" +
+                trace.name.removePrefix(PREFIX).removeSuffix(".perfetto-trace") + ".txt")
+            .takeIf { it.isFile }
 
     /** Keep complete paired sessions rather than deleting one half of a pair. */
     private fun pruneOldSessions(context: Context) {
@@ -250,6 +321,8 @@ internal object ElevateJavaAllocationProfile {
             when {
                 file.name.startsWith(PREFIX) -> file.name.removePrefix(PREFIX).substringBefore('.')
                 file.name.startsWith(DUMP_PREFIX) -> file.name.removePrefix(DUMP_PREFIX).substringBefore('.')
+                file.name.startsWith("elevate-java-timing-") ->
+                    file.name.removePrefix("elevate-java-timing-").substringBefore('.')
                 else -> null
             }
         }?.distinct()?.sortedDescending() ?: return
@@ -259,6 +332,8 @@ internal object ElevateJavaAllocationProfile {
             val id = when {
                 file.name.startsWith(PREFIX) -> file.name.removePrefix(PREFIX).substringBefore('.')
                 file.name.startsWith(DUMP_PREFIX) -> file.name.removePrefix(DUMP_PREFIX).substringBefore('.')
+                file.name.startsWith("elevate-java-timing-") ->
+                    file.name.removePrefix("elevate-java-timing-").substringBefore('.')
                 else -> null
             }
             if (id in discarded) file.delete()
@@ -272,6 +347,16 @@ internal object ElevateJavaAllocationProfile {
                     (it.name.endsWith(".perfetto-trace") || it.name.endsWith(".hprof") ||
                         it.name.endsWith(".hprof.gz")) && it.length() > 0L
             }?.sortedByDescending { it.lastModified() } ?: emptyList()
+
+    /** Correlate Activity stop/destroy with the next memory/PSS snapshot off the UI thread. */
+    fun checkpoint(context: Context, phase: String) {
+        if (System.getProperty(RUN_PROPERTY) == null) return
+        val (tag, executor) = synchronized(lock) { requestTag to sampler }
+        if (tag == null || executor == null) return
+        runCatching {
+            executor.execute { logHeap(phase, tag, context.applicationContext) }
+        }
+    }
 
     fun statusText(): String = synchronized(lock) { state }
 
@@ -291,13 +376,18 @@ internal object ElevateJavaAllocationProfile {
     private fun onResult(context: Context, result: ProfilingResult) {
         val tag = result.tag ?: return
         synchronized(lock) { if (tag != requestTag) return }
+        val callbackTime = SystemClock.elapsedRealtime()
+        synchronized(lock) { if (tag == requestTag) traceCallbackMs = callbackTime }
+        Log.i(TAG, "TIMING phase=PERFETTO_CALLBACK run=$tag wallMs=${System.currentTimeMillis()} " +
+            "elapsedMs=$callbackTime errorCode=${result.errorCode}")
+        // An automatic 180-second completion also initiates HPROF without any Stop tap.
+        stop(context, "system-result")
         var savedFile: File? = null
         val message = try {
             if (result.errorCode != ProfilingResult.ERROR_NONE) {
                 "Perfetto failed: code=${result.errorCode} ${result.errorMessage.orEmpty()}"
             } else {
-                val path = result.resultFilePath ?: error("Missing result path")
-                val source = File(path)
+                val source = File(result.resultFilePath ?: error("Missing result path"))
                 require(source.isFile && source.length() > 0L) { "Result file is empty" }
                 val dir = File(context.filesDir, "elevate-java-allocation-profiles")
                 require(dir.isDirectory || dir.mkdirs()) { "Cannot create profile directory" }
@@ -320,26 +410,16 @@ internal object ElevateJavaAllocationProfile {
             Log.e(TAG, "Perfetto result processing failed tag=$tag", error)
             "Perfetto save failed: ${error.javaClass.simpleName}"
         }
-        stopSampling()
-        val shouldDump = synchronized(lock) {
-            if (requestTag != tag) return@synchronized false
-            stopSignal = null
-            traceFile = savedFile
-            if (savedFile == null) {
-                state = message
-                requestTag = null
-                awaitingResult = false
-                stopRequested = false
-                false
-            } else {
-                state = if (stopRequested) "Perfetto saved; capturing Java heap dump..."
-                        else "Perfetto saved; press Stop to capture HPROF."
-                stopRequested
+        synchronized(lock) {
+            if (requestTag == tag) {
+                traceFile = savedFile
+                traceResolved = true
+                state = if (heapResolved) state else "Perfetto result processed; waiting for HPROF..."
             }
         }
         Log.i(TAG, "RESULT tag=$tag $message")
         logHeap("PROFILE_RESULT", tag, context)
-        if (shouldDump) captureHeapAfterTrace(context, tag)
+        finishSessionIfReady(context, tag)
     }
 
     fun shutdown() {
@@ -359,6 +439,9 @@ internal object ElevateJavaAllocationProfile {
             stopRequested = false
             traceFile = null
             dumping = false
+            traceResolved = false
+            heapResolved = false
+            heapFile = null
             state = "Idle"
         }
     }

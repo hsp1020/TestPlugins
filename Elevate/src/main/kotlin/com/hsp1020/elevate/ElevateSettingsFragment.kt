@@ -162,7 +162,9 @@ class ElevateSettingsFragment : DialogFragment() {
                     ?: error("Destination unavailable")
                 ZipOutputStream(output.buffered()).use { zip ->
                     zip.setLevel(Deflater.BEST_SPEED)
-                    for (file in listOf(source.first, source.second)) {
+                    val files = listOf(source.first, source.second) +
+                        listOfNotNull(ElevateJavaAllocationProfile.timingFile(app, source.first))
+                    for (file in files) {
                         zip.putNextEntry(ZipEntry(file.name))
                         file.inputStream().buffered().use { it.copyTo(zip) }
                         zip.closeEntry()
@@ -535,8 +537,8 @@ class ElevateSettingsFragment : DialogFragment() {
         })
         content.addView(TextView(ctx).apply {
             text = "Android 15+. Start the 180-second allocation sampling, reproduce the issue, " +
-                "then press Stop once. Perfetto is saved first, followed automatically by a Java heap " +
-                "dump (HPROF); the app may pause during the dump. Export both together as one ZIP."
+                "then press Stop once (or let 180 seconds finish automatically). HPROF starts without waiting for the Perfetto file; a Java heap " +
+                "dump may pause the app. Export both files and timing notes together as one ZIP."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, 0, 0, dp(6))
         })

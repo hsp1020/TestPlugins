@@ -114,7 +114,7 @@ internal object PosterWipe {
                     System.getProperty("hsp1020.java.alloc.run")?.let { run ->
                         android.util.Log.i("JavaAllocCause",
                             "run=$run module=Coil phase=FETCH reason=INFLIGHT_CACHE_PROBE " +
-                                "source=${cached.dataSource} size=$size")
+                                "source=${cached.dataSource} urlId=${url.hashCode()} size=$size scale=$scale")
                     }
                     return cached
                 }
@@ -127,7 +127,7 @@ internal object PosterWipe {
                 System.getProperty("hsp1020.java.alloc.run")?.let { run ->
                     android.util.Log.i("JavaAllocCause",
                         "run=$run module=Coil phase=FETCH reason=COIL_EXECUTE " +
-                            "source=${(result as? SuccessResult)?.dataSource ?: "ERROR"} size=$size")
+                            "source=${(result as? SuccessResult)?.dataSource ?: "ERROR"} urlId=${url.hashCode()} size=$size scale=$scale")
                 }
                 return result
             } finally {
@@ -170,7 +170,7 @@ internal object PosterWipe {
             if (allocationRun != null) android.util.Log.i("JavaAllocCause",
                 "run=$allocationRun module=Coil phase=IMAGE_RESULT " +
                     "reason=${if (joined) "SHARED_INFLIGHT" else "NEW_REQUEST"} mode=$mode " +
-                    "size=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
+                    "urlId=${url.hashCode()} size=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
             return outcome
         } finally {

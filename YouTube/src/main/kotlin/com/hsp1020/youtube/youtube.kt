@@ -1313,6 +1313,11 @@ class YoutubeProvider(
         requestKey: String,
         page: Int
     ): ProcessedChipPayload? {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+        if (allocationRun != null) Log.i("JavaAllocCause",
+            "run=$allocationRun module=YouTube phase=CHIP_REQUEST " +
+                "reason=NETWORK keyId=${requestKey.hashCode()} tokenId=${token.hashCode()} page=$page")
         val apiUrl = "$mainUrl/youtubei/v1/browse?key=${bootstrap.apiKey}"
         val clientContext = linkedMapOf<String, Any>(
             "clientName" to "WEB",
@@ -1347,15 +1352,21 @@ class YoutubeProvider(
             rawResponse.textLarge
         }
         currentCoroutineContext().ensureActive()
+        if (allocationRun != null) Log.i("JavaAllocCause",
+            "run=$allocationRun module=YouTube phase=CHIP_RESPONSE " +
+                "keyId=${requestKey.hashCode()} tokenId=${token.hashCode()} page=$page " +
+                "chars=${body.length} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
         if (body.isBlank()) return null
 
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
         val responseChars = if (allocationRun != null) body.length else 0
+        val parseStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
         val processed = streamProcessChipResponse(body)
         if (allocationRun != null) Log.i("JavaAllocCause",
             "run=$allocationRun module=YouTube phase=CHIP_PARSE " +
                 "reason=${if (processed != null) "STREAM_PARSE_OK" else "STREAM_PARSE_FAILED"} " +
-                "responseChars=$responseChars page=$page")
+                "responseChars=$responseChars page=$page keyId=${requestKey.hashCode()} " +
+                "tokenId=${token.hashCode()} results=${processed?.items?.size ?: 0} " +
+                "parseMs=${android.os.SystemClock.elapsedRealtime() - parseStart}")
         body = ""
         if (processed == null) {
             currentCoroutineContext().ensureActive()
@@ -3484,7 +3495,7 @@ class YoutubeProvider(
                 else -> "OTHER"
             }
             Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=LOAD_PAGE " +
-                "reason=$route direct=$direct pages=$channelTargetPages tab=${channelExpansionTab ?: "none"}")
+                "reason=$route urlId=${url.hashCode()} direct=$direct pages=$channelTargetPages tab=${channelExpansionTab ?: "none"}")
         }
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"

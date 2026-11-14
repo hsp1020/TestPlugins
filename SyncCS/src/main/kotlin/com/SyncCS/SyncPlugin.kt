@@ -105,6 +105,8 @@ class SyncPlugin : Plugin() {
     private val workerGuard = Any()
     private var worker: Job? = null
     private var rerunRequested = false
+    private val traceReasons = linkedSetOf<String>()
+    private var tracePass = 0L
     @Volatile private var lastAutomaticFailureAt = 0L
     private var periodic: Job? = null
     private var callback: Application.ActivityLifecycleCallbacks? = null
@@ -226,10 +228,19 @@ class SyncPlugin : Plugin() {
             return
         }
         synchronized(workerGuard) {
+            val run = System.getProperty("hsp1020.java.alloc.run")
             if (worker?.isActive == true &&
                 reason in setOf("remote-head-poll-20s", "home-reload",
                     "activity-resumed", "activity-paused", "activity-stopped")) {
+                if (run != null) android.util.Log.i("JavaAllocCause",
+                    "run=$run module=SyncCS phase=SYNC_QUEUE reason=SKIPPED_ACTIVE trigger=$reason")
                 return
+            }
+            if (run != null) {
+                traceReasons.add(reason)
+                android.util.Log.i("JavaAllocCause",
+                    "run=$run module=SyncCS phase=SYNC_QUEUE reason=QUEUED trigger=$reason " +
+                        "workerActive=${worker?.isActive == true}")
             }
             rerunRequested = true
             if (worker?.isActive == true) {
@@ -237,9 +248,16 @@ class SyncPlugin : Plugin() {
             }
             worker = scope.launch {
                 while (true) {
+                    var reasons = ""
+                    var pass = 0L
                     val next = synchronized(workerGuard) {
                         if (rerunRequested) {
                             rerunRequested = false
+                            if (System.getProperty("hsp1020.java.alloc.run") != null) {
+                                reasons = traceReasons.joinToString(",")
+                                traceReasons.clear()
+                                pass = ++tracePass
+                            } else traceReasons.clear()
                             true
                         } else {
                             worker = null
@@ -268,7 +286,16 @@ class SyncPlugin : Plugin() {
                             continue
                         }
                     }
+                    val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+                    val syncStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=SyncCS phase=SYNC_START pass=$pass " +
+                            "triggers=$reasons originalTrigger=$reason")
                     val result = SyncCoordinator.synchronize(context, active)
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=SyncCS phase=SYNC_FINISH pass=$pass " +
+                            "result=${if (result.startsWith("Sync failed") || result.startsWith("Sync conflict")) "ERROR" else "COMPLETED"} " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - syncStart}")
                     if (result.startsWith("Sync failed:") ||
                         result.startsWith("Sync failed during") ||
                         result.startsWith("Sync conflict:")) {
