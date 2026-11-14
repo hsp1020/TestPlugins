@@ -515,6 +515,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
         }
         detach()
         this.fragment = fragment
+        ElevateJavaAllocationProfile.traceHook("WatchProgressReporter", "ATTACH", host, fragment)
         model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
         fragment.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
             tree = it
@@ -530,6 +531,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
 
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        ElevateJavaAllocationProfile.traceHook("WatchProgressReporter", "DETACH", host, fragment)
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L

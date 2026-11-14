@@ -273,6 +273,7 @@ internal class ElevateSkipController(private val application: Application) :
         }
         detach()
         fragment = candidate
+        ElevateJavaAllocationProfile.traceHook("SkipController", "ATTACH", activity, candidate)
         observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(rootLayout) }
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
@@ -305,6 +306,7 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun detach() {
+        ElevateJavaAllocationProfile.traceHook("SkipController", "DETACH", activity, fragment)
         // First unsubscribe: restoring native stamps must not trigger our own observer.
         unobserve?.invoke()
         unobserve = null

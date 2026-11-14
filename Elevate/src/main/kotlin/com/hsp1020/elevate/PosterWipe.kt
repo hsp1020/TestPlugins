@@ -64,6 +64,14 @@ internal object PosterWipe {
     }
     private const val DURATION_MS = 500L
     private data class RequestKey(val url: String, val size: Size, val scale: Scale)
+
+    /** Ignore one-pixel layout rounding without changing the actual ImageView bounds. */
+    private fun canonicalSize(size: Size): Size {
+        val width = (size.width as? coil3.size.Dimension.Pixels)?.px ?: return size
+        val height = (size.height as? coil3.size.Dimension.Pixels)?.px ?: return size
+        if (width <= 0 || height <= 0) return size
+        return Size((width + 1) and -2, (height + 1) and -2)
+    }
     private class Flight(val request: Deferred<ImageResult>, var subscribers: Int = 0)
     private val imageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val imageFlights = HashMap<RequestKey, Flight>()
@@ -148,11 +156,12 @@ internal object PosterWipe {
         val allocationRun = System.getProperty("hsp1020.java.alloc.run")
         val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
         var joined = false
-        val key = RequestKey(url, size, scale)
+        val normalizedSize = canonicalSize(size)
+        val key = RequestKey(url, normalizedSize, scale)
         val flight = synchronized(imageFlights) {
             (imageFlights[key]?.also { if (allocationRun != null) joined = true } ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
-                    executeImage(context, url, size, scale)
+                    executeImage(context, url, normalizedSize, scale)
                 }
                 Flight(job).also { created ->
                     imageFlights[key] = created
@@ -170,7 +179,7 @@ internal object PosterWipe {
             if (allocationRun != null) android.util.Log.i("JavaAllocCause",
                 "run=$allocationRun module=Coil phase=IMAGE_RESULT " +
                     "reason=${if (joined) "SHARED_INFLIGHT" else "NEW_REQUEST"} mode=$mode " +
-                    "urlId=${url.hashCode()} size=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
+                    "urlId=${url.hashCode()} size=$normalizedSize originalSize=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
             return outcome
         } finally {

@@ -28,7 +28,10 @@ internal object ElevateJavaAllocationProfile {
     private const val PREFIX = "elevate-java-alloc-"
     private const val DUMP_PREFIX = "elevate-java-heap-"
     private const val RUN_PROPERTY = "hsp1020.java.alloc.run"
-    private const val DURATION_MS = 180_000
+    private const val DURATION_MS = 600_000
+    // Android's default per-heap-profile limit is 5 minutes. Collect two
+    // consecutive segments instead of silently requesting an unsupported 10 minutes.
+    private const val SEGMENT_MS = 300_000
     private val lock = Any()
     private val callbackExecutor = Executor { task ->
         Thread(task, "ElevateJavaAllocResult").start()
@@ -51,6 +54,10 @@ internal object ElevateJavaAllocationProfile {
     private var heapFinishedMs = 0L
     private var traceCallbackMs = 0L
     private var stopReason = ""
+    private var activeSegment = 1
+    private var firstResultMs = 0L
+    private var secondRequestMs = 0L
+    private var segmentCount = 0
     private var sampler: ScheduledExecutorService? = null
     private var sampleIndex = 0
     private var lastGc: LongArray? = null
@@ -140,6 +147,13 @@ internal object ElevateJavaAllocationProfile {
         if (System.getProperty(RUN_PROPERTY) != null) System.clearProperty(RUN_PROPERTY)
     }
 
+    private fun profileParameters(): Bundle = Bundle().apply {
+        putBoolean("KEY_TRACK_JAVA_ALLOCATIONS", true)
+        putInt("KEY_DURATION_MS", SEGMENT_MS)
+        putInt("KEY_SIZE_KB", 65_536)
+        putLong("KEY_SAMPLING_INTERVAL_BYTES", 262_144L)
+    }
+
     fun start(context: Context): String {
         if (Build.VERSION.SDK_INT < 35) return "Requires Android 15 or newer"
         initialize(context)
@@ -148,13 +162,7 @@ internal object ElevateJavaAllocationProfile {
             val manager = service ?: return@synchronized state
             val tag = PREFIX + System.currentTimeMillis()
             val signal = CancellationSignal()
-            val params = Bundle().apply {
-                // AndroidX Profiling.HeapProfileRequestBuilder's platform parameter keys.
-                putBoolean("KEY_TRACK_JAVA_ALLOCATIONS", true)
-                putInt("KEY_DURATION_MS", DURATION_MS)
-                putInt("KEY_SIZE_KB", 65_536)
-                putLong("KEY_SAMPLING_INTERVAL_BYTES", 262_144L)
-            }
+            val params = profileParameters()
             try {
                 stopSignal = signal
                 requestTag = tag
@@ -171,12 +179,17 @@ internal object ElevateJavaAllocationProfile {
                 heapFinishedMs = 0L
                 traceCallbackMs = 0L
                 stopReason = ""
+                activeSegment = 1
+                firstResultMs = 0L
+                secondRequestMs = 0L
+                segmentCount = 0
                 manager.requestProfiling(
                     ProfilingManager.PROFILING_TYPE_HEAP_PROFILE,
                     params, tag, signal, null, null
                 )
-                state = "Recording requested (max 180 s). Reproduce, then Stop."
-                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 durationMs=" + DURATION_MS)
+                state = "Recording requested (up to 600 s in two 300 s segments). Reproduce, then Stop."
+                Log.i(TAG, "REQUEST tag=" + tag + " java=true intervalBytes=262144 bufferKb=65536 " +
+                    "durationMs=$DURATION_MS segmentMs=$SEGMENT_MS")
                 startSampling(context.applicationContext, tag)
                 state
             } catch (error: Exception) {
@@ -276,6 +289,9 @@ internal object ElevateJavaAllocationProfile {
             val traceOk = traceFile != null
             val heapOk = heapFile != null
             val timing = "run=$tag\\nstopReason=$stopReason\\n" +
+                "requestedDurationMs=$DURATION_MS\\nsegmentDurationMs=$SEGMENT_MS\\n" +
+                "segmentsCaptured=$segmentCount\\nfirstResultElapsedMs=$firstResultMs\\n" +
+                "secondRequestElapsedMs=$secondRequestMs\\n" +
                 "runStartElapsedMs=$runStartedMs\\nstopRequestElapsedMs=$stopRequestedMs\\n" +
                 "perfettoResultCallbackElapsedMs=$traceCallbackMs\\n" +
                 "hprofStartElapsedMs=$heapStartedMs\\nhprofEndElapsedMs=$heapFinishedMs\\n" +
@@ -285,7 +301,10 @@ internal object ElevateJavaAllocationProfile {
                 "NOTE: Perfetto actual end time is not exposed by ProfilingManager; " +
                 "the stop request and result callback are separate timestamps.\\n"
             state = when {
-                traceOk && heapOk -> "Saved Perfetto + HPROF for run=$tag; ready to export as ZIP"
+                traceOk && heapOk && segmentCount >= 2 ->
+                    "Saved both 300 s Perfetto segments + HPROF for run=$tag; ready to export"
+                traceOk && heapOk ->
+                    "Saved $segmentCount/2 Perfetto segments + HPROF; 600 s profile incomplete"
                 traceOk -> "Perfetto saved; HPROF capture failed"
                 heapOk -> "HPROF saved; Perfetto result failed"
                 else -> "Perfetto and HPROF capture failed"
@@ -348,6 +367,19 @@ internal object ElevateJavaAllocationProfile {
                         it.name.endsWith(".hprof.gz")) && it.length() > 0L
             }?.sortedByDescending { it.lastModified() } ?: emptyList()
 
+    /** Debug-only lifecycle trace; never retains a player, Activity, or view. */
+    fun traceHook(
+        hook: String, event: String, activity: android.app.Activity? = null,
+        fragment: androidx.fragment.app.Fragment? = null, detail: String = ""
+    ) {
+        val run = System.getProperty(RUN_PROPERTY) ?: return
+        Log.i("JavaAllocCause",
+            "run=$run module=Elevate phase=HOOK_LIFECYCLE hook=$hook event=$event " +
+                "activityId=${activity?.let { System.identityHashCode(it) } ?: -1} " +
+                "fragmentId=${fragment?.let { System.identityHashCode(it) } ?: -1} " +
+                "viewId=${fragment?.view?.let { System.identityHashCode(it) } ?: -1} $detail")
+    }
+
     /** Correlate Activity stop/destroy with the next memory/PSS snapshot off the UI thread. */
     fun checkpoint(context: Context, phase: String) {
         if (System.getProperty(RUN_PROPERTY) == null) return
@@ -374,50 +406,119 @@ internal object ElevateJavaAllocationProfile {
     }
 
     private fun onResult(context: Context, result: ProfilingResult) {
-        val tag = result.tag ?: return
-        synchronized(lock) { if (tag != requestTag) return }
+        val resultTag = result.tag ?: return
+        val tag = synchronized(lock) { requestTag } ?: return
+        val part = when (resultTag) {
+            tag -> 1
+            "${tag}-part2" -> 2
+            else -> return
+        }
         val callbackTime = SystemClock.elapsedRealtime()
-        synchronized(lock) { if (tag == requestTag) traceCallbackMs = callbackTime }
-        Log.i(TAG, "TIMING phase=PERFETTO_CALLBACK run=$tag wallMs=${System.currentTimeMillis()} " +
-            "elapsedMs=$callbackTime errorCode=${result.errorCode}")
-        // An automatic 180-second completion also initiates HPROF without any Stop tap.
-        stop(context, "system-result")
-        var savedFile: File? = null
-        val message = try {
-            if (result.errorCode != ProfilingResult.ERROR_NONE) {
-                "Perfetto failed: code=${result.errorCode} ${result.errorMessage.orEmpty()}"
-            } else {
+        Log.i(TAG, "TIMING phase=PERFETTO_CALLBACK run=$tag segment=$part " +
+            "elapsedMs=$callbackTime wallMs=${System.currentTimeMillis()} " +
+            "errorCode=${result.errorCode}")
+        val dir = File(context.filesDir, "elevate-java-allocation-profiles")
+        var savedSegment: File? = null
+        try {
+            if (result.errorCode == ProfilingResult.ERROR_NONE) {
                 val source = File(result.resultFilePath ?: error("Missing result path"))
                 require(source.isFile && source.length() > 0L) { "Result file is empty" }
-                val dir = File(context.filesDir, "elevate-java-allocation-profiles")
                 require(dir.isDirectory || dir.mkdirs()) { "Cannot create profile directory" }
-                val target = File(dir, tag + ".perfetto-trace")
-                val temp = File.createTempFile("profile-", ".tmp", dir)
+                val target = File(dir, "${tag}.segment${part}.tmp")
+                val temp = File.createTempFile("segment-", ".tmp", dir)
                 try {
                     source.inputStream().use { input ->
                         temp.outputStream().use { output -> input.copyTo(output) }
                     }
-                    require(temp.length() > 0L) { "Copied profile is empty" }
-                    if (target.exists()) require(target.delete()) { "Cannot replace profile" }
-                    require(temp.renameTo(target)) { "Cannot finish profile copy" }
+                    require(temp.length() > 0L) { "Empty segment" }
+                    if (target.exists()) require(target.delete()) { "Cannot replace segment" }
+                    require(temp.renameTo(target)) { "Cannot save segment" }
+                    savedSegment = target
                 } finally {
                     temp.delete()
                 }
-                savedFile = target
-                "Saved ${target.name} (${target.length() / 1024L} KiB; completeness unverified)"
+                synchronized(lock) {
+                    if (requestTag == tag) segmentCount++
+                }
+                Log.i(TAG, "SEGMENT_RESULT run=$tag segment=$part savedBytes=${target.length()}")
+            } else {
+                Log.e(TAG, "SEGMENT_RESULT run=$tag segment=$part failed=" +
+                    "${result.errorCode} ${result.errorMessage.orEmpty()}")
             }
         } catch (error: Exception) {
-            Log.e(TAG, "Perfetto result processing failed tag=$tag", error)
-            "Perfetto save failed: ${error.javaClass.simpleName}"
+            Log.e(TAG, "Perfetto segment save failed run=$tag segment=$part", error)
+        }
+
+        if (part == 1) {
+            synchronized(lock) { if (requestTag == tag) firstResultMs = callbackTime }
+            val shouldContinue = synchronized(lock) {
+                requestTag == tag && !stopRequested && savedSegment != null
+            }
+            if (shouldContinue) {
+                try {
+                    val manager = synchronized(lock) { service }
+                        ?: error("Profiler service unavailable for second segment")
+                    val signal = CancellationSignal()
+                    synchronized(lock) {
+                        stopSignal = signal
+                        activeSegment = 2
+                        secondRequestMs = SystemClock.elapsedRealtime()
+                        state = "Recording second 300 s allocation segment..."
+                    }
+                    manager.requestProfiling(
+                        ProfilingManager.PROFILING_TYPE_HEAP_PROFILE,
+                        profileParameters(), "${tag}-part2", signal, null, null
+                    )
+                    // Stop may race with the first callback's second request.
+                    if (synchronized(lock) { stopRequested }) signal.cancel()
+                    Log.i(TAG, "SEGMENT_START run=$tag segment=2 elapsedMs=$secondRequestMs")
+                    return
+                } catch (error: Exception) {
+                    Log.w(TAG, "Second 300 s profile could not start run=$tag", error)
+                    // Preserve the first segment and take an HPROF immediately.
+                }
+            }
+        }
+        // Manual Stop, second segment completion, or an early platform failure.
+        if (!synchronized(lock) { stopRequested }) stop(context, "system-result")
+        synchronized(lock) { if (requestTag == tag) traceCallbackMs = callbackTime }
+        var combined: File? = null
+        try {
+            val parts = (1..2).map { File(dir, "${tag}.segment${it}.tmp") }
+                .filter { it.isFile && it.length() > 0L }
+            if (parts.isNotEmpty()) {
+                val target = File(dir, tag + ".perfetto-trace")
+                val temp = File.createTempFile("profile-", ".tmp", dir)
+                try {
+                    temp.outputStream().buffered().use { output ->
+                        parts.forEach { partFile ->
+                            partFile.inputStream().buffered().use { it.copyTo(output) }
+                        }
+                    }
+                    require(temp.length() > 0L) { "Combined profile is empty" }
+                    if (target.exists()) require(target.delete()) { "Cannot replace profile" }
+                    require(temp.renameTo(target)) { "Cannot finish profile" }
+                    combined = target
+                } finally {
+                    temp.delete()
+                }
+            }
+            Log.i(TAG, "PROFILE_SEGMENTS run=$tag captured=${parts.size} requested=2 " +
+                "combinedBytes=${combined?.length() ?: 0L}")
+        } catch (error: Exception) {
+            Log.e(TAG, "Perfetto segment combination failed run=$tag", error)
+        } finally {
+            if (combined != null) {
+                (1..2).forEach { File(dir, "${tag}.segment${it}.tmp").delete() }
+            }
         }
         synchronized(lock) {
             if (requestTag == tag) {
-                traceFile = savedFile
+                traceFile = combined
                 traceResolved = true
-                state = if (heapResolved) state else "Perfetto result processed; waiting for HPROF..."
+                state = if (heapResolved) state else "Perfetto processed; waiting for HPROF..."
             }
         }
-        Log.i(TAG, "RESULT tag=$tag $message")
         logHeap("PROFILE_RESULT", tag, context)
         finishSessionIfReady(context, tag)
     }
@@ -442,6 +543,8 @@ internal object ElevateJavaAllocationProfile {
             traceResolved = false
             heapResolved = false
             heapFile = null
+            activeSegment = 1
+            segmentCount = 0
             state = "Idle"
         }
     }

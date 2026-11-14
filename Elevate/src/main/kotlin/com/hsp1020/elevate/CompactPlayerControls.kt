@@ -48,7 +48,11 @@ internal class CompactPlayerControls(private val application: Application) :
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
-            if (fragment is GeneratorPlayer) panels.remove(fragment)?.detach()
+            if (fragment is GeneratorPlayer) {
+                if (panels.containsKey(fragment))
+                    ElevateJavaAllocationProfile.traceHook("CompactPlayerControls", "PANEL_DETACH", host, fragment)
+                panels.remove(fragment)?.detach()
+            }
         }
     }
 
@@ -74,6 +78,7 @@ internal class CompactPlayerControls(private val application: Application) :
         val scroll = root.findViewById<HorizontalScrollView>(R.id.player_controls_scroll) ?: return
         val strip = scroll.getChildAt(0) as? LinearLayout ?: return
         panels[fragment] = Panel(root, strip).also { it.attach() }
+        ElevateJavaAllocationProfile.traceHook("CompactPlayerControls", "PANEL_ATTACH", host, fragment)
     }
 
     private fun use(activity: FragmentActivity) {
@@ -91,6 +96,8 @@ internal class CompactPlayerControls(private val application: Application) :
     }
 
     private fun unbind() {
+        ElevateJavaAllocationProfile.traceHook("CompactPlayerControls", "UNBIND", host,
+            detail = "panels=${panels.size}")
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         panels.values.forEach { it.detach() }
         panels.clear()

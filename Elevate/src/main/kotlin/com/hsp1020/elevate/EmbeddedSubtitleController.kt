@@ -561,6 +561,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         }
         detach()
         fragment = candidate
+        ElevateJavaAllocationProfile.traceHook("EmbeddedSubtitleController", "ATTACH", host, candidate)
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
             if (event != null && event.instance == model?.state?.instance) {
@@ -609,6 +610,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        ElevateJavaAllocationProfile.traceHook("EmbeddedSubtitleController", "DETACH", host, fragment)
         captionLayoutTree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(captionLayoutListener)
         captionLayoutTree = null
         restoreCaptionOutput()

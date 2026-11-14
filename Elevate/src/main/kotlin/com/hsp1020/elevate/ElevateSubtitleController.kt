@@ -1040,6 +1040,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
 
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        ElevateJavaAllocationProfile.traceHook("SubtitleController", "DETACH", fragment?.activity, fragment)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         removeStateObserver?.invoke()
@@ -1083,6 +1084,7 @@ internal class ElevateSubtitleRefreshHook(
     }
     private fun bind(next: FragmentActivity) {
         if (activity === next) return
+        ElevateJavaAllocationProfile.traceHook("SubtitleRefresh", "ACTIVITY_ATTACH", next)
         unbind()
         activity = next
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(lifecycle, true)
@@ -1095,6 +1097,7 @@ internal class ElevateSubtitleRefreshHook(
         scan(next.supportFragmentManager)
     }
     private fun unbind() {
+        ElevateJavaAllocationProfile.traceHook("SubtitleRefresh", "ACTIVITY_DETACH", activity)
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(lifecycle)
         controller.detach()
         activity = null

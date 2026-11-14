@@ -329,6 +329,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
 
     private fun detach(f: Fragment? = null) {
         if (f != null && f !== fragment) return
+        ElevateJavaAllocationProfile.traceHook("SubtitleReferer", "DETACH", host, fragment)
         main.removeCallbacks(refreshRunnable)
         refreshPending = false
         generation++
@@ -348,6 +349,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
 
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
+            ElevateJavaAllocationProfile.traceHook("SubtitleReferer", "ACTIVITY_DESTROY", activity)
             detach()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             host = null

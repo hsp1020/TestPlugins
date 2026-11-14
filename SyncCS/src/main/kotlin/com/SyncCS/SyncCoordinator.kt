@@ -50,10 +50,20 @@ internal object SyncCoordinator {
         private set
     @Volatile var lastSuccessfulSyncAt: Long = 0L
         private set
-    @Volatile private var lastCompleteLocalAuditAt = 0L
     private const val LOCAL_AUDIT_INTERVAL_MS = 60L * 60L * 1000L
-    private fun needsLocalAudit(): Boolean = lastCompleteLocalAuditAt == 0L ||
-        android.os.SystemClock.elapsedRealtime() - lastCompleteLocalAuditAt >= LOCAL_AUDIT_INTERVAL_MS
+    private const val LAST_AUDIT_AT = "synccs_last_verified_local_audit_wall"
+    private const val LAST_AUDIT_ACCOUNT = "synccs_last_verified_local_audit_account"
+
+    /** Only a committed baseline plus a recent audit for this account can skip a full scan. */
+    private fun needsLocalAudit(context: Context, config: SyncConfiguration): Boolean {
+        val prefs = config.preferences
+        val account = prefs.getString("github_account_id", null) ?: return true
+        val recorded = prefs.getLong(LAST_AUDIT_AT, 0L)
+        val now = System.currentTimeMillis()
+        return prefs.getString(LAST_AUDIT_ACCOUNT, null) != account ||
+            recorded <= 0L || now < recorded || now - recorded >= LOCAL_AUDIT_INTERVAL_MS ||
+            !SyncBaselineStore.isCurrent(context, config)
+    }
 
     private fun fingerprint(raw: String?): String =
         if (raw == null) "<deleted>" else SyncBackend.digest(raw)
@@ -123,7 +133,7 @@ internal object SyncCoordinator {
         // journals were handled above, so clean restarts need only a HEAD check.
         val pendingPlugins = config.preferences.contains("pending_plugins")
         val restoreActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
-        if (!needsLocalAudit() && SyncBaselineStore.isCurrent(context, config) &&
+        if (!needsLocalAudit(context, config) && SyncBaselineStore.isCurrent(context, config) &&
             (!pendingPlugins || restoreActivity == null) &&
             config.preferences.all.keys.none { it.startsWith("modified/") }) {
             val known = config.preferences.getString("github_base_revision", null)
@@ -475,7 +485,7 @@ internal object SyncCoordinator {
 
 
             val remoteByKey = pull.entries.associateBy { it.key }
-            val observedKeys = if (pull.full || needsLocalAudit()) null else
+            val observedKeys = if (pull.full || needsLocalAudit(context, config)) null else
                 (remoteValues.keys + config.preferences.all.keys.asSequence()
                     .filter { it.startsWith("modified/") }
                     .map { it.removePrefix("modified/") }.toSet() +
@@ -581,7 +591,7 @@ internal object SyncCoordinator {
             val incomingHeaders = remoteValues.keys.any {
                 it.startsWith("d/download_header_cache/")
             }
-            val periodicAuditDue = needsLocalAudit()
+            val periodicAuditDue = needsLocalAudit(context, config)
             val completeLocal = pull.full || firstRemoteRestore ||
                 rosterIdentitiesChanged || incomingHeaders || periodicAuditDue
             if (completeLocal && priorBaseline?.selectedKeys != null) {
@@ -826,8 +836,11 @@ internal object SyncCoordinator {
                 undoStarted = false
             }
             if (completeLocal) {
-                lastCompleteLocalAuditAt = android.os.SystemClock.elapsedRealtime()
-
+                // Persist only after the verified baseline commit. A crash before this
+                // write safely causes another audit on the next launch.
+                config.preferences.edit()
+                    .putLong(LAST_AUDIT_AT, System.currentTimeMillis())
+                    .putString(LAST_AUDIT_ACCOUNT, startedUser).apply()
             }
             val cleanStats = runCatching {
                 SyncDirtyMarkerCleaner.prune(

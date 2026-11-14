@@ -1219,10 +1219,52 @@ open class StremioC(
         ): T = integratedSourceLimiter.withPermit { work() }
 
         private suspend fun traceStreamPlay(
-            @Suppress("UNUSED_PARAMETER") route: String, provider: MainAPI,
+            route: String, provider: MainAPI,
             payload: String, casting: Boolean,
             subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
-        ): Boolean = provider.loadLinks(payload, casting, subtitleCallback, callback)
+        ): Boolean {
+            val run = System.getProperty("hsp1020.java.alloc.run")
+                ?: return provider.loadLinks(payload, casting, subtitleCallback, callback)
+            val started = android.os.SystemClock.elapsedRealtime()
+            val requestId = System.nanoTime()
+            val fields = runCatching {
+                val json = org.json.JSONObject(payload)
+                listOf("imdbId", "tmdbId", "aniId", "malId", "season", "episode",
+                    "imdbSeason", "imdbEpisode").joinToString(",") { key ->
+                    "${key}=${json.optString(key)}"
+                }
+            }.getOrDefault("unavailable")
+            val links = java.util.concurrent.atomic.AtomicInteger()
+            val subtitles = java.util.concurrent.atomic.AtomicInteger()
+            val uniqueLinks = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+            android.util.Log.i("JavaAllocCause",
+                "run=$run module=StremioC phase=STREAMPLAY_START request=$requestId " +
+                    "route=$route provider=${provider.name} payloadId=${payload.hashCode()} " +
+                    "ids=$fields")
+            val measuredSubtitle: (SubtitleFile) -> Unit = { subtitle ->
+                subtitles.incrementAndGet()
+                subtitleCallback(subtitle)
+            }
+            val measuredLink: (ExtractorLink) -> Unit = { link ->
+                links.incrementAndGet()
+                uniqueLinks.add(link.url.hashCode())
+                callback(link)
+            }
+            return try {
+                val result = provider.loadLinks(payload, casting, measuredSubtitle, measuredLink)
+                android.util.Log.i("JavaAllocCause",
+                    "run=$run module=StremioC phase=STREAMPLAY_END request=$requestId " +
+                        "route=$route result=$result links=${links.get()} " +
+                        "uniqueLinkIds=${uniqueLinks.size} subtitles=${subtitles.get()} " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                result
+            } catch (error: Throwable) {
+                android.util.Log.w("JavaAllocCause",
+                    "run=$run module=StremioC phase=STREAMPLAY_ERROR request=$requestId " +
+                        "route=$route error=${error.javaClass.simpleName}")
+                throw error
+            }
+        }
 
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 16
@@ -2942,11 +2984,27 @@ open class StremioC(
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
 
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val subtitleEmitted = java.util.concurrent.atomic.AtomicInteger()
+        val subtitleDuplicate = java.util.concurrent.atomic.AtomicInteger()
+        val subtitleCallbackNs = java.util.concurrent.atomic.AtomicLong()
         fun emitUniqueSubtitle(sub: SubtitleFile) {
             if (sub.url.isBlank() || sub.lang.trim().let {
                     it.isBlank() || it.equals("und", true)
                 }) return
-            if (seenStremioSubtitles.add(sub.url)) subtitleCallback(sub)
+            if (seenStremioSubtitles.add(sub.url)) {
+                if (allocationRun != null) {
+                    val start = System.nanoTime()
+                    try { subtitleCallback(sub) } finally {
+                        subtitleCallbackNs.addAndGet(System.nanoTime() - start)
+                        val count = subtitleEmitted.incrementAndGet()
+                        if (count % 25 == 0) android.util.Log.i("JavaAllocCause",
+                            "run=$allocationRun module=StremioC phase=SUBTITLE_CALLBACK " +
+                                "emitted=$count duplicates=${subtitleDuplicate.get()} " +
+                                "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L}")
+                    }
+                } else subtitleCallback(sub)
+            } else if (allocationRun != null) subtitleDuplicate.incrementAndGet()
         }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
@@ -2994,8 +3052,15 @@ open class StremioC(
         val integrationAddons = getIntegrationStremioAddons()
         val cineAddons = integrationAddons.filter { it.fromCineStream }
         val streamPlayAddons = integrationAddons.filterNot { it.fromCineStream }
+        val subtitleGroups = java.util.concurrent.atomic.AtomicIntegerArray(4)
         fun rankSubtitle(sub: SubtitleFile, group: Int, addonUrl: String? = null) {
             if (sub.url.isBlank()) return
+            if (allocationRun != null) {
+                val count = subtitleGroups.incrementAndGet(group.coerceIn(0, 3))
+                if (count % 50 == 0) android.util.Log.i("JavaAllocCause",
+                    "run=$allocationRun module=StremioC phase=SUBTITLE_GROUP " +
+                        "group=$group callbacks=$count addonId=${addonUrl?.hashCode() ?: 0}")
+            }
             // Retain details from direct integration callbacks as well as Stremio API responses.
             val originalDetail = sub.lang.substringAfter(" · ", "").trim()
             if (originalDetail.isNotEmpty()) synchronized(subtitleDetailByUrl) {
@@ -3435,6 +3500,11 @@ open class StremioC(
         )
         mappingDeferred.cancel()
         }
+        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+            "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
+                "emitted=${subtitleEmitted.get()} duplicate=${subtitleDuplicate.get()} " +
+                "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L} " +
+                "groups=${(0..3).joinToString(",") { subtitleGroups.get(it).toString() }}")
         return true
     }
 

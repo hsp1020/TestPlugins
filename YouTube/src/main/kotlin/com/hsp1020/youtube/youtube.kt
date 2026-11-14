@@ -2302,6 +2302,14 @@ class YoutubeProvider(
         return extractYtInitialDataInternal(html, null)
     }
 
+    /** Watch/Shorts pages only read result renderers from 'contents'.
+     * Preserve the complete parser as a fallback for unexpected layouts.
+     * StringRangeReader already streams the selected JSON range without substring copies.
+     */
+    private fun extractWatchContents(html: String): Map<String, Any>? =
+        extractYtInitialDataInternal(html, setOf("contents"))
+            ?.takeIf { it.containsKey("contents") } ?: extractYtInitialData(html)
+
     /** Reuse the existing watch-page HTML; no additional metadata request. */
     private fun extractVideoDetails(html: String): Map<*, *>? {
         val match = Regex("""(?:var\s+)?ytInitialPlayerResponse\s*=\s*\{""").find(html) ?: return null
@@ -3529,7 +3537,7 @@ class YoutubeProvider(
             val (cleanShortsDescription, descriptionTags) = extractDescriptionHashtags(shortsDescription)
             val displayTags = (descriptionTags + htmlTags).distinctBy { it.lowercase() }.take(10)
             val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
-            val data = extractYtInitialData(html)
+            val data = extractWatchContents(html)
 
             val recs = mutableListOf<SearchResponse>()
 
@@ -4222,7 +4230,7 @@ class YoutubeProvider(
         val videoDetails = extractVideoDetails(html)
         val htmlTags = videoKeywords(videoDetails)
         val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
-        val data = extractYtInitialData(html)
+        val data = extractWatchContents(html)
 
         var title = "YouTube Video"
         var plot = (videoDetails?.get("shortDescription") as? String).orEmpty()

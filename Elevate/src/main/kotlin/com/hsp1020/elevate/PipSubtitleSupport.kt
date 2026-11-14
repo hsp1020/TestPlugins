@@ -357,6 +357,7 @@ class PipSubtitleLifecycle(
 
     private fun watch(fragment: Fragment) {
         if (fragment !is GeneratorPlayer || fragment.view == null) return
+        ElevateJavaAllocationProfile.traceHook("PipSubtitle", "WATCH", host, fragment)
         if (stylingEnabled()) scaler.watch(fragment) else scaler.detach(fragment)
         if (controlsEnabled()) controls.watch(fragment) else controls.detach(fragment)
     }
@@ -427,6 +428,7 @@ class PipSubtitleLifecycle(
 
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
+            ElevateJavaAllocationProfile.traceHook("PipSubtitle", "ACTIVITY_DETACH", activity)
             scaler.detach()
             controls.detach()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)

@@ -369,6 +369,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         override fun onFragmentPreAttached(fm: FragmentManager, f: Fragment, context: Context) {
             if (f !is GeneratorPlayer) return
             val activity = playerActivity ?: return
+            ElevateJavaAllocationProfile.traceHook("PiP", "GENERATOR_ATTACH", activity, f)
             val latest = pending ?: if (switching) nextPipVideo else null
             val oldUuid = f.arguments?.getString("uuid")
             try {
@@ -474,6 +475,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             exitBackBound = false
         }
         playerActivity = activity
+        ElevateJavaAllocationProfile.traceHook("PiP", "PLAYER_ATTACH", activity)
         activeUuid = savedInstanceState?.getString(PLAYER_UUID_KEY) ?: activeUuid
         closing = false
         wasPlaying = false
@@ -518,6 +520,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
     override fun onActivityDestroyed(activity: Activity) {
+        if (activity === playerActivity)
+            ElevateJavaAllocationProfile.traceHook("PiP", "PLAYER_DESTROY_ENTER", activity)
         if (activity === mainActivity) {
             detachYoutubeBridge(mainActivity)
             liveSwitchSequence++
@@ -541,6 +545,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             if (!activity.isChangingConfigurations) forgetPlaceholder(activeUuid)
             activeUuid = null
             playerActivity = null
+            ElevateJavaAllocationProfile.traceHook("PiP", "PLAYER_DETACH", activity)
             pending = null
             switching = false
             switchPosted = false
@@ -563,6 +568,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     override fun onActivityPreDestroyed(activity: Activity) {
+        if (activity === playerActivity)
+            ElevateJavaAllocationProfile.traceHook("PiP", "PRE_DESTROY", activity)
         if (activity === playerActivity && !closing && !activity.isChangingConfigurations) {
             // Android's PiP X can destroy the Activity without dispatching a
             // back press. Do not leave the native decoder waiting for onStop.

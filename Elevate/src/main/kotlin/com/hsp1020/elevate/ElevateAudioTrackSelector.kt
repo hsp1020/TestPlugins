@@ -116,11 +116,13 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val old = player
         if (old != null) {
             old.removeListener(audioListener)
+            ElevateJavaAllocationProfile.traceHook("AudioTrackSelector", "LISTENER_REMOVE", activity, fragment)
         }
         player = next
         selected = false
         if (next != null && active != null) {
             next.addListener(audioListener)
+            ElevateJavaAllocationProfile.traceHook("AudioTrackSelector", "LISTENER_ADD", activity, active)
             select(next.currentTracks)
         }
     }
@@ -377,6 +379,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        ElevateJavaAllocationProfile.traceHook("AudioTrackSelector", "DETACH", activity, fragment)
         main.removeCallbacks(attachRetry)
         attachAttempts = 0
         originJob?.cancel()

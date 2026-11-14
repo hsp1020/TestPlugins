@@ -1573,7 +1573,11 @@ internal class NativeEpisodeOverlayHook(
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
-            (fragment as? GeneratorPlayer)?.let { screens.remove(it)?.detach() }
+            (fragment as? GeneratorPlayer)?.let {
+                if (screens.containsKey(it))
+                    ElevateJavaAllocationProfile.traceHook("NativeEpisodeOverlay", "SCREEN_DETACH", activity, it)
+                screens.remove(it)?.detach()
+            }
         }
     }
 
@@ -1581,6 +1585,7 @@ internal class NativeEpisodeOverlayHook(
         if (screens[fragment]?.root === view) return
         screens.remove(fragment)?.detach()
         screens[fragment] = Screen(fragment, view).also { it.attach() }
+        ElevateJavaAllocationProfile.traceHook("NativeEpisodeOverlay", "SCREEN_ATTACH", activity, fragment)
     }
 
     private fun use(next: FragmentActivity) {
@@ -1608,6 +1613,8 @@ internal class NativeEpisodeOverlayHook(
     }
 
     private fun unbind() {
+        ElevateJavaAllocationProfile.traceHook("NativeEpisodeOverlay", "UNBIND", activity,
+            detail = "screens=${screens.size}")
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
         screens.values.forEach { it.detach() }
         screens.clear()
@@ -1621,7 +1628,10 @@ internal class NativeEpisodeOverlayHook(
         PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
-        if (this.activity === activity) unbind()
+        if (this.activity === activity) {
+            ElevateJavaAllocationProfile.traceHook("NativeEpisodeOverlay", "ACTIVITY_DESTROY", activity)
+            unbind()
+        }
     }
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityPaused(activity: Activity) = Unit

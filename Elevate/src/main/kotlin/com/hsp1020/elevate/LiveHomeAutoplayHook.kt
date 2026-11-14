@@ -395,6 +395,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         focusTree = null
         unbindHome()
         host = activity
+        ElevateJavaAllocationProfile.traceHook("LiveHomeAutoplay", "ATTACH_HOME", activity)
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         activity.window.decorView.viewTreeObserver.also { tree ->
             focusTree = tree
@@ -425,6 +426,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         unbindHome()
+        ElevateJavaAllocationProfile.traceHook("LiveHomeAutoplay", "STOP", host)
         host = null
     }
 
@@ -433,6 +435,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
+            ElevateJavaAllocationProfile.traceHook("LiveHomeAutoplay", "ACTIVITY_DETACH", activity)
             returningPopup = null
             clearReturnDraw()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)

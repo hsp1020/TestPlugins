@@ -536,8 +536,8 @@ class ElevateSettingsFragment : DialogFragment() {
             setPadding(0, dp(16), 0, dp(6))
         })
         content.addView(TextView(ctx).apply {
-            text = "Android 15+. Start the 180-second allocation sampling, reproduce the issue, " +
-                "then press Stop once (or let 180 seconds finish automatically). HPROF starts without waiting for the Perfetto file; a Java heap " +
+            text = "Android 15+. Start the 10-minute allocation sampling (two 5-minute Perfetto segments), reproduce the issue, " +
+                "then press Stop once (or let 10 minutes finish automatically). HPROF starts without waiting for the Perfetto file; a Java heap " +
                 "dump may pause the app. Export both files and timing notes together as one ZIP."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, 0, 0, dp(6))
@@ -555,7 +555,7 @@ class ElevateSettingsFragment : DialogFragment() {
                 setOnClickListener { action() }
             })
         }
-        allocationButton("Start Java allocation profile (180s)") {
+        allocationButton("Start Java allocation profile (600s)") {
             val result = ElevateJavaAllocationProfile.start(ctx.applicationContext)
             allocationStatus.text = result
             Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()

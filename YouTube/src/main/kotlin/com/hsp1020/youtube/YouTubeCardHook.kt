@@ -2327,7 +2327,39 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
     }
 
+    /** Also release screens if a player Activity finishes before Fragment view callbacks. */
+    private fun releaseActivityScreens(activity: Activity) {
+        val stale = screens.filter { (fragment, screen) ->
+            if (fragment.activity === activity) true
+            else {
+                var context: android.content.Context? = screen.root.context
+                while (context is android.content.ContextWrapper && context !== activity) {
+                    val base = context.baseContext
+                    if (base === context) break
+                    context = base
+                }
+                context === activity
+            }
+        }.keys.toList()
+        stale.forEach { fragment ->
+            screens.remove(fragment)?.close()
+            if (playerFragment === fragment) {
+                detachTimeSeekListener()
+                restoreTimeSeekHostCallback()
+                clearPendingTimeSeek("player_activity_destroyed")
+                playerFragment = null
+            }
+        }
+        System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+            android.util.Log.i("JavaAllocCause",
+                "run=$run module=YouTube phase=PLAYER_ACTIVITY_CLEANUP " +
+                    "activityId=${System.identityHashCode(activity)} screensReleased=${stale.size} " +
+                    "screensRemaining=${screens.size}")
+        }
+    }
+
     override fun onActivityDestroyed(activity: Activity) {
+        releaseActivityScreens(activity)
         if (activity === standaloneHost) clearStandalonePlayer()
         val refreshHome = externalDirectPlaybackHost === activity &&
             activity.isFinishing && !activity.isChangingConfigurations

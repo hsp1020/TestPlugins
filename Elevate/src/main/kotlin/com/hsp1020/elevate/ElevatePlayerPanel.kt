@@ -1025,6 +1025,7 @@ internal class ElevatePlayerPanel(
     }
 
     fun detach() {
+        ElevateJavaAllocationProfile.traceHook("ElevatePlayerPanel", "DETACH", fragment.activity, fragment)
         cancelSyncCueRetry()
         stopSyncPosition()
         vm.currentLinks.removeObserver(linksChanged)

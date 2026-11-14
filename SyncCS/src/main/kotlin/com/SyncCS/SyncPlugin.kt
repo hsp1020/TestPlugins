@@ -247,7 +247,11 @@ class SyncPlugin : Plugin() {
                 return
             }
             worker = scope.launch {
+                var completedPass = false
                 while (true) {
+                    // The first pass remains immediate; merge closely spaced
+                    // edits arriving during an in-flight pass into one follow-up.
+                    if (completedPass) delay(500L)
                     var reasons = ""
                     var pass = 0L
                     val next = synchronized(workerGuard) {
@@ -292,6 +296,7 @@ class SyncPlugin : Plugin() {
                         "run=$allocationRun module=SyncCS phase=SYNC_START pass=$pass " +
                             "triggers=$reasons originalTrigger=$reason")
                     val result = SyncCoordinator.synchronize(context, active)
+                    completedPass = true
                     if (allocationRun != null) android.util.Log.i("JavaAllocCause",
                         "run=$allocationRun module=SyncCS phase=SYNC_FINISH pass=$pass " +
                             "result=${if (result.startsWith("Sync failed") || result.startsWith("Sync conflict")) "ERROR" else "COMPLETED"} " +
