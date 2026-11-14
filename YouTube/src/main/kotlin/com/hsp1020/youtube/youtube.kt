@@ -4048,18 +4048,35 @@ class YoutubeProvider(
                                     "continuation" to currentToken
                                 )
                                 val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
-                                val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+                                val httpResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
+                                val parseStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+                                val jsonResponse = httpResponse.parsedSafe<Map<String, Any>>()
+                                if (allocationRun != null) {
+                                    val parseMs = android.os.SystemClock.elapsedRealtime() - parseStart
+                                    val responseChars = runCatching { httpResponse.text.length }.getOrDefault(-1)
+                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_JSON " +
+                                        "tab=$tabName page=$pagesFetchedLocal chars=$responseChars parseMs=$parseMs parsed=${jsonResponse != null}")
+                                }
                                 if (jsonResponse == null) {
                                     cacheable = false
                                     break
                                 }
+                                val extractStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
                                 val javaContinuationItems = findContinuationItemsRecursive(jsonResponse)
                                 if (javaContinuationItems == null) {
                                     cacheable = false
                                     break
                                 }
+                                val previousCount = tabEpisodes.size
                                 extractVideosFromItems(javaContinuationItems, tabEpisodes, baseTabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
+                                if (allocationRun != null) {
+                                    Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=CHANNEL_CONTINUATION_EXTRACT " +
+                                        "tab=$tabName page=$pagesFetchedLocal items=${javaContinuationItems.size} " +
+                                        "added=${tabEpisodes.size - previousCount} extractMs=${android.os.SystemClock.elapsedRealtime() - extractStart} " +
+                                        "nextToken=${!currentToken.isNullOrBlank()}")
+                                }
                             } catch (e: Exception) {
                                 cacheable = false
                                 break

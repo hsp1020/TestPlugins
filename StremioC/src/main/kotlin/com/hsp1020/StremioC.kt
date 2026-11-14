@@ -3226,7 +3226,9 @@ open class StremioC(
 
         }
 
-        coroutineScope {
+        var subtitleOutcome = "FAILED"
+        try {
+            coroutineScope {
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
             mapped
@@ -3511,10 +3513,16 @@ open class StremioC(
             }
         )
         mappingDeferred.cancel()
-        }
-        if (allocationRun != null) {
-            android.util.Log.i("JavaAllocCause",
-                "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
+            }
+            subtitleOutcome = "COMPLETED"
+        } catch (cancelled: CancellationException) {
+            subtitleOutcome = "CANCELLED"
+            throw cancelled
+        } finally {
+            if (allocationRun != null) {
+                android.util.Log.i("JavaAllocCause",
+                    "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
+                    "outcome=$subtitleOutcome " +
                     "emitted=${subtitleEmitted.get()} duplicate=${subtitleDuplicate.get()} " +
                     "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L} " +
                     "groups=${(0..3).joinToString(",") { subtitleGroups.get(it).toString() }}")
@@ -3524,6 +3532,7 @@ open class StremioC(
                         "run=$allocationRun module=StremioC phase=SUBTITLE_ORIGIN " +
                             "origin=$origin emitted=${counts.get(0)} duplicate=${counts.get(1)}")
                 }
+            }
         }
         return true
     }
