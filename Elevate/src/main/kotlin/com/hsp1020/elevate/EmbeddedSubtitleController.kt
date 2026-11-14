@@ -493,6 +493,10 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             player = current
             current?.addListener(listener)
         }
+        if (changedSource || changedPlayer) {
+            ElevateDownloadStartupTrace.mark("EMBEDDED_SUBTITLE_SOURCE",
+                "changedSource=$changedSource changedPlayer=$changedPlayer")
+        }
         if ((changedSource || changedPlayer) && current != null) selectEmbedded(current.currentTracks)
         attachCaptionOutput(f)
     }
@@ -554,6 +558,9 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             }.minByOrNull { it.first } ?: return
         val (_, group, index) = match
         if (group.isTrackSelected(index)) return
+        ElevateDownloadStartupTrace.mark("EMBEDDED_SUBTITLE_OVERRIDE",
+            "language=$language index=$index trackLang=${group.getTrackFormat(index).language} " +
+                "beforeOverrideTypes=${current.trackSelectionParameters.overrides.keys.map { it.type }}")
         runCatching {
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)

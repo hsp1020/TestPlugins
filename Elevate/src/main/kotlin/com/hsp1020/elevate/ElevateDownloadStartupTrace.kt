@@ -5,6 +5,8 @@ import android.app.Application
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Debug
+import android.os.Process
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
@@ -28,6 +30,7 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import java.lang.reflect.Proxy
+import java.io.File
 
 /** Temporary read-only trace of downloaded playback startup, with a separate 1s heartbeat. */
 internal class ElevateDownloadStartupTrace(private val app: Application) :
@@ -98,6 +101,32 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
         private var vm: PlayerGeneratorViewModel? = null
         private var player: Media3Player? = null
         private var removeObservers: (() -> Unit)? = null
+        private val processCpuStartMs = Process.getElapsedCpuTime()
+        private var tickNo = 0
+
+        /** Available OS counters: they do not attribute I/O to any one player or extractor. */
+        private fun processIo(): String = runCatching {
+            val io = File("/proc/self/io").readLines().associate { line ->
+                val parts = line.split(':', limit = 2)
+                parts[0].trim() to parts.getOrElse(1) { "" }.trim()
+            }
+            "readBytes=${io["read_bytes"]} readChars=${io["rchar"]} " +
+                "sysRead=${io["syscr"]} writeBytes=${io["write_bytes"]}"
+        }.getOrElse { "unavailable=${it.javaClass.simpleName}" }
+
+        private fun formatTracks(type: Int, limit: Int = 12): String {
+            val p = player ?: return "none"
+            return p.currentTracks.groups.filter { it.type == type }
+                .flatMap { group ->
+                    (0 until group.length).map { idx ->
+                        val f = group.getTrackFormat(idx)
+                        "${f.language ?: "und"}:${f.sampleMimeType}:" +
+                            "selected=${group.isTrackSelected(idx)}:" +
+                            "supported=${group.isTrackSupported(idx)}"
+                    }
+                }.take(limit).joinToString(";")
+        }
+
 
         fun log(phase: String, detail: String = "") {
             if (enabled) Log.i(TAG, "id=$id elapsedMs=${SystemClock.elapsedRealtime() - startedMs} " +
@@ -132,7 +161,9 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                     log("MEDIA3_${method.name}", "arg=${args?.getOrNull(0)?.javaClass?.simpleName}"); null
                 }
                 "onTracksChanged" -> {
-                    log("MEDIA3_TRACKS", "groups=${player?.currentTracks?.groups?.size}"); null
+                    log("MEDIA3_TRACKS", "groups=${player?.currentTracks?.groups?.size} " +
+                        "audio=${formatTracks(C.TRACK_TYPE_AUDIO)} " +
+                        "text=${formatTracks(C.TRACK_TYPE_TEXT, 5)}"); null
                 }
                 "onVideoSizeChanged", "onSurfaceSizeChanged" -> {
                     log("MEDIA3_${method.name}", "resolution=${player?.videoSize?.width}x${player?.videoSize?.height}"); null
@@ -157,8 +188,12 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                 "onLoadStarted", "onLoadCompleted", "onLoadCanceled", "onLoadError" -> {
                     val info = args?.getOrNull(1) as? LoadEventInfo
                     val data = args?.getOrNull(2) as? MediaLoadData
+                    val spec = info?.dataSpec
                     log("MEDIA3_${method.name}", "task=${info?.loadTaskId} durationMs=${info?.loadDurationMs} " +
-                        "bytes=${info?.bytesLoaded} type=${data?.dataType} " +
+                        "bytes=${info?.bytesLoaded} type=${data?.dataType} trackType=${data?.trackType} " +
+                        "mime=${data?.trackFormat?.sampleMimeType} startMs=${data?.mediaStartTimeMs} " +
+                        "endMs=${data?.mediaEndTimeMs} source=${spec?.uri?.scheme}://" +
+                        "${spec?.uri?.authority} position=${spec?.position} length=${spec?.length} " +
                         "error=${(args?.getOrNull(3) as? Throwable)?.javaClass?.simpleName}"); null
                 }
                 "onVideoDecoderInitialized", "onAudioDecoderInitialized",
@@ -168,7 +203,14 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                 "onVideoInputFormatChanged", "onAudioInputFormatChanged" -> {
                     val format = args?.getOrNull(1) as? Format
                     log("MEDIA3_${method.name}", "mime=${format?.sampleMimeType} " +
-                        "size=${format?.width}x${format?.height}"); null
+                        "size=${format?.width}x${format?.height} language=${format?.language} " +
+                        "channels=${format?.channelCount} bitrate=${format?.bitrate}"); null
+                }
+                "onReadingStarted", "onVideoEnabled", "onAudioEnabled",
+                "onVideoDisabled", "onAudioDisabled", "onAudioPositionAdvancing",
+                "onAudioUnderrun", "onDroppedVideoFrames", "onVideoFrameProcessingOffset",
+                "onDownstreamFormatChanged", "onUpstreamDiscarded", "onBandwidthEstimate" -> {
+                    log("MEDIA3_${method.name}", "args=${args?.size}"); null
                 }
                 "onRenderedFirstFrame" -> { firstFrame("ANALYTICS"); null }
                 else -> null
@@ -213,7 +255,9 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                     model.loadingLinks.removeObserver(loading)
                     model.currentLinks.removeObserver(links)
                 }
-                log("VM_READY", "instance=${model.state.instance}")
+                log("VM_READY", "instance=${model.state.instance} " +
+                    "fileSource=${(model.state.generatorState?.meta as? ExtractorUri)?.uri?.scheme} " +
+                    "uriAuthority=${(model.state.generatorState?.meta as? ExtractorUri)?.uri?.authority}")
             }.onFailure { log("VM_OBSERVER_ERROR", "type=${it.javaClass.simpleName}") }
         }
         private fun bind(next: Media3Player?) {
@@ -252,7 +296,9 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                 "bufferedMs=${nowPlayer?.bufferedPosition} " +
                 "tracks=${groups.count { it.type == C.TRACK_TYPE_VIDEO }}/" +
                 "${groups.count { it.type == C.TRACK_TYPE_AUDIO }}/${groups.count { it.type == C.TRACK_TYPE_TEXT }} " +
-                "video=${nowPlayer?.videoSize?.width}x${nowPlayer?.videoSize?.height}"
+                "video=${nowPlayer?.videoSize?.width}x${nowPlayer?.videoSize?.height} " +
+                "audioTracks=${formatTracks(C.TRACK_TYPE_AUDIO, 4)} " +
+                "bufferedDurationMs=${nowPlayer?.totalBufferedDuration}"
             sampledMs = SystemClock.elapsedRealtime()
         }
         private val inspect = object : Runnable {
@@ -272,15 +318,20 @@ internal class ElevateDownloadStartupTrace(private val app: Application) :
                 if (!enabled) return
                 val now = SystemClock.elapsedRealtime()
                 val memory = Runtime.getRuntime()
+                val io = processIo()
+                tickNo++
                 Log.i(TAG, "id=$id elapsedMs=${now - startedMs} phase=SECOND " +
                     "second=${(now - startedMs) / 1000} sampleAgeMs=${now - sampledMs} " +
-                    "heapMiB=${(memory.totalMemory() - memory.freeMemory()) / 1048576L} $snapshot")
+                    "heapMiB=${(memory.totalMemory() - memory.freeMemory()) / 1048576L} " +
+                    "nativeHeapMiB=${Debug.getNativeHeapAllocatedSize() / 1048576L} " +
+                    "processCpuMs=${Process.getElapsedCpuTime() - processCpuStartMs} " +
+                    "io=[$io] $snapshot")
                 if (now - startedMs < 90_000L) clock?.postDelayed(this, 1000L)
             }
         }
         fun start(restored: Boolean) {
             enabled = true
-            log("START", "restored=$restored")
+            log("START", "restored=$restored pid=${Process.myPid()} androidSdk=${android.os.Build.VERSION.SDK_INT}")
             activity.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
             clockThread.start()
             clock = Handler(clockThread.looper)

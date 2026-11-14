@@ -238,8 +238,11 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         lastEpisodeId = episodeId
         selected = false
         originAttempted = false
+        val identityStart = android.os.SystemClock.elapsedRealtime()
         val offlineIdentity = if (offline != null && response == null)
             ElevateOfflineMedia.identity(application, offline.parentId) else null
+        ElevateDownloadStartupTrace.mark("AUDIO_OFFLINE_IDENTITY", "found=${offlineIdentity != null} " +
+            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - identityStart}")
         unresolvedOffline = offline?.takeIf { response == null && offlineIdentity == null }
         originLanguage = normalizedLanguage(response?.syncData?.get("original_language"))
             ?: normalizedLanguage(runCatching {
@@ -257,6 +260,10 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             (offlineIdentity?.anilist ?: ids.anilist)?.let { "anilist" to it },
             (offlineIdentity?.kitsu ?: ids.kitsu)?.let { "kitsu" to it }
         )
+        ElevateDownloadStartupTrace.mark("AUDIO_SOURCE_METADATA",
+            "origin=$originLanguage tmdb=${lookupTmdb != null} imdb=${lookupImdb != null} " +
+                "simkl=${lookupSimkl != null} animeIds=${lookupAnimeIds.map { it.first }} " +
+                "unresolvedOffline=${unresolvedOffline != null}")
         val type = episode?.tvType ?: offline?.tvType ?: response?.type
         val declaredMovie = runCatching {
             JSONObject(response?.url.orEmpty()).optString("type") == "movie"
@@ -267,9 +274,18 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     private fun select(tracks: Tracks) {
         val current = player ?: return
-        if (selected) return
+        if (selected) {
+            ElevateDownloadStartupTrace.mark("AUDIO_SKIP", "reason=already_selected")
+            return
+        }
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        ElevateDownloadStartupTrace.mark("AUDIO_SCAN", "groups=${groups.size}")
+        val candidates = groups.flatMap { g -> (0 until g.length).map { i ->
+            val f = g.getTrackFormat(i)
+            "${f.language ?: "und"}:${f.sampleMimeType}:selected=${g.isTrackSelected(i)}:" +
+                "supported=${g.isTrackSupported(i)}"
+        } }.take(10).joinToString(";")
+        ElevateDownloadStartupTrace.mark("AUDIO_SCAN", "groups=${groups.size} " +
+            "origin=$originLanguage candidates=$candidates")
         if (groups.isEmpty()) return
         val appLanguage = fragment?.context?.resources?.configuration?.let {
             ConfigurationCompat.getLocales(it).get(0)?.language
@@ -289,6 +305,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
         val appMatch = match(appLanguage)
         if (appMatch != null) {
+            ElevateDownloadStartupTrace.mark("AUDIO_DECISION", "reason=app_language app=$appLanguage")
             choose(current, appMatch)
             return
         }
@@ -299,7 +316,10 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             (lookupTmdb != null || lookupImdb != null || lookupSimkl != null ||
                 lookupAnimeIds.isNotEmpty() || unresolvedOffline?.parentId != null)) {
             originAttempted = true
-            ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_START", "version=$sourceVersion")
+            ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_START",
+                "version=$sourceVersion available=$available tmdb=${lookupTmdb != null} " +
+                "imdb=${lookupImdb != null} simkl=${lookupSimkl != null} animeIds=${lookupAnimeIds.map { it.first }}")
+            val queryAt = android.os.SystemClock.elapsedRealtime()
             val version = sourceVersion
             val sourcePlayer = current
             val initialParameters = current.trackSelectionParameters
@@ -326,6 +346,8 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                         (imdb ?: recovered?.imdb)?.let {
                             ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
                         }
+                    ElevateDownloadStartupTrace.mark("ORIGIN_DIRECT_RESOLVED", "hasTmdb=${direct != null} " +
+                        "recovered=${recovered != null}")
                     val mapped = if (direct == null && (simkl ?: recovered?.simkl) != null)
                         ElevateMediaIdentity.simklMapping(
                             ElevateMediaIdentity.Ids(simkl = simkl ?: recovered?.simkl),
@@ -333,17 +355,25 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                     var tmdbId = direct ?: mapped?.tmdb ?: mapped?.imdb?.let {
                         ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
                     }
+                    ElevateDownloadStartupTrace.mark("ORIGIN_SIMKL_RESOLVED", "hasTmdb=${tmdbId != null} " +
+                        "usedSimkl=${mapped != null}")
                     if (tmdbId == null) for ((source, id) in animeIds + listOfNotNull(
                         recovered?.mal?.let { "mal" to it },
                         recovered?.anilist?.let { "anilist" to it },
                         recovered?.kitsu?.let { "kitsu" to it }
                     )) {
-                        val animeMapping = ElevateAnimeIdResolver.resolve(source, id) ?: continue
+                        val mappingAt = android.os.SystemClock.elapsedRealtime()
+                        val animeMapping = ElevateAnimeIdResolver.resolve(source, id)
+                        ElevateDownloadStartupTrace.mark("ORIGIN_ANIME_MAP",
+                            "source=$source mapped=${animeMapping != null} " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - mappingAt}")
+                        if (animeMapping == null) continue
                         tmdbId = animeMapping.tmdb ?: animeMapping.imdb?.let {
                             ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
                         }
                         if (tmdbId != null) break
                     }
+                    ElevateDownloadStartupTrace.mark("ORIGIN_TMDB_QUERY", "hasTmdb=${tmdbId != null}")
                     tmdbId?.let {
                         ElevateTmdbMetadata.originalLanguage(it, resolvedMovie,
                             com.lagradost.cloudstream3.ui.settings.getCurrentLocale(application),
@@ -352,13 +382,25 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) { throw e }
                   catch (_: Exception) { null }
-                ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_END", "found=${resolved != null} stale=${sourceVersion != version}")
-                if (sourceVersion != version) return@launch
+                ElevateDownloadStartupTrace.mark("ORIGIN_QUERY_END", "found=${resolved != null} " +
+                    "value=$resolved normalized=${normalizedLanguage(resolved)} stale=${sourceVersion != version} " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - queryAt}")
+                if (sourceVersion != version) {
+                    ElevateDownloadStartupTrace.mark("AUDIO_ABORT", "reason=stale_version")
+                    return@launch
+                }
                 originJob = null
                 originLanguage = normalizedLanguage(resolved)
                 val activePlayer = player ?: return@launch
                 if (activePlayer === sourcePlayer &&
                     activePlayer.trackSelectionParameters != initialParameters) {
+                    val before = initialParameters
+                    val after = activePlayer.trackSelectionParameters
+                    ElevateDownloadStartupTrace.mark("AUDIO_ABORT", "reason=parameters_changed " +
+                        "beforeAudio=${before.preferredAudioLanguages} afterAudio=${after.preferredAudioLanguages} " +
+                        "beforeOverrides=${before.overrides.keys.map { it.type }} " +
+                        "afterOverrides=${after.overrides.keys.map { it.type }} " +
+                        "beforeDisabled=${before.disabledTrackTypes} afterDisabled=${after.disabledTrackTypes}")
                     // Never override an audio track manually chosen while metadata was loading.
                     selected = true
                     activePlayer.removeListener(audioListener)
@@ -368,8 +410,20 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             }
             return
         }
-        if (originJob != null) return
-        val fallback = match(originLanguage) ?: match("en") ?: return
+        if (originJob != null) {
+            ElevateDownloadStartupTrace.mark("AUDIO_DEFER", "reason=origin_query_pending")
+            return
+        }
+        val originMatch = match(originLanguage)
+        val fallback = originMatch ?: match("en")
+        if (fallback == null) {
+            ElevateDownloadStartupTrace.mark("AUDIO_NO_MATCH",
+                "app=$appLanguage origin=$originLanguage available=$available")
+            return
+        }
+        ElevateDownloadStartupTrace.mark("AUDIO_DECISION",
+            "reason=${if (originMatch != null) "original_language" else "english_fallback"} " +
+                "app=$appLanguage original=$originLanguage")
         choose(current, fallback)
     }
 
@@ -377,7 +431,8 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         selected = true
         current.removeListener(audioListener)
         val (group, index) = match
-        ElevateDownloadStartupTrace.mark("AUDIO_SELECTED", "index=$index")
+        ElevateDownloadStartupTrace.mark("AUDIO_SELECTED", "index=$index language=${group.getTrackFormat(index).language} " +
+            "mime=${group.getTrackFormat(index).sampleMimeType} selectedBefore=${group.isTrackSelected(index)}")
         current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
     }

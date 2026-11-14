@@ -223,6 +223,8 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         clearRefreshState()
         appliedRefresh = deferred
         observedPlayer = current
+        ElevateDownloadStartupTrace.mark("SUBTITLE_STATE", "hasCurrent=${current != null} " +
+            "subtitles=${model?.state?.subtitles?.size}")
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
         runAppliedRefresh()

@@ -421,6 +421,8 @@ internal class ElevateSkipController(private val application: Application) :
         ownSeek = null
         scheduleAutoSkip()
         job = scope.launch {
+            val skipStarted = android.os.SystemClock.elapsedRealtime()
+            ElevateDownloadStartupTrace.mark("SKIP_FETCH_START", "offline=${offline != null}")
             val target = identity ?: offline?.let { file ->
                 val header = withContext(Dispatchers.IO) {
                     application.getKey<DownloadObjects.DownloadHeaderCached>(
@@ -431,6 +433,8 @@ internal class ElevateSkipController(private val application: Application) :
             } ?: return@launch
             if (serial != generation || activeKey != key) return@launch
             val result = ElevateSkipRepository.fetch(target, preferLocal = offline != null)
+            ElevateDownloadStartupTrace.mark("SKIP_FETCH_END",
+                "items=${result.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - skipStarted}")
             if (serial != generation || activeKey != key) return@launch
             custom = result
             publish()
