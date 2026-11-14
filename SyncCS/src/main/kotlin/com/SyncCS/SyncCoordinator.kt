@@ -385,12 +385,21 @@ internal object SyncCoordinator {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
         val dirtyBarrier = System.currentTimeMillis()
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val allocationStart = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
         var stage = "loading cloud state"
-        fun stageTo(next: String) { stage = next }
+        fun stageTo(next: String) {
+            stage = next
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=SyncCS phase=STAGE reason=$next " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - allocationStart}")
+        }
         stageTo(stage)
         var undoStarted = false
         fun ensureUndo() {
             if (!undoStarted) {
+                if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                    "run=$allocationRun module=SyncCS phase=JOURNAL_CAPTURE reason=ROLLBACK_SAFETY")
                 LocalSyncJournal.capture(context)
                 undoStarted = true
             }
@@ -585,6 +594,20 @@ internal object SyncCoordinator {
                 for (entry in pull.entries) versions[entry.key] = entry.version
             }
 
+            if (allocationRun != null) {
+                val scopeReason = when {
+                    pull.full -> "REMOTE_FULL"
+                    firstRemoteRestore -> "INITIAL_RESTORE"
+                    rosterIdentitiesChanged -> "PROFILE_CHANGED"
+                    incomingHeaders -> "HEADER_REFERENCE_GRAPH"
+                    periodicAuditDue -> "PERIODIC_AUDIT"
+                    else -> "SELECTED_CHANGED_KEYS"
+                }
+                android.util.Log.i("JavaAllocCause",
+                    "run=$allocationRun module=SyncCS phase=LOCAL_SCOPE reason=$scopeReason " +
+                        "complete=$completeLocal remoteKeys=${remoteValues.size} marked=${marked.size} " +
+                        "baselineKeys=${base.size}")
+            }
             val local = if (completeLocal) {
                 ProfileIdentity.toRemote(SyncData.snapshot(context), profileMerge.target)
             } else {
@@ -594,6 +617,9 @@ internal object SyncCoordinator {
                     SyncData.snapshotSelected(context, selectedRemote), profileMerge.target)
             }
 
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=SyncCS phase=SETTINGS_SNAPSHOT " +
+                    "reason=${if (completeLocal) "FULL" else "SELECTED"} keys=${local.size}")
             val currentPlugins = PluginInventory.snapshot(context)
             stageTo("comparing changed settings")
             val savedLists = if (priorBaseline == null) null
@@ -609,6 +635,9 @@ internal object SyncCoordinator {
 
             val apply = planned.apply
             val upload = planned.upload
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=SyncCS phase=RECONCILE " +
+                    "apply=${apply.size} upload=${upload.size} baseline=${base.size}")
             val next = planned.next
             val conflicts = planned.conflicts
 
@@ -865,6 +894,9 @@ internal object SyncCoordinator {
             lastStatus = message
             return message
         } finally {
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=SyncCS phase=END stage=$stage " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - allocationStart}")
         }
     }
 

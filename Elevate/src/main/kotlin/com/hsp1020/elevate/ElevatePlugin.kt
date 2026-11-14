@@ -133,6 +133,7 @@ class ElevatePlugin : Plugin() {
             if (generation.get() != token) return@post
             stopAll()
             app = application
+            ElevateJavaAllocationProfile.initialize(application)
             playbackTrace = ElevatePlaybackTrace(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
@@ -618,6 +619,7 @@ class ElevatePlugin : Plugin() {
         subtitleSourceObserver?.stop()
         subtitleSourceObserver = null
         nativePanelEnabled = false
+        ElevateJavaAllocationProfile.shutdown()
         app = null
     }
 

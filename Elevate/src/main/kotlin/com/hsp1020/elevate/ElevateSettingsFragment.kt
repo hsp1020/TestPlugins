@@ -1,6 +1,12 @@
 package com.hsp1020.elevate
 
 import android.app.Dialog
+import android.os.Handler
+import android.os.Looper
+import android.widget.Button
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import java.io.File
 import android.content.Context
 import android.os.Bundle
 import android.util.TypedValue
@@ -139,6 +145,30 @@ internal fun Spinner.useElevateSettingsDropdown(
 }
 
 class ElevateSettingsFragment : DialogFragment() {
+    private var pendingAllocationExport: File? = null
+    private val exportAllocation = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val source = pendingAllocationExport
+        pendingAllocationExport = null
+        val app = context?.applicationContext
+        if (uri == null || source == null || app == null) return@registerForActivityResult
+        Thread({
+            val result = runCatching {
+                val output = app.contentResolver.openOutputStream(uri)
+                    ?: error("Destination unavailable")
+                output.use { stream -> source.inputStream().use { it.copyTo(stream) } }
+            }
+            Handler(Looper.getMainLooper()).post {
+                context?.let { ctx ->
+                    Toast.makeText(ctx, if (result.isSuccess) "Profile exported"
+                        else "Export failed: " + result.exceptionOrNull()?.javaClass?.simpleName,
+                        Toast.LENGTH_LONG).show()
+                }
+            }
+        }, "ElevateJavaAllocExport").start()
+    }
+
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val ctx = requireContext()
         fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
@@ -486,6 +516,71 @@ class ElevateSettingsFragment : DialogFragment() {
                     content.addView(container)
                 }
             }
+        }
+        content.addView(TextView(ctx).apply {
+            text = "Java Allocation & Memory Diagnostics (manual)"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            applyElevateNativeFont(bold = true)
+            setPadding(0, dp(16), 0, dp(6))
+        })
+        content.addView(TextView(ctx).apply {
+            text = "Android 15+. Start 180-second allocation sampling, reproduce the issue, " +
+                "Stop and export Perfetto. Samples memory and GC every 5 seconds only while recording. " +
+                "Heap Dump is a separate one-shot request which may pause the app."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, 0, 0, dp(6))
+        })
+        val allocationStatus = TextView(ctx).apply {
+            text = ElevateJavaAllocationProfile.statusText()
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
+        content.addView(allocationStatus)
+        fun allocationButton(title: String, action: () -> Unit) {
+            content.addView(Button(ctx).apply {
+                text = title
+                isAllCaps = false
+                applyElevateNativeFont()
+                setOnClickListener { action() }
+            })
+        }
+        allocationButton("Start Java allocation profile (180s)") {
+            val result = ElevateJavaAllocationProfile.start(ctx.applicationContext)
+            allocationStatus.text = result
+            Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+            if (result.startsWith("Recording requested")) dismiss()
+        }
+        allocationButton("Stop / finish allocation profile") {
+            val result = ElevateJavaAllocationProfile.stop()
+            allocationStatus.text = result
+            Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+        }
+        allocationButton("Request Java heap dump (HPROF)") {
+            AlertDialog.Builder(ctx)
+                .setTitle("Capture Java heap dump?")
+                .setMessage("The app may briefly pause and the heap dump may be large. " +
+                    "Use separately from allocation profiling and only when memory is stable.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Capture") { _, _ ->
+                    val result = ElevateJavaAllocationProfile.heapDump(ctx.applicationContext)
+                    allocationStatus.text = result
+                    Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+                }.show()
+        }
+        allocationButton("Export Perfetto / HPROF") {
+            val files = ElevateJavaAllocationProfile.profiles(ctx)
+            if (files.isEmpty()) {
+                Toast.makeText(ctx, "No completed profiles. Check status and retry.", Toast.LENGTH_LONG).show()
+            } else {
+                AlertDialog.Builder(ctx)
+                    .setTitle("Choose memory profile")
+                    .setItems(files.map { it.name }.toTypedArray()) { _, index ->
+                        pendingAllocationExport = files[index]
+                        exportAllocation.launch(files[index].name)
+                    }.show()
+            }
+        }
+        allocationButton("Refresh profiling status") {
+            allocationStatus.text = ElevateJavaAllocationProfile.statusText()
         }
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")

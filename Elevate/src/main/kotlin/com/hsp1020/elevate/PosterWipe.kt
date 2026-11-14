@@ -111,6 +111,11 @@ internal object PosterWipe {
                     .networkCachePolicy(CachePolicy.DISABLED)
                     .fetcherFactory(cacheOnlyFetcher).build())
                 if (cached is SuccessResult) {
+                    System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+                        android.util.Log.i("JavaAllocCause",
+                            "run=$run module=Coil phase=FETCH reason=INFLIGHT_CACHE_PROBE " +
+                                "source=${cached.dataSource} size=$size")
+                    }
                     return cached
                 }
             }
@@ -119,6 +124,11 @@ internal object PosterWipe {
                 val result = loader.execute(request
                     .networkCachePolicy(CachePolicy.ENABLED)
                     .fetcherFactory(posterFetcher).build())
+                System.getProperty("hsp1020.java.alloc.run")?.let { run ->
+                    android.util.Log.i("JavaAllocCause",
+                        "run=$run module=Coil phase=FETCH reason=COIL_EXECUTE " +
+                            "source=${(result as? SuccessResult)?.dataSource ?: "ERROR"} size=$size")
+                }
                 return result
             } finally {
                 gate.mutex.unlock()
@@ -133,11 +143,14 @@ internal object PosterWipe {
 
     // Never share a decoded image across distinct output dimensions.
     private suspend fun loadSharedImage(
-        context: Context, url: String, size: Size, scale: Scale
+        context: Context, url: String, size: Size, scale: Scale, mode: String = "DISPLAY"
     ): ImageResult {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
+        var joined = false
         val key = RequestKey(url, size, scale)
         val flight = synchronized(imageFlights) {
-            (imageFlights[key] ?: run {
+            (imageFlights[key]?.also { if (allocationRun != null) joined = true } ?: run {
                 val job = imageScope.async(start = CoroutineStart.LAZY) {
                     executeImage(context, url, size, scale)
                 }
@@ -153,7 +166,13 @@ internal object PosterWipe {
         }
         flight.request.start()
         try {
-            return flight.request.await()
+            val outcome = flight.request.await()
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=Coil phase=IMAGE_RESULT " +
+                    "reason=${if (joined) "SHARED_INFLIGHT" else "NEW_REQUEST"} mode=$mode " +
+                    "size=$size scale=$scale source=${(outcome as? SuccessResult)?.dataSource ?: "ERROR"} " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+            return outcome
         } finally {
             val cancel = synchronized(imageFlights) {
                 flight.subscribers--
@@ -211,7 +230,7 @@ internal object PosterWipe {
     /** Warm the existing Coil cache without attaching or modifying an ImageView. */
     suspend fun prefetch(context: Context, url: String, width: Int, height: Int): Result {
         val outcome = try {
-            loadSharedImage(context, url, Size(width, height), Scale.FILL)
+            loadSharedImage(context, url, Size(width, height), Scale.FILL, "PREFETCH")
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

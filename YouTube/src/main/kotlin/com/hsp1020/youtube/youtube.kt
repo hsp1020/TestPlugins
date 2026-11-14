@@ -1349,7 +1349,13 @@ class YoutubeProvider(
         currentCoroutineContext().ensureActive()
         if (body.isBlank()) return null
 
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val responseChars = if (allocationRun != null) body.length else 0
         val processed = streamProcessChipResponse(body)
+        if (allocationRun != null) Log.i("JavaAllocCause",
+            "run=$allocationRun module=YouTube phase=CHIP_PARSE " +
+                "reason=${if (processed != null) "STREAM_PARSE_OK" else "STREAM_PARSE_FAILED"} " +
+                "responseChars=$responseChars page=$page")
         body = ""
         if (processed == null) {
             currentCoroutineContext().ensureActive()
@@ -2232,6 +2238,10 @@ class YoutubeProvider(
         html: String,
         allowedTopLevelKeys: Set<String>?
     ): Map<String, Any>? {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        if (allocationRun != null) Log.i("JavaAllocCause",
+            "run=$allocationRun module=YouTube phase=YT_INITIAL_DATA " +
+                "reason=${if (allowedTopLevelKeys == null) "FULL_KEYS" else "FILTERED_KEYS"} htmlChars=${html.length}")
         var index = 0
         val htmlLen = html.length
         while (true) {
@@ -2263,7 +2273,12 @@ class YoutubeProvider(
                             endExclusive,
                             allowedTopLevelKeys
                         )
-                        if (parsed != null) return parsed
+                        if (parsed != null) {
+                            if (allocationRun != null) Log.i("JavaAllocCause",
+                                "run=$allocationRun module=YouTube phase=YT_INITIAL_DATA_RESULT " +
+                                    "reason=PARSED jsonChars=${endExclusive - braceIndex} keys=${parsed.size}")
+                            return parsed
+                        }
                     }
                 }
             }
@@ -3033,6 +3048,9 @@ class YoutubeProvider(
     }
 
     private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>, isShortsTab: Boolean = false) {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        val previousSize = if (allocationRun != null) collectTo.size else 0
+        val start = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
         items.forEachIndexed { index, item ->
             try {
                 val map = item as? Map<*, *>
@@ -3112,8 +3130,13 @@ class YoutubeProvider(
             } catch (e: Exception) {
             }
         }
+        if (allocationRun != null) Log.i("JavaAllocCause",
+            "run=$allocationRun module=YouTube phase=RENDERER_SCAN " +
+                "reason=${if (isShortsTab) "SHORTS_ITEMS" else "VIDEO_ITEMS"} " +
+                "items=${items.size} emitted=${collectTo.size - previousSize} " +
+                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
     }
-    
+
     private fun extractEpisodesFromData(data: Map<String, Any>?): List<Episode> {
         if (data == null) return emptyList()
         val episodes = mutableListOf<Episode>()
@@ -3452,6 +3475,17 @@ class YoutubeProvider(
         url: String, direct: Boolean, channelTargetPages: Int = 2,
         channelExpansionTab: String? = null
     ): LoadResponse {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        if (allocationRun != null) {
+            val route = when {
+                url.contains("/shorts/") -> "SHORTS"
+                url.contains("/watch") -> "WATCH"
+                url.contains("/channel/") || url.contains("/@") -> "CHANNEL"
+                else -> "OTHER"
+            }
+            Log.i("JavaAllocCause", "run=$allocationRun module=YouTube phase=LOAD_PAGE " +
+                "reason=$route direct=$direct pages=$channelTargetPages tab=${channelExpansionTab ?: "none"}")
+        }
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")

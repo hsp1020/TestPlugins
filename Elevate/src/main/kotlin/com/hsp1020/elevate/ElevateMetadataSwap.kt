@@ -1119,26 +1119,39 @@ internal class ElevateMetadataSwap(private val application: Application) :
             flights: MutableMap<String, Deferred<JSONObject?>>,
             request: suspend () -> Fetched?
         ): JSONObject? {
+            val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+            val started = if (allocationRun != null) android.os.SystemClock.elapsedRealtime() else 0L
             val now = System.currentTimeMillis()
             val ram = synchronized(cache) {
                 cache[key]?.takeIf { now >= it.at && now - it.at < it.ttlMs }?.bytes
             }
             if (ram != null) runCatching { JSONObject(String(ram, Charsets.UTF_8)) }
                 .getOrNull()?.let {
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=Elevate phase=META_CACHE " +
+                            "reason=RAM_HIT kind=$kind cachedBytes=${ram.size}")
                     return it
                 }
+            var joined = false
             val job = synchronized(cache) {
-                flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                flights[key]?.also { if (allocationRun != null) joined = true } ?: scope.async(start = CoroutineStart.LAZY) {
                     val disk = ElevateMetadataDiskCache.read(kind, key)
                     if (disk != null) {
                         val parsed = runCatching { JSONObject(disk.body) }.getOrNull()
                         if (parsed != null) {
+                            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                                "run=$allocationRun module=Elevate phase=META_CACHE " +
+                                    "reason=DISK_HIT kind=$kind chars=${disk.body.length}")
                             remember(kind, cache, key, disk.at, disk.ttlMs,
                                 disk.body.toByteArray(Charsets.UTF_8))
                             return@async parsed
                         }
                     }
                     val fetched = request()
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=Elevate phase=META_CACHE " +
+                            "reason=NETWORK_FETCH kind=$kind success=${fetched != null} " +
+                            "ttlMs=${fetched?.ttlMs ?: 0L}")
                     if (fetched != null && fetched.ttlMs > 0L) {
                         val body = fetched.json.toString()
                         val raw = body.toByteArray(Charsets.UTF_8)
@@ -1158,7 +1171,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
             }
             job.start()
-            return job.await()
+            val result = job.await()
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=Elevate phase=META_RESULT " +
+                    "reason=${if (joined) "SHARED_INFLIGHT" else "DIRECT"} kind=$kind " +
+                    "success=${result != null} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+            return result
         }
 
         private fun cacheTtl(

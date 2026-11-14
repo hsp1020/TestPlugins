@@ -1492,6 +1492,10 @@ open class StremioC(
             val storageKey = addonMetaStorageKey(url)
             // The catalog's own Metadata Sync switch controls its original meta cache.
             val skipCache = isMetadataSwapAllowed(url.substringBefore("/meta/"))
+            val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=StremioC phase=META_REQUEST " +
+                    "reason=${if (skipCache) "CATALOG_SYNC_BYPASS" else if (forceRefresh) "FORCE_REFRESH" else "CACHE_ALLOWED"}")
             if (skipCache) {
                 invalidateAddonMetaInRam(storageKey)
                 MetadataDiskCache.invalidate("meta", storageKey)
@@ -1502,10 +1506,14 @@ open class StremioC(
             } else null
             if (!forceRefresh && !skipCache) {
                 cachedAddonMetaInRam(storageKey)?.let {
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=StremioC phase=META_RESULT reason=RAM_HIT chars=${it.length}")
                     return it
                 }
                 MetadataDiskCache.readWithTtl("meta", storageKey)?.let {
                     cacheAddonMetaInRam(storageKey, it.json, it.ttlMs, it.timestamp)
+                    if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                        "run=$allocationRun module=StremioC phase=META_RESULT reason=DISK_HIT chars=${it.json.length}")
                     return it.json
                 }
             }
@@ -1520,6 +1528,9 @@ open class StremioC(
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
+                        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                            "run=$allocationRun module=StremioC phase=META_RESULT " +
+                                "reason=${if (skipCache) "CACHE_BYPASS" else "NETWORK_FETCH"} chars=${body.length}")
                         if (skipCache || isMetadataSwapAllowed(url.substringBefore("/meta/"))) {
                             // The caller still parses the metadata once for the LoadResponse.
                             // Avoid a second JSON tree and validation allocation just for caching.
@@ -2450,12 +2461,16 @@ open class StremioC(
     private suspend fun fetchCatalogItems(
         path: String, fallbackType: String = "movie", origin: String = "home"
     ): Pair<List<SearchResponse>, Int> {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
         val cacheKey = "$mainUrl|$fallbackType|$path"
         synchronized(recentHomeResults) {
             recentHomeResults[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
         }?.let {
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=StremioC phase=CATALOG " +
+                    "reason=MEMORY_CACHE_HIT origin=$origin items=${it.first.size}")
             return it
         }
         return homeForegroundSemaphore.withPermit {
@@ -2471,6 +2486,9 @@ open class StremioC(
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
             val result = items to metas.size
+            if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+                "run=$allocationRun module=StremioC phase=CATALOG " +
+                    "reason=FETCH_AND_PARSE origin=$origin metas=${metas.size} items=${items.size}")
             if (items.isNotEmpty() && items.size <= 100) {
                 synchronized(recentHomeResults) {
                     recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())
@@ -2553,6 +2571,10 @@ open class StremioC(
     }
 
     private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
+        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
+        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+            "run=$allocationRun module=StremioC phase=DETAIL_LOAD " +
+                "reason=${if (forceRefresh) "FORCE_REFRESH" else if (url.startsWith("{")) "EMBEDDED_JSON" else "NORMAL"}")
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -2688,6 +2710,10 @@ open class StremioC(
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
+        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+            "run=$allocationRun module=StremioC phase=DETAIL_PARSE " +
+                "reason=${if (url.startsWith("{")) "EMBEDDED_JSON" else "ADDON_JSON"} " +
+                "videos=${res.videos?.size ?: 0}")
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
@@ -2853,6 +2879,8 @@ open class StremioC(
             prefetchedAnimeImdbId = hintedImdbId
         ) }
 
+        if (allocationRun != null) android.util.Log.i("JavaAllocCause",
+            "run=$allocationRun module=StremioC phase=RESPONSE_ASSEMBLY reason=LOAD_RESPONSE_READY")
         if (url != loadRes.url) {
             animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
             seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
