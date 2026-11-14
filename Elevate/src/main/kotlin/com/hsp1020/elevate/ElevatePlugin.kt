@@ -112,7 +112,6 @@ class ElevatePlugin : Plugin() {
     private var subtitleRefresh: ElevateSubtitleRefreshHook? = null
     private var subtitleSourceObserver: ElevateSubtitleSourceObserver? = null
     private var playbackTrace: ElevatePlaybackTrace? = null
-    private var downloadStartupTrace: ElevateDownloadStartupTrace? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -140,7 +139,6 @@ class ElevatePlugin : Plugin() {
                     "run=$run module=Elevate phase=PLUGIN_LOAD loaderId=${System.identityHashCode(javaClass.classLoader)}")
             }
             playbackTrace = ElevatePlaybackTrace(application).also { it.start() }
-            downloadStartupTrace = ElevateDownloadStartupTrace(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 featurePrefs = preferences
@@ -551,8 +549,6 @@ class ElevatePlugin : Plugin() {
     }
 
     private fun stopAll() {
-        downloadStartupTrace?.stop()
-        downloadStartupTrace = null
         playbackTrace?.stop()
         playbackTrace = null
         featureListener?.let { featurePrefs?.unregisterOnSharedPreferenceChangeListener(it) }

@@ -982,7 +982,6 @@ internal class ElevatePlayerPanel(
     }
 
     fun attach() {
-        ElevateDownloadStartupTrace.mark("PANEL_ATTACH")
         updateAvailableTabs()
         nativeWidth = overlay.layoutParams.width
         // TV's native 400dp episode list must fit inside the padded overlay.

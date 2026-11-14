@@ -2992,34 +2992,11 @@ open class StremioC(
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
 
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
-        val allocationRun = System.getProperty("hsp1020.java.alloc.run")
-        val subtitleEmitted = java.util.concurrent.atomic.AtomicInteger()
-        val subtitleDuplicate = java.util.concurrent.atomic.AtomicInteger()
-        val subtitleCallbackNs = java.util.concurrent.atomic.AtomicLong()
-        val subtitleOrigins = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicIntegerArray>()
-        fun emitUniqueSubtitle(sub: SubtitleFile, origin: String = "unknown") {
+        fun emitUniqueSubtitle(sub: SubtitleFile) {
             if (sub.url.isBlank() || sub.lang.trim().let {
                     it.isBlank() || it.equals("und", true)
                 }) return
-            if (seenStremioSubtitles.add(sub.url)) {
-                if (allocationRun != null) {
-                    subtitleOrigins.computeIfAbsent(origin) { java.util.concurrent.atomic.AtomicIntegerArray(2) }
-                        .incrementAndGet(0)
-                    val start = System.nanoTime()
-                    try { subtitleCallback(sub) } finally {
-                        subtitleCallbackNs.addAndGet(System.nanoTime() - start)
-                        val count = subtitleEmitted.incrementAndGet()
-                        if (count % 25 == 0) android.util.Log.i("JavaAllocCause",
-                            "run=$allocationRun module=StremioC phase=SUBTITLE_CALLBACK " +
-                                "emitted=$count duplicates=${subtitleDuplicate.get()} " +
-                                "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L}")
-                    }
-                } else subtitleCallback(sub)
-            } else if (allocationRun != null) {
-                subtitleDuplicate.incrementAndGet()
-                subtitleOrigins.computeIfAbsent(origin) { java.util.concurrent.atomic.AtomicIntegerArray(2) }
-                    .incrementAndGet(1)
-            }
+            if (seenStremioSubtitles.add(sub.url)) subtitleCallback(sub)
         }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
@@ -3067,15 +3044,8 @@ open class StremioC(
         val integrationAddons = getIntegrationStremioAddons()
         val cineAddons = integrationAddons.filter { it.fromCineStream }
         val streamPlayAddons = integrationAddons.filterNot { it.fromCineStream }
-        val subtitleGroups = java.util.concurrent.atomic.AtomicIntegerArray(4)
         fun rankSubtitle(sub: SubtitleFile, group: Int, addonUrl: String? = null) {
             if (sub.url.isBlank()) return
-            if (allocationRun != null) {
-                val count = subtitleGroups.incrementAndGet(group.coerceIn(0, 3))
-                if (count % 50 == 0) android.util.Log.i("JavaAllocCause",
-                    "run=$allocationRun module=StremioC phase=SUBTITLE_GROUP " +
-                        "group=$group callbacks=$count addonId=${addonUrl?.hashCode() ?: 0}")
-            }
             // Retain details from direct integration callbacks as well as Stremio API responses.
             val originalDetail = sub.lang.substringAfter(" · ", "").trim()
             if (originalDetail.isNotEmpty()) synchronized(subtitleDetailByUrl) {
@@ -3106,16 +3076,15 @@ open class StremioC(
 
         fun stremioSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
-            emitUniqueSubtitle(sub, if (allocationRun == null) "" else "stremio:$group:${addonUrl.hashCode()}")
+            emitUniqueSubtitle(sub)
         }
         fun integratedSubtitleFrom(group: Int): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group)
-            emitUniqueSubtitle(sub, if (allocationRun == null) "" else
-                "integration:$group:${sub.lang.substringAfterLast(" — ", "unknown").take(45)}")
+            emitUniqueSubtitle(sub)
         }
         fun extractorSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
-            emitUniqueSubtitle(sub, if (allocationRun == null) "" else "extractor:$group:${addonUrl.hashCode()}")
+            emitUniqueSubtitle(sub)
         }
 
         val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())
@@ -3226,9 +3195,7 @@ open class StremioC(
 
         }
 
-        var subtitleOutcome = "FAILED"
-        try {
-            coroutineScope {
+        coroutineScope {
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
             mapped
@@ -3513,26 +3480,6 @@ open class StremioC(
             }
         )
         mappingDeferred.cancel()
-            }
-            subtitleOutcome = "COMPLETED"
-        } catch (cancelled: CancellationException) {
-            subtitleOutcome = "CANCELLED"
-            throw cancelled
-        } finally {
-            if (allocationRun != null) {
-                android.util.Log.i("JavaAllocCause",
-                    "run=$allocationRun module=StremioC phase=SUBTITLE_SUMMARY " +
-                    "outcome=$subtitleOutcome " +
-                    "emitted=${subtitleEmitted.get()} duplicate=${subtitleDuplicate.get()} " +
-                    "callbackTotalMs=${subtitleCallbackNs.get() / 1_000_000L} " +
-                    "groups=${(0..3).joinToString(",") { subtitleGroups.get(it).toString() }}")
-            subtitleOrigins.entries.sortedByDescending { it.value.get(0) + it.value.get(1) }
-                .take(40).forEach { (origin, counts) ->
-                    android.util.Log.i("JavaAllocCause",
-                        "run=$allocationRun module=StremioC phase=SUBTITLE_ORIGIN " +
-                            "origin=$origin emitted=${counts.get(0)} duplicate=${counts.get(1)}")
-                }
-            }
         }
         return true
     }

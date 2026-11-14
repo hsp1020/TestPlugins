@@ -214,7 +214,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private fun bindPlayer() {
         val current = fragment?.playerView?.player
         if (current === observedPlayer) return
-        ElevateDownloadStartupTrace.mark("SUBTITLE_ATTACH", "attached=${current != null}")
         observedPlayer?.removeListener(playerListener)
         val deferred = appliedRefresh?.takeIf {
             it.instance == model?.state?.instance &&
@@ -223,8 +222,6 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         clearRefreshState()
         appliedRefresh = deferred
         observedPlayer = current
-        ElevateDownloadStartupTrace.mark("SUBTITLE_STATE", "hasCurrent=${current != null} " +
-            "subtitles=${model?.state?.subtitles?.size}")
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
         runAppliedRefresh()
