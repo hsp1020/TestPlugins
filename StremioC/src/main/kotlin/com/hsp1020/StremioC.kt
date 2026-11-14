@@ -198,6 +198,11 @@ private object MetadataDiskCache {
         return File(dir, "${kind}_${hash}.gz")
     }
 
+    suspend fun invalidate(kind: String, key: String) = withContext(Dispatchers.IO) {
+        val dir = directory() ?: return@withContext
+        synchronized(lock) { target(dir, kind, key).delete() }
+    }
+
     suspend fun read(kind: String, key: String): Pair<String, Long>? =
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
@@ -1339,6 +1344,12 @@ open class StremioC(
             }
         }
 
+        private fun invalidateAddonMetaInRam(key: String) {
+            synchronized(addonMetaCache) {
+                addonMetaCache.remove(key)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
+            }
+        }
+
         private fun cachedAddonMetaInRam(url: String): String? {
             val bytes = synchronized(addonMetaCache) {
                 val held = addonMetaCache[url]
@@ -1476,11 +1487,19 @@ open class StremioC(
             }
             val storageKey = addonMetaStorageKey(url)
             val cacheHash = Integer.toHexString(storageKey.hashCode())
-            val previous = if (forceRefresh) {
+            // The catalog's own Metadata Sync switch controls its original meta cache.
+            val skipCache = isMetadataSwapAllowed(url.substringBefore("/meta/"))
+            if (skipCache) {
+                invalidateAddonMetaInRam(storageKey)
+                MetadataDiskCache.invalidate("meta", storageKey)
+                android.util.Log.d("MetadataSwapTrace",
+                    "STREMIOC_META_CACHE source=bypass keyHash=$cacheHash reason=catalog_metadata_sync_on")
+            }
+            val previous = if (forceRefresh && !skipCache) {
                 cachedAddonMetaInRam(storageKey)
                     ?: MetadataDiskCache.read("meta", storageKey)?.first
             } else null
-            if (!forceRefresh) {
+            if (!forceRefresh && !skipCache) {
                 cachedAddonMetaInRam(storageKey)?.let {
                     android.util.Log.d("MetadataSwapTrace",
                         "STREMIOC_META_CACHE source=ram keyHash=$cacheHash")
@@ -1493,7 +1512,7 @@ open class StremioC(
                     return it.json
                 }
             }
-            val flightKey = (if (forceRefresh) "force|" else "normal|") + storageKey
+            val flightKey = (if (skipCache) "uncached|" else if (forceRefresh) "force|" else "normal|") + storageKey
             val flight = synchronized(addonMetaFlights) {
                 addonMetaFlights[flightKey]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
@@ -1504,6 +1523,14 @@ open class StremioC(
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
+                        if (skipCache || isMetadataSwapAllowed(url.substringBefore("/meta/"))) {
+                            // The caller still parses the metadata once for the LoadResponse.
+                            // Avoid a second JSON tree and validation allocation just for caching.
+                            android.util.Log.d("MetadataSwapTrace",
+                                "STREMIOC_META_CACHE source=network keyHash=$cacheHash" +
+                                    " cacheable=false reason=catalog_metadata_sync_on")
+                            return@async body
+                        }
                         val root = parseJson<JsonNode>(body)
                         fun header(name: String): String? = response.headers
                             .firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
@@ -1520,7 +1547,8 @@ open class StremioC(
                         val valid = rejectReason == null
                         val transient = containsTransientMetaLinks(root)
                         val image = body.contains("data:image/", ignoreCase = true)
-                        val cacheable = valid && ttlMs > 0L && safeVary && !transient && !image
+                        val cacheable = !isMetadataSwapAllowed(url.substringBefore("/meta/")) &&
+                            valid && ttlMs > 0L && safeVary && !transient && !image
                         android.util.Log.d("MetadataSwapTrace",
                             "STREMIOC_META_CACHE source=network keyHash=$cacheHash" +
                                 " cacheable=$cacheable ttlMs=$ttlMs valid=$valid" +
@@ -1528,7 +1556,8 @@ open class StremioC(
                         if (cacheable) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
                             addonMetaScope.launch {
-                                MetadataDiskCache.write("meta", storageKey, body, ttlMs)
+                                if (!isMetadataSwapAllowed(url.substringBefore("/meta/")))
+                                    MetadataDiskCache.write("meta", storageKey, body, ttlMs)
                             }
                         }
                         body
@@ -4945,6 +4974,12 @@ open class StremioC(
         ): LoadResponse = coroutineScope {
             val syncedEntry = run { addonDeferred?.await() }
             val detailedEntry = syncedEntry ?: this@CatalogEntry
+            val fullMetadataSync = StremioC.isMetadataSwapAllowed(provider.mainUrl)
+            android.util.Log.d("MetadataSwapTrace",
+                "STREMIOC_META_SOURCE sync=$fullMetadataSync" +
+                    " secondary=${syncedEntry != null}" +
+                    " sourceVideos=${detailedEntry.videos?.size ?: -1}" +
+                    " originalVideos=${this@CatalogEntry.videos?.size ?: -1}")
             val nonstandardType =
                 provider.detailMediaType(detailedEntry.type ?: this@CatalogEntry.type) == null
             val originalAnimeId = requestedAnimeId
@@ -5160,7 +5195,9 @@ open class StremioC(
                 ?: tmdbData?.fetchedTitle?.takeIf { it.isNotBlank() } ?: "Unknown Content"
             val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
                 .firstOrNull { !it.isNullOrBlank() }
-            var finalDescription = if (eligibleNonstandardId)
+            var finalDescription = if (fullMetadataSync)
+                finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
+            else if (eligibleNonstandardId)
                 tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalAddonDescription
             else finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
 
@@ -5206,7 +5243,9 @@ open class StremioC(
                 }
             }
             val finalTrailers = collectStremioTrailers(
-                emptyList(), tmdbData?.fetchedTrailers.orEmpty().ifEmpty { fallbackTrailers }
+                emptyList(), if (fullMetadataSync)
+                    fallbackTrailers.ifEmpty { tmdbData?.fetchedTrailers.orEmpty() }
+                else tmdbData?.fetchedTrailers.orEmpty().ifEmpty { fallbackTrailers }
             )
 
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
@@ -5277,7 +5316,9 @@ open class StremioC(
                 this@CatalogEntry.kitsuIdExt != null || finalKitsuId != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
-            val finalLogo = if (eligibleNonstandardId)
+            val finalLogo = if (fullMetadataSync)
+                addonLogo ?: fallbackAddonLogo ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
+            else if (eligibleNonstandardId)
                 tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo ?: fallbackAddonLogo
             else addonLogo ?: fallbackAddonLogo
                 ?: tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() }
@@ -5384,7 +5425,7 @@ open class StremioC(
                     this.plot = finalDescription
                     this.tags = finalGenre
                     this.recommendations = recommendationsForPage
-                    this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
+                    this.duration = stremioRuntimeMinutes(detailedEntry.runtime ?: this@CatalogEntry.runtime)
                         ?: finalVideos?.singleOrNull()?.runtime?.let(::stremioRuntimeMinutes)
                         ?: tmdbData?.fetchedRuntime
                     this.contentRating = finalAgeRating
@@ -5395,7 +5436,7 @@ open class StremioC(
                 return@coroutineScope run { response.apply { attachMappedIds() } }
 
             } else {
-                val representativeRunTime = stremioRuntimeMinutes(this@CatalogEntry.runtime)
+                val representativeRunTime = stremioRuntimeMinutes(detailedEntry.runtime ?: this@CatalogEntry.runtime)
                 val finalEpisodes = run { processEpisodes(
                     provider, 
                     cleanImdbId, 
@@ -5424,7 +5465,9 @@ open class StremioC(
                         " seasons=${finalEpisodes.mapNotNull { it.season }.distinct().size}" +
                         " addonEpisodes=${detailedEntry.videos?.size ?: 0}" +
                         " tmdbEpisodes=${tmdbData?.episodeTmdbMeta?.size ?: 0}" +
-                        " representativeRuntime=${representativeRunTime ?: 0}")
+                        " representativeRuntime=${representativeRunTime ?: 0}" +
+                        " fullSync=$fullMetadataSync" +
+                        " finalSeasonMax=${finalVideos.orEmpty().mapNotNull { it.seasonNumber }.maxOrNull() ?: 0}")
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.episodeBasedByUrl[metaUrl] = true

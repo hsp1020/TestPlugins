@@ -408,7 +408,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val seasonRequests = Semaphore(6)
+    private val seasonRequests = Semaphore(35)
     private val screens = mutableMapOf<Fragment, Screen>()
     private var host: FragmentActivity? = null
     private val responseField = runCatching {
@@ -686,7 +686,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         }.distinct()
                         metadataSwapTrace("ELEVATE_SEASON_PLAN gen=" + generation +
                             " selected=" + (activeSeason?.toString() ?: "all") +
-                            " seasonCount=" + seasons.size + " concurrency=6")
+                            " seasonCount=" + seasons.size + " concurrency=35")
                         val responses = seasons.map { season ->
                             async(Dispatchers.IO) {
                                 if (source.source == "AIO" && base.filter {
@@ -703,8 +703,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                         " season=" + season + " reason=aio_complete")
                                     return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
                                 }
-                                val response = seasonRequests.withPermit {
-                                    withTimeoutOrNull(10_000L) {
+                                val response = withTimeoutOrNull(10_000L) {
+                                    seasonRequests.withPermit {
                                         ElevateTmdbMetadata.season(id, season, detailLocale)
                                     }
                                 }
@@ -755,6 +755,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
                 metadataSwapTrace("ELEVATE_EPISODES_MATCH gen=" + generation +
                     " matched=" + matched + " unmatched=" + unmatched +
+                    " baseSeasons=" + base.mapNotNull { it.season }.distinct().size +
+                    " aioSeasons=" + source.episodes.keys.map { it.first }.distinct().size +
                     " idsPreserved=" + result.indices.all {
                         result[it].id == base[it].id && result[it].data == base[it].data
                     })
