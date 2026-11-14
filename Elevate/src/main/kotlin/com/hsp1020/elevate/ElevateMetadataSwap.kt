@@ -1280,7 +1280,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val type = candidates.firstOrNull { it in allowedTypes }
             if (type == null) {
                 metadataSwapTrace("ELEVATE_ADDON_SKIP manifestHash=$manifestHash" +
-                    " reason=no_compatible_type movie=$movie animeIds=${ids.animeIds}" +
+                    " reason=no_compatible_type movie=$movie animeIds=$anime" +
                     " allowedTypes=${allowedTypes.joinToString(",")}")
                 return null
             }
