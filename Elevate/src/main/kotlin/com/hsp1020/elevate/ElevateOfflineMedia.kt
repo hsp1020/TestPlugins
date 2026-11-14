@@ -185,7 +185,7 @@ internal class ElevateDownloadMetadataCapture(private val application: Applicati
             ElevateOfflineMedia.putAnime(application, parent, true)
         }
         if (listOf(identity.imdb, identity.tmdb, identity.mal,
-                identity.anilist, identity.kitsu).any { !it.isNullOrBlank() }) {
+                identity.anilist, identity.kitsu, identity.simkl).any { !it.isNullOrBlank() }) {
             ElevateOfflineMedia.putIdentity(application, parent, identity)
             if (needSkip && duration > 0L) ElevateSkipRepository.fetch(identity)
         }

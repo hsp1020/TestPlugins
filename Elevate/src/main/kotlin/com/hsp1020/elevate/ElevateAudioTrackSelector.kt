@@ -28,13 +28,17 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
 import com.lagradost.cloudstream3.utils.SubtitleHelper
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.Locale
 
@@ -82,6 +86,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var lookupSimkl: String? = null
     private var lookupAnimeIds = emptyList<Pair<String, String>>()
     private var lookupMovie = false
+    private var unresolvedOffline: ExtractorUri? = null
     private var sourceVersion = 0
     private var lastEpisodeId: Int? = null
 
@@ -232,6 +237,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         originAttempted = false
         val offlineIdentity = if (offline != null && response == null)
             ElevateOfflineMedia.identity(application, offline.parentId) else null
+        unresolvedOffline = offline?.takeIf { response == null && offlineIdentity == null }
         originLanguage = normalizedLanguage(response?.syncData?.get("original_language"))
             ?: normalizedLanguage(runCatching {
                 JSONObject(episode?.data.orEmpty()).optString("original_language")
@@ -287,7 +293,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
         if (originLanguage == null && !originAttempted && available > 1 &&
             (lookupTmdb != null || lookupImdb != null || lookupSimkl != null ||
-                lookupAnimeIds.isNotEmpty())) {
+                lookupAnimeIds.isNotEmpty() || unresolvedOffline?.parentId != null)) {
             originAttempted = true
             val version = sourceVersion
             val sourcePlayer = current
@@ -297,24 +303,44 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             val simkl = lookupSimkl
             val animeIds = lookupAnimeIds
             val movie = lookupMovie
+            val offlineFile = unresolvedOffline
             originJob = scope.launch {
                 val resolved = try {
-                    val direct = tmdb ?: imdb?.let { ElevateIdResolver.tmdbForImdb(it, movie) }
-                    val mapped = if (direct == null && simkl != null)
+                    // Recover legacy offline IDs only if no saved identifier is usable.
+                    val recovered = if (tmdb == null && imdb == null && simkl == null &&
+                        animeIds.isEmpty()) offlineFile?.let { file ->
+                        val parentId = file.parentId ?: return@let null
+                        val header = withContext(Dispatchers.IO) {
+                            application.getKey<DownloadObjects.DownloadHeaderCached>(
+                                DOWNLOAD_HEADER_CACHE, parentId.toString())
+                        }
+                        header?.let { ElevateSkipRepository.identityDownloaded(it, file, 0L) }
+                    } else null
+                    val resolvedMovie = recovered?.movie ?: movie
+                    val direct = (tmdb ?: recovered?.tmdb) ?:
+                        (imdb ?: recovered?.imdb)?.let {
+                            ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
+                        }
+                    val mapped = if (direct == null && (simkl ?: recovered?.simkl) != null)
                         ElevateMediaIdentity.simklMapping(
-                            ElevateMediaIdentity.Ids(simkl = simkl), movie) else null
+                            ElevateMediaIdentity.Ids(simkl = simkl ?: recovered?.simkl),
+                            resolvedMovie) else null
                     var tmdbId = direct ?: mapped?.tmdb ?: mapped?.imdb?.let {
-                        ElevateIdResolver.tmdbForImdb(it, movie)
+                        ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
                     }
-                    if (tmdbId == null) for ((source, id) in animeIds) {
+                    if (tmdbId == null) for ((source, id) in animeIds + listOfNotNull(
+                        recovered?.mal?.let { "mal" to it },
+                        recovered?.anilist?.let { "anilist" to it },
+                        recovered?.kitsu?.let { "kitsu" to it }
+                    )) {
                         val animeMapping = ElevateAnimeIdResolver.resolve(source, id) ?: continue
                         tmdbId = animeMapping.tmdb ?: animeMapping.imdb?.let {
-                            ElevateIdResolver.tmdbForImdb(it, movie)
+                            ElevateIdResolver.tmdbForImdb(it, resolvedMovie)
                         }
                         if (tmdbId != null) break
                     }
                     tmdbId?.let {
-                        ElevateTmdbMetadata.originalLanguage(it, movie,
+                        ElevateTmdbMetadata.originalLanguage(it, resolvedMovie,
                             com.lagradost.cloudstream3.ui.settings.getCurrentLocale(application),
                             includeCredits = ElevateFeaturePrefs.enabled(application,
                                 ElevateFeature.ACTOR_INFORMATION))
@@ -361,6 +387,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         lookupImdb = null
         lookupSimkl = null
         lookupAnimeIds = emptyList()
+        unresolvedOffline = null
         observedRoot?.removeOnLayoutChangeListener(rootLayout)
         observedRoot = null
         removeObserver?.invoke()
