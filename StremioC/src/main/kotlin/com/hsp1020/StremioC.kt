@@ -5231,8 +5231,10 @@ open class StremioC(
             fun day(value: String?): Long? = value?.take(10)?.let { stamp ->
                 runCatching { parser.parse(stamp)?.time?.div(86_400_000L) }.getOrNull()
             }
-            val byAirDate = if (isAnime) episodeTmdbMeta.entries.mapNotNull { (key, ep) ->
-                day(ep.airDate)?.let { date -> date to key }
+            val tmdbEpisodeDays = episodeTmdbMeta.mapValues { (_, ep) -> day(ep.airDate) }
+            val tmdbKeysByEpisode = episodeTmdbMeta.keys.groupBy { it.substringAfterLast('_') }
+            val byAirDate = if (isAnime) tmdbEpisodeDays.entries.mapNotNull { (key, date) ->
+                date?.let { it to key }
             }.groupBy({ it.first }, { it.second }) else emptyMap()
             val usedTmdb = mutableSetOf<String>()
             val absoluteByEpisode = mutableMapOf<Pair<Int, Int>, Int>()
@@ -5322,8 +5324,8 @@ open class StremioC(
                         ?.get(displayEpisode)
                         ?: video.absoluteEpisode?.takeIf { it > 0 }
                     val kitsuMatches = if (directKey == null) kitsuAbsolute?.let { n ->
-                        episodeTmdbMeta.keys.filter { key ->
-                            val targetDay = day(episodeTmdbMeta[key]?.airDate)
+                        tmdbKeysByEpisode[n.toString()].orEmpty().filter { key ->
+                            val targetDay = tmdbEpisodeDays[key]
                             key.endsWith("_$n") &&
                                 key.startsWith("0_") == isSpecial &&
                                 key != (if (rejectedAio) aioCandidate else null) &&
