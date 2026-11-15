@@ -67,26 +67,6 @@ private fun skipPlaybackId(meta: Any?): Int? = when (meta) {
     else -> null
 }
 
-/** Temporary, playback-scoped skip diagnostics. No auth headers, streams or media URLs. */
-internal object ElevateSkipTrace {
-    private const val TAG = "ElevateSkipTrace"
-
-    fun log(run: String, step: String, detail: String) {
-        android.util.Log.i(TAG, "tMs=${SystemClock.uptimeMillis()} run=$run step=$step $detail")
-    }
-
-    fun identity(i: ElevateSkipRepository.Identity): String =
-        "imdb=${i.imdb} tmdb=${i.tmdb} mal=${i.mal} anilist=${i.anilist} " +
-            "kitsu=${i.kitsu} simkl=${i.simkl} original=${i.original} " +
-            "season=${i.season} episode=${i.episode} totalIndex=${i.absoluteEpisode} " +
-            "anime=${i.anime} movie=${i.movie} durationMs=${i.duration}"
-
-    fun stamps(items: List<VideoSkipStamp>): String =
-        items.joinToString(prefix = "[", postfix = "]") {
-            "${it.source}:${it.timestamp.type}@${it.timestamp.startMs}-${it.timestamp.endMs}"
-        }
-}
-
 /** Keep native skip timestamps and controls; only improve the selected source metadata. */
 internal class ElevateSkipController(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -101,15 +81,14 @@ internal class ElevateSkipController(private val application: Application) :
     private var observedRoot: View? = null
     // Mirror the audio selector's cheap late-player attachment fallback.
     private val rootLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-        suppressCoreSkip("layout")
+        suppressCoreSkip()
         if (fragment?.playerView?.player !== mediaPlayer) refresh()
     }
-    private val traceTick = object : Runnable {
+    private val skipGuardTick = object : Runnable {
         override fun run() {
             if (fragment == null || model == null) return
-            suppressCoreSkip("watchdog")
-            reconcileSelected("watchdog")
-            traceState("watchdog")
+            suppressCoreSkip()
+            reconcileSelected()
             main.postDelayed(this, 150L)
         }
     }
@@ -123,7 +102,6 @@ internal class ElevateSkipController(private val application: Application) :
     private var activeKey: String? = null
     private var activeInstance = -1
     private var activeEpisode = -1
-    private var native = emptyList<VideoSkipStamp>()
     private var custom = emptyList<VideoSkipStamp>()
     private var published = emptyList<VideoSkipStamp>()
     private var publishedReady = false
@@ -135,20 +113,6 @@ internal class ElevateSkipController(private val application: Application) :
         }.getOrNull()
     }
     private var suppressedCoreJob: Job? = null
-    // Temporary diagnostics: compare VM, LiveData and core player's private stamp list.
-    // Poll only reference changes; never retain media URLs or allocate a log per frame.
-    private var tracedVmStamps: List<VideoSkipStamp>? = null
-    private var tracedLiveStamps: List<VideoSkipStamp>? = null
-    private var tracedEngineStamps: List<VideoSkipStamp>? = null
-    private var tracedLiveInstance: Int? = null
-    private var tracedInstance: Int? = null
-    private var tracedEpisode: Int? = null
-    private var tracedGenerator: Int? = null
-    private var tracedCoreRequested: Boolean? = null
-    private var tracedEngine: Any? = null
-    private var tracedEngineField: java.lang.reflect.Field? = null
-    private var tracedAutoDecision: String? = null
-    private var tracedAutoScheduling: Boolean? = null
     private val autoSkipped = hashSetOf<String>()
     // Preserve explicit Media3 seek origins/destinations, as Nuvio Mobile does.
     // No sampled position-difference heuristic, including for small seeks.
@@ -237,8 +201,7 @@ internal class ElevateSkipController(private val application: Application) :
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key?.startsWith("AUTO_SKIP_") == true) main.post {
-            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SETTING_CHANGED",
-                "key=$key enabled=${settings.getBoolean(key, false)}")
+
             scheduleAutoSkip()
             skipButtonTimer?.refreshVisibility()
         }
@@ -253,11 +216,8 @@ internal class ElevateSkipController(private val application: Application) :
     ) { proxy, method, args ->
         when (method.name) {
             "onPlaybackStateChanged", "onIsPlayingChanged" -> {
-                ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_EVENT",
-                    "callback=${method.name} playbackState=${mediaPlayer?.playbackState} " +
-                        "isPlaying=${mediaPlayer?.isPlaying} positionMs=${mediaPlayer?.currentPosition}")
-                suppressCoreSkip("media3.${method.name}")
-                traceState("media3.${method.name}")
+
+                suppressCoreSkip()
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -268,10 +228,8 @@ internal class ElevateSkipController(private val application: Application) :
                     val from = (args[0] as? Media3Player.PositionInfo)?.positionMs
                     val to = (args[1] as? Media3Player.PositionInfo)?.positionMs
                     if (from != null && to != null) {
-                        ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_SEEK",
-                            "fromMs=$from toMs=$to playerMs=${mediaPlayer?.currentPosition}")
-                        suppressCoreSkip("media3.seek")
-                        traceState("media3.seek")
+
+                        suppressCoreSkip()
                         skipButtonTimer?.onPlaybackSeek(from, to)
                         recordSeek(from, to)
                         scheduleAutoSkip()
@@ -280,11 +238,8 @@ internal class ElevateSkipController(private val application: Application) :
                 null
             }
             "onMediaItemTransition", "onTimelineChanged", "onPlaybackParametersChanged" -> {
-                ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_EVENT",
-                    "callback=${method.name} playbackState=${mediaPlayer?.playbackState} " +
-                        "isPlaying=${mediaPlayer?.isPlaying} positionMs=${mediaPlayer?.currentPosition}")
-                suppressCoreSkip("media3.${method.name}")
-                traceState("media3.${method.name}")
+
+                suppressCoreSkip()
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -338,27 +293,25 @@ internal class ElevateSkipController(private val application: Application) :
      * CloudStream loadLink() resets hasRequestedStamps for each new episode.
      * Keep the core lookup suppressed while Unified Skip owns the intervals.
      */
-    private fun suppressCoreSkip(cause: String) {
+    private fun suppressCoreSkip() {
         val host = fragment ?: return
         val vm = model ?: return
         if (!host.hasRequestedStamps) {
             host.hasRequestedStamps = true
-            ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
-                "NATIVE_SKIP_BLOCK", "cause=$cause")
+
         }
         val coreJob = runCatching { coreStampJobField?.get(vm) as? Job }.getOrNull()
         if (coreJob != null && coreJob !== suppressedCoreJob) {
             suppressedCoreJob = coreJob
             if (coreJob.isActive) {
                 coreJob.cancel()
-                ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
-                    "NATIVE_SKIP_CANCEL", "cause=$cause jobRef=${System.identityHashCode(coreJob)}")
+
             }
         }
     }
 
     /** An already in-flight native result may arrive after cancellation. */
-    private fun reconcileSelected(cause: String) {
+    private fun reconcileSelected() {
         val vm = model ?: return
         if (!publishedReady || activeKey == null) return
         val instance = activeInstance
@@ -366,87 +319,11 @@ internal class ElevateSkipController(private val application: Application) :
         if (vm.state.instance != instance ||
             skipPlaybackId(vm.state.generatorState?.meta) != episode ||
             vm.state.stamps == published) return
-        ElevateSkipTrace.log("$instance:$episode", "NATIVE_SKIP_LATE_RESULT",
-            "cause=$cause actual=${ElevateSkipTrace.stamps(vm.state.stamps)} " +
-                "selected=${ElevateSkipTrace.stamps(published)}")
+
         vm.modifyState {
             if (this.instance != instance ||
                 skipPlaybackId(generatorState?.meta) != episode) this else set(published)
         }
-    }
-
-    private fun traceState(cause: String) {
-        val vm = model ?: return
-        val host = fragment ?: return
-        val state = vm.state
-        val episode = skipPlaybackId(state.generatorState?.meta)
-        val generator = state.generatorState?.id
-        val current = state.stamps
-        val live = vm.currentStamps.value
-        val liveStamps = live?.value
-        val coreRequested = host.hasRequestedStamps
-        val engine = runCatching { host.player }.getOrNull()
-        val engineChanged = engine !== tracedEngine
-        if (engineChanged) {
-            tracedEngine = engine
-            tracedEngineField = runCatching {
-                engine?.javaClass?.getDeclaredField("lastTimeStamps")?.apply {
-                    isAccessible = true
-                }
-            }.getOrNull()
-            ElevateSkipTrace.log("${state.instance}:$episode", "ENGINE_PROBE",
-                "cause=$cause engineClass=${engine?.javaClass?.name} " +
-                    "engineRef=${System.identityHashCode(engine)} " +
-                    "lastTimeStampsAccessible=${tracedEngineField != null}")
-        }
-        @Suppress("UNCHECKED_CAST")
-        val engineStamps = runCatching {
-            tracedEngineField?.get(engine) as? List<VideoSkipStamp>
-        }.getOrNull()
-        val changed = current !== tracedVmStamps ||
-            liveStamps !== tracedLiveStamps || engineStamps !== tracedEngineStamps ||
-            live?.instance != tracedLiveInstance || state.instance != tracedInstance ||
-            episode != tracedEpisode || generator != tracedGenerator ||
-            coreRequested != tracedCoreRequested || engineChanged
-        if (changed) {
-            ElevateSkipTrace.log("${state.instance}:$episode", "STAMP_STORE_TRANSITION",
-                "cause=$cause vmInstance=${state.instance} generatorId=$generator " +
-                    "episodeId=$episode activeInstance=$activeInstance activeEpisode=$activeEpisode " +
-                    "coreHasRequestedStamps=$coreRequested " +
-                    "vmRef=${System.identityHashCode(current)} " +
-                    "oldVmRef=${System.identityHashCode(tracedVmStamps)} " +
-                    "liveInstance=${live?.instance} liveRef=${System.identityHashCode(liveStamps)} " +
-                    "engineRef=${System.identityHashCode(engineStamps)} " +
-                    "vmVsPublished=${current == published} " +
-                    "engineVsPublished=${engineStamps?.let { it == published }} " +
-                    "engineVsVm=${engineStamps?.let { it == current }} " +
-                    "vm=${ElevateSkipTrace.stamps(current)} " +
-                    "live=${ElevateSkipTrace.stamps(liveStamps.orEmpty())} " +
-                    "engine=${if (tracedEngineField == null) "unavailable" else ElevateSkipTrace.stamps(engineStamps.orEmpty())} " +
-                    "published=${ElevateSkipTrace.stamps(published)}")
-        }
-        if (coreRequested != tracedCoreRequested) {
-            ElevateSkipTrace.log("${state.instance}:$episode", "CORE_STAMPS_REQUEST_FLAG",
-                "cause=$cause before=$tracedCoreRequested after=$coreRequested " +
-                    "generatorId=$generator mediaDurationMs=${mediaPlayer?.duration}")
-        }
-        tracedVmStamps = current
-        tracedLiveStamps = liveStamps
-        tracedEngineStamps = engineStamps
-        tracedLiveInstance = live?.instance
-        tracedInstance = state.instance
-        tracedEpisode = episode
-        tracedGenerator = generator
-        tracedCoreRequested = coreRequested
-    }
-
-    private fun autoDecision(reason: String, stamp: VideoSkipStamp? = null) {
-        val key = "$reason:${stamp?.let(::stampKey)}"
-        if (key == tracedAutoDecision) return
-        tracedAutoDecision = key
-        ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SKIP_DECISION",
-            "reason=$reason selected=${stamp?.let { ElevateSkipTrace.stamps(listOf(it)) }} " +
-                "positionMs=${mediaPlayer?.currentPosition} isPlaying=${mediaPlayer?.isPlaying}")
     }
 
     private fun watch(candidate: Fragment) {
@@ -457,59 +334,29 @@ internal class ElevateSkipController(private val application: Application) :
         }
         detach()
         fragment = candidate
-        ElevateJavaAllocationProfile.traceHook("SkipController", "ATTACH", activity, candidate)
         observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(rootLayout) }
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
-        suppressCoreSkip("attach")
-        ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
-            "HOOK_ATTACH", "fragmentRef=${System.identityHashCode(candidate)} " +
-                "vmRef=${System.identityHashCode(vm)} generatorId=${vm.state.generatorState?.id}")
-        main.removeCallbacks(traceTick)
-        main.post(traceTick)
+        suppressCoreSkip()
+
+        main.removeCallbacks(skipGuardTick)
+        main.post(skipGuardTick)
         skipButtonTimer = ElevateSkipButtonTimer(candidate, vm,
-            { stamp -> suppressNativeSkipButton(stamp) }, { published }
+            { stamp -> suppressNativeSkipButton(stamp) }
         ).also { it.attach() }
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
-            if (event != null) {
-                ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
-                    "STAMP_LIVEDATA_DELIVERY",
-                    "eventInstance=${event.instance} currentInstance=${vm.state.instance} " +
-                        "accepted=${event.instance == vm.state.instance} " +
-                        "eventRef=${System.identityHashCode(event.value)} " +
-                        "event=${ElevateSkipTrace.stamps(event.value)} " +
-                        "vm=${ElevateSkipTrace.stamps(vm.state.stamps)} " +
-                        "published=${ElevateSkipTrace.stamps(published)}")
-                traceState("currentStamps.delivery")
-            }
-            if (event != null && event.instance == vm.state.instance) {
-                suppressCoreSkip("currentStamps")
+                if (event != null && event.instance == vm.state.instance) {
+                suppressCoreSkip()
                 val incoming = event.value
-                if (incoming != published) ElevateSkipTrace.log(
-                    "${activeInstance}:${activeEpisode}", "STAMPS_OBSERVED",
-                    "incoming=${ElevateSkipTrace.stamps(incoming)} " +
-                        "published=${ElevateSkipTrace.stamps(published)} " +
-                        "state=${ElevateSkipTrace.stamps(vm.state.stamps)}")
+
                 // Our own LiveData notification is not a native result.
-                if (incoming != published || incoming.none { it.source.startsWith("Elevate/") }) {
-                    if (incoming.none { it.source.startsWith("Elevate/") }) {
-                        native = incoming
-                        ElevateSkipTrace.log("${activeInstance}:${activeEpisode}",
-                            "NATIVE_STAMPS", "count=${incoming.size} intervals=${ElevateSkipTrace.stamps(incoming)}")
-                    }
-                    reconcileSelected("currentStamps")
-                    traceState("currentStamps.afterPublish")
-                }
+                if (incoming != published) reconcileSelected()
             }
         }
-        val linksObserver = Observer<VideoLive<Set<VideoLink>>> { event ->
-            ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
-                "LINKS_LIVEDATA_DELIVERY",
-                "eventInstance=${event?.instance} linkCount=${event?.value?.size} " +
-                    "vmInstance=${vm.state.instance} generatorId=${vm.state.generatorState?.id}")
-            suppressCoreSkip("currentLinks")
-            traceState("currentLinks.delivery")
+        val linksObserver = Observer<VideoLive<Set<VideoLink>>> {
+
+            suppressCoreSkip()
             refresh()
             retryPlayerAttach()
         }
@@ -524,15 +371,7 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun detach() {
-        if (fragment != null) {
-            traceState("detach.before")
-            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "HOOK_DETACH",
-                "generation=$generation activeKey=$activeKey " +
-                    "vm=${model?.state?.stamps?.let(ElevateSkipTrace::stamps)} " +
-                    "published=${ElevateSkipTrace.stamps(published)}")
-        }
-        main.removeCallbacks(traceTick)
-        ElevateJavaAllocationProfile.traceHook("SkipController", "DETACH", activity, fragment)
+        main.removeCallbacks(skipGuardTick)
         // First unsubscribe: restoring native stamps must not trigger our own observer.
         unobserve?.invoke()
         unobserve = null
@@ -560,7 +399,6 @@ internal class ElevateSkipController(private val application: Application) :
         activeKey = null
         activeEpisode = -1
         activeInstance = -1
-        native = emptyList()
         custom = emptyList()
         published = emptyList()
         publishedReady = false
@@ -568,18 +406,6 @@ internal class ElevateSkipController(private val application: Application) :
         manualSeekProtected.clear()
         lastManualSeek = null
         ownSeek = null
-        tracedVmStamps = null
-        tracedLiveStamps = null
-        tracedEngineStamps = null
-        tracedLiveInstance = null
-        tracedInstance = null
-        tracedEpisode = null
-        tracedGenerator = null
-        tracedCoreRequested = null
-        tracedEngine = null
-        tracedEngineField = null
-        tracedAutoDecision = null
-        tracedAutoScheduling = null
         suppressedCoreJob = null
     }
 
@@ -588,23 +414,20 @@ internal class ElevateSkipController(private val application: Application) :
         val instance = activeInstance
         val episode = activeEpisode
         if (instance < 0 || activeKey == null) return
-        ElevateSkipTrace.log("$instance:$episode", "RESTORE_NATIVE_BEFORE",
-            "state=${ElevateSkipTrace.stamps(vm.state.stamps)} " +
-                "native=${ElevateSkipTrace.stamps(native)}")
+
         vm.modifyState {
             if (this.instance != instance ||
                 skipPlaybackId(generatorState?.meta) != episode ||
                 stamps.none { it.source.startsWith("Elevate/") }) this
             else set(emptyList<VideoSkipStamp>())
         }
-        ElevateSkipTrace.log("$instance:$episode", "RESTORE_NATIVE_AFTER",
-            "state=${ElevateSkipTrace.stamps(vm.state.stamps)}")
+
     }
 
     private fun refresh() {
         val vm = model ?: return
         val f = fragment ?: return
-        suppressCoreSkip("refresh")
+        suppressCoreSkip()
         placeNativeSkipButton()
         val nextPlayer = f.playerView?.player
         val state = vm.state
@@ -617,10 +440,7 @@ internal class ElevateSkipController(private val application: Application) :
         }
         val playerChanged = nextPlayer !== mediaPlayer
         if (playerChanged) {
-            ElevateSkipTrace.log("${state.instance}:$nextEpisode", "MEDIA3_PLAYER_CHANGED",
-                "oldRef=${System.identityHashCode(mediaPlayer)} " +
-                    "newRef=${System.identityHashCode(nextPlayer)} " +
-                    "newState=${nextPlayer?.playbackState} newDurationMs=${nextPlayer?.duration}")
+
             mediaPlayer?.removeListener(playerListener)
             mediaPlayer = nextPlayer
             nextPlayer?.addListener(playerListener)
@@ -641,7 +461,7 @@ internal class ElevateSkipController(private val application: Application) :
             playerDuration < 60_000L && episodeDuration > playerDuration) {
             episodeDuration
         } else playerDuration ?: episodeDuration ?: return
-        val trace = "${state.instance}:$episodeId"
+        val trace = ""
         val identity = if (episode != null && response != null)
             ElevateSkipRepository.identity(response, episode, duration,
                 if (state.instance != activeInstance || episodeId != activeEpisode)
@@ -649,8 +469,7 @@ internal class ElevateSkipController(private val application: Application) :
         val key = state.instance.toString() + ":" + episodeId + ":" +
             (identity?.key ?: "download:${offline?.parentId}:$duration")
         if (activeKey == key) {
-            reconcileSelected("refresh.sameKey")
-            traceState("refresh.sameKey")
+            reconcileSelected()
             // A new/reloaded Media3 player can begin inside an already known skip.
             if (nextPlayer?.isPlaying == true) tryAutoSkip()
             scheduleAutoSkip()
@@ -660,16 +479,7 @@ internal class ElevateSkipController(private val application: Application) :
         generation++
         job?.cancel()
         val serial = generation
-        val priorInstance = activeInstance
-        val priorEpisode = activeEpisode
-        ElevateSkipTrace.log(trace, "PLAYBACK_INPUT",
-            "mode=${if (offline != null) "offline" else "online"} episodeId=$episodeId " +
-                "playerDurationMs=$playerDuration episodeDurationMs=$episodeDuration " +
-                "selectedDurationMs=$duration metaClass=${gen.meta?.javaClass?.simpleName} " +
-                "responseType=${response?.type} identity=${identity?.let(ElevateSkipTrace::identity)}")
-        if (priorInstance != state.instance || priorEpisode != episodeId) {
-            native = state.stamps.filterNot { it.source.startsWith("Elevate/") }
-        }
+
         activeInstance = state.instance
         activeEpisode = episodeId
         activeKey = key
@@ -689,7 +499,6 @@ internal class ElevateSkipController(private val application: Application) :
         lastManualSeek = null
         ownSeek = null
         scheduleAutoSkip()
-        traceState("refresh.newKey")
         job = scope.launch {
             val target = identity ?: offline?.let { file ->
                 val header = withContext(Dispatchers.IO) {
@@ -700,18 +509,17 @@ internal class ElevateSkipController(private val application: Application) :
                 ElevateSkipRepository.identityDownloaded(header, file, duration, trace)
             } ?: return@launch
             if (serial != generation || activeKey != key) {
-                ElevateSkipTrace.log(trace, "DISCARD", "reason=staleIdentity")
+
                 return@launch
             }
-            ElevateSkipTrace.log(trace, "FETCH_TARGET", ElevateSkipTrace.identity(target))
+
             val result = ElevateSkipRepository.fetch(target,
                 preferLocal = offline != null, trace = trace)
             if (serial != generation || activeKey != key) {
-                ElevateSkipTrace.log(trace, "DISCARD", "reason=staleResults")
+
                 return@launch
             }
-            ElevateSkipTrace.log(trace, "FETCH_DONE",
-                "count=${result.size} intervals=${ElevateSkipTrace.stamps(result)}")
+
             custom = result
             publish()
         }
@@ -723,20 +531,13 @@ internal class ElevateSkipController(private val application: Application) :
         val instance = activeInstance
         val episode = activeEpisode
         if (instance < 0 || activeKey == null) return
-        ElevateSkipTrace.log("$instance:$episode", "PUBLISH",
-            "custom=${ElevateSkipTrace.stamps(custom)} " +
-                "native=${ElevateSkipTrace.stamps(native)} " +
-                "combined=${ElevateSkipTrace.stamps(combined)} " +
-                "existing=${ElevateSkipTrace.stamps(vm.state.stamps)}")
+
         if (combined == vm.state.stamps) {
             published = combined
             publishedReady = true
-            ElevateSkipTrace.log("$instance:$episode", "PUBLISH_ALREADY_PRESENT",
-                "vm=${ElevateSkipTrace.stamps(vm.state.stamps)}")
-            traceState("publish.unchanged")
+
             return
         }
-        traceState("publish.before")
         vm.modifyState {
             if (this.instance != instance || skipPlaybackId(generatorState?.meta) != episode) {
                 this
@@ -747,10 +548,7 @@ internal class ElevateSkipController(private val application: Application) :
         published = combined
         publishedReady = vm.state.instance == instance &&
             skipPlaybackId(vm.state.generatorState?.meta) == episode
-        ElevateSkipTrace.log("$instance:$episode", "PUBLISH_APPLIED",
-            "matches=${vm.state.stamps == combined} " +
-                "actual=${ElevateSkipTrace.stamps(vm.state.stamps)}")
-        traceState("publish.after")
+
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
         if (autoEnabled()) {
@@ -820,11 +618,6 @@ internal class ElevateSkipController(private val application: Application) :
     private fun scheduleAutoSkip() {
         val enabled = autoEnabled()
         val next = enabled && fragment?.view != null
-        if (tracedAutoScheduling != next) {
-            tracedAutoScheduling = next
-            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SCHEDULE",
-                "enabled=$enabled polling=$next publishedCount=${published.size}")
-        }
         polling = next
         main.removeCallbacks(autoTick)
         if (!next) {
@@ -872,63 +665,47 @@ internal class ElevateSkipController(private val application: Application) :
 
     private fun tryAutoSkip() {
         val player = mediaPlayer ?: run {
-            autoDecision("noPlayer")
             return
         }
         val vm = model ?: run {
-            autoDecision("noModel")
             return
         }
         if (vm.state.instance != activeInstance ||
             skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode) {
-            autoDecision("episodeOrInstanceChanged")
             return
         }
         if (published.isEmpty()) {
-            autoDecision("noPublished")
             return
         }
         if (player.duration <= 0L) {
-            autoDecision("unknownDuration")
             return
         }
         val current = player.currentPosition
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
         } ?: run {
-            autoDecision("noActiveInterval")
             return
         }
         if (!settings.getBoolean(autoPreference(active), false)) {
-            autoDecision("preferenceOff", active)
             return
         }
         val key = stampKey(active)
         if (key in manualSeekProtected) {
-            autoDecision("manualSeekProtected", active)
             return
         }
         if (key in autoSkipped) {
-            autoDecision("alreadyAutoSkipped", active)
             return
         }
         if (!player.isPlaying) {
-            autoDecision("notPlaying", active)
             return
         }
         val stamp = active.timestamp
         if (player.duration <= stamp.endMs) {
-            autoDecision("pastDuration", active)
             return
         }
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
         if (target > current && target > 0L && autoSkipped.add(key)) {
-            autoDecision("executing", active)
-            traceState("auto.execute")
-            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SKIP_EXECUTE",
-                "source=${active.source} type=${stamp.type} intervalMs=${stamp.startMs}-${stamp.endMs} " +
-                    "currentMs=$current targetMs=$target playerDurationMs=${player.duration} " +
-                    "autoEnabled=${settings.getBoolean(autoPreference(active), false)}")
+
             ownSeek = target to android.os.SystemClock.uptimeMillis()
             player.seekTo(target)
             fragment?.context?.let { ctx ->
@@ -982,8 +759,7 @@ internal object ElevateSkipPreferences {
 internal class ElevateSkipButtonTimer(
     private val fragment: GeneratorPlayer,
     private val model: PlayerGeneratorViewModel,
-    private val shouldHide: (com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp?) -> Boolean,
-    private val selectedStamps: () -> List<VideoSkipStamp>
+    private val shouldHide: (com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp?) -> Boolean
 ) {
     private val main = Handler(Looper.getMainLooper())
     private var button: View? = null
@@ -997,7 +773,6 @@ internal class ElevateSkipButtonTimer(
     private var elapsedMs = 0L
     private var lastTickMs = 0L
     private var intervalKey: String? = null
-    private var traceButtonStampKey: String? = null
     private var autoHidden = false
     private var hiddenByTimer = false
     private var lastRestoreAtMs = 0L
@@ -1015,15 +790,8 @@ internal class ElevateSkipButtonTimer(
     private fun markManualSkip() {
         val stamp = currentInterval() ?: return
         if (shouldHide(stamp)) return
-        val selected = selectedStamps()
-        ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
-            "MANUAL_SKIP_STATE",
-            "matches=${model.state.stamps == selected} " +
-                "state=${ElevateSkipTrace.stamps(model.state.stamps)} " +
-                "selected=${ElevateSkipTrace.stamps(selected)}")
-        ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
-            "MANUAL_SKIP_CLICK", "source=${stamp.source} type=${stamp.timestamp.type} " +
-                "intervalMs=${stamp.timestamp.startMs}-${stamp.timestamp.endMs}")
+
+
         completedManualKey = stampKey(stamp)
         manualPendingKey = completedManualKey
         manualPendingAtMs = SystemClock.uptimeMillis()
@@ -1033,9 +801,7 @@ internal class ElevateSkipButtonTimer(
     }
 
     fun onPlaybackSeek(from: Long, to: Long) {
-        if (manualPendingKey != null) ElevateSkipTrace.log(
-            "${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
-            "MANUAL_SKIP_SEEK", "fromMs=$from toMs=$to pendingStampKey=$manualPendingKey")
+
         val returned = model.state.stamps.firstOrNull {
             to >= it.timestamp.startMs && to < it.timestamp.endMs
         }
@@ -1120,16 +886,6 @@ internal class ElevateSkipButtonTimer(
                 manualPendingAtMs = 0L
             }
             val stamp = currentInterval()
-            val traceKey = stamp?.let(::stampKey)
-            if (traceKey != traceButtonStampKey) {
-                ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
-                    "BUTTON_INTERVAL_TRANSITION",
-                    "before=$traceButtonStampKey after=$traceKey " +
-                        "positionMs=${fragment.playerView?.player?.currentPosition} " +
-                        "vm=${ElevateSkipTrace.stamps(model.state.stamps)} " +
-                        "published=${ElevateSkipTrace.stamps(selectedStamps())}")
-                traceButtonStampKey = traceKey
-            }
             if (stamp == null || isSuppressed() || stampKey(stamp) == completedManualKey) {
                 if (active) {
                     reset()
@@ -1276,7 +1032,6 @@ internal class ElevateSkipButtonTimer(
         lastRestoreAtMs = 0L
         lastNativeHideAtMs = 0L
         intervalKey = null
-        traceButtonStampKey = null
         indicator?.visibility = View.GONE
     }
 
@@ -1340,21 +1095,6 @@ internal object ElevateSkipRepository {
     fun identity(response: LoadResponse, episode: ResultEpisode, duration: Long,
         trace: String? = null): Identity {
         val ids = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
-        if (trace != null) {
-        val data = runCatching { JSONObject(episode.data) }.getOrNull()
-        ElevateSkipTrace.log(trace, "IDENTITY_SOURCES",
-            "episodeId=${episode.id} resultSeason=${episode.season} " +
-                "resultEpisode=${episode.episode} totalEpisodeIndex=${episode.totalEpisodeIndex} " +
-                "episodeDataSeason=${data?.optString("season")} " +
-                "episodeDataEpisode=${data?.optString("episode")} " +
-                "episodeDataImdbSeason=${data?.optString("imdbSeason")} " +
-                "episodeDataImdbEpisode=${data?.optString("imdbEpisode")} " +
-                ElevateMediaIdentity.traceSkipSources(response, episode.data))
-        ElevateSkipTrace.log(trace, "IDENTITY_RESOLVED",
-            "episodeSeasonSource=${if (episode.season != null) "ResultEpisode.season" else "Ids.imdbSeason"} " +
-                "episodeSeasonValue=${episode.season ?: ids.imdbSeason} " +
-                "episodeNumberSource=ResultEpisode.episode episodeNumber=${episode.episode} ids=$ids")
-        }
         val movie = response.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         return Identity(ids.imdb, ids.tmdb, ids.mal, ids.anilist, ids.kitsu,
@@ -1367,16 +1107,11 @@ internal object ElevateSkipRepository {
         header: DownloadObjects.DownloadHeaderCached, file: ExtractorUri, duration: Long,
         trace: String? = null
     ): Identity? {
-        if (trace != null) ElevateSkipTrace.log(trace, "OFFLINE_INPUT",
-            "fileId=${file.id} parentId=${file.parentId} " +
-                "fileSeason=${file.season} fileEpisode=${file.episode} " +
-                "headerType=${header.type} fileType=${file.tvType} durationMs=$duration")
+
         val type = file.tvType ?: header.type
         CloudStreamApp.context?.let { ctx ->
             ElevateOfflineMedia.identity(ctx, header.id)?.let { saved ->
-                if (trace != null) ElevateSkipTrace.log(trace, "OFFLINE_IDENTITY_CACHE",
-                    "hit=true saved=${ElevateSkipTrace.identity(saved)} " +
-                        "overrideSeason=${file.season} overrideEpisode=${file.episode}")
+
                 return saved.copy(
                     season = file.season, episode = file.episode ?: 0, duration = duration,
                     anime = ElevateOfflineMedia.anime(ctx, header.id) ?: saved.anime
@@ -1388,8 +1123,7 @@ internal object ElevateSkipRepository {
         val cached = synchronized(offlineIds) {
             offlineIds[key]?.takeIf { it.until > now }
         }
-        if (trace != null) ElevateSkipTrace.log(trace, "OFFLINE_IDENTITY_LOOKUP",
-            "cacheHit=${cached != null} headerApiName=${header.apiName}")
+
         val info = if (cached != null) cached.data else {
             val directImdb = header.url.substringBefore(':').takeIf { imdbPattern.matches(it) }
             val response = if (directImdb != null || header.url.isBlank()) null else {
@@ -1420,11 +1154,10 @@ internal object ElevateSkipRepository {
             }
             found
         } ?: run {
-            if (trace != null) ElevateSkipTrace.log(trace, "OFFLINE_IDENTITY_RESULT", "missing=true")
+
             return null
         }
-        if (trace != null) ElevateSkipTrace.log(trace, "OFFLINE_IDENTITY_RESULT",
-            "ids=$info fileSeason=${file.season} fileEpisode=${file.episode}")
+
         return Identity(info.imdb, info.tmdb, info.mal, info.anilist, info.kitsu,
             file.season, file.episode ?: 0, info.anime, info.movie, duration, null,
             info.simkl, info.original).also { resolved ->
@@ -1450,7 +1183,7 @@ internal object ElevateSkipRepository {
         if (identity.imdb == null && identity.mal == null &&
             identity.anilist == null && identity.kitsu == null) return false
         val match = withTimeoutOrNull(8_000L) {
-            mapped(identity.copy(anime = true), "offline-anime-check:${file.id}")
+            mapped(identity.copy(anime = true), "")
         }
         return match?.let { it.mal != null || it.anilist != null } == true
     }
@@ -1458,13 +1191,11 @@ internal object ElevateSkipRepository {
     private suspend fun request(url: String, trace: String? = null, source: String? = null): JSONObject? =
         try {
             val response = app.get(url, timeout = 7L).text
-            if (trace != null) ElevateSkipTrace.log(trace, "PROVIDER_HTTP_RESPONSE",
-                "provider=$source bodyChars=${response.length}")
+
             JSONObject(response)
         } catch (ex: CancellationException) { throw ex }
           catch (ex: Exception) {
-              if (trace != null) ElevateSkipTrace.log(trace, "PROVIDER_HTTP_ERROR",
-                  "provider=$source exception=${ex.javaClass.simpleName} message=${ex.message?.take(160)}")
+
               null
           }
 
@@ -1472,13 +1203,10 @@ internal object ElevateSkipRepository {
         i: Identity, trace: String
     ): ElevateAnimeIdResolver.EpisodeMapping? {
         if (!i.anime) {
-            ElevateSkipTrace.log(trace, "AIO_MAPPING_SKIP", "anime=false")
+
             return null
         }
-        ElevateSkipTrace.log(trace, "AIO_MAPPING_REQUEST",
-            "original=${i.original} imdb=${i.imdb} mal=${i.mal} " +
-                "anilist=${i.anilist} kitsu=${i.kitsu} " +
-                "inputSeason=${i.season} inputEpisode=${i.episode}")
+
         val result = when (i.original?.substringBefore(':')) {
             "kitsu" -> ElevateAnimeIdResolver.resolveEpisode(
                 null, null, null, i.kitsu, i.season, i.episode, trace)
@@ -1489,8 +1217,7 @@ internal object ElevateSkipRepository {
             else -> ElevateAnimeIdResolver.resolveEpisode(
                 i.imdb, i.mal, i.anilist, i.kitsu, i.season, i.episode, trace)
         }
-        ElevateSkipTrace.log(trace, "AIO_MAPPING_RESULT",
-            "mapped=$result fallbackToInputIfNull=${result == null}")
+
         return result
     }
 
@@ -1551,22 +1278,20 @@ internal object ElevateSkipRepository {
 
     private suspend fun introDb(i: Identity, trace: String): List<VideoSkipStamp> {
         val imdb = i.imdb ?: run {
-            ElevateSkipTrace.log(trace, "INTRODB_SKIP", "reason=missingImdb")
+
             return emptyList()
         }
         if (!i.movie && i.season == null) {
-            ElevateSkipTrace.log(trace, "INTRODB_SKIP", "reason=missingSeason")
+
             return emptyList()
         }
         val args = if (i.movie) "&is_movie=true"
             else "&season=" + i.season + "&episode=" + i.episode
-        ElevateSkipTrace.log(trace, "INTRODB_REQUEST",
-            "idSource=Identity.imdb imdb=$imdb seasonSource=Identity.season " +
-                "season=${i.season} episodeSource=Identity.episode episode=${i.episode} movie=${i.movie}")
+
         val root = request("https://api.introdb.app/segments?imdb_id=" + imdb + args,
             trace, "IntroDb")
             ?: run {
-                ElevateSkipTrace.log(trace, "INTRODB_RESPONSE", "null=true")
+
                 return emptyList()
             }
         val postCredits = if (i.movie) root.segment("post_credits", SkipType.Credits) else null
@@ -1581,38 +1306,34 @@ internal object ElevateSkipRepository {
             if (i.movie) null else root.segment("recap", SkipType.Recap),
             credits
         ), i)
-        ElevateSkipTrace.log(trace, "INTRODB_RESPONSE",
-            "count=${result.size} intervals=${ElevateSkipTrace.stamps(result)}")
+
         return result
     }
 
     private suspend fun theIntroDB(i: Identity, trace: String): List<VideoSkipStamp> {
         val idParam = i.tmdb?.let { "tmdb_id=" + it } ?: i.imdb?.let { "imdb_id=" + it }
             ?: run {
-                ElevateSkipTrace.log(trace, "THEINTRODB_SKIP", "reason=missingImdbAndTmdb")
+
                 return emptyList()
             }
         if (!i.movie && i.season == null) {
-            ElevateSkipTrace.log(trace, "THEINTRODB_SKIP", "reason=missingSeason")
+
             return emptyList()
         }
         val suffix = if (i.movie) "" else "&season=" + i.season +
             "&episode=" + i.episode
-        ElevateSkipTrace.log(trace, "THEINTRODB_REQUEST",
-            "id=$idParam idSource=${if (i.tmdb != null) "Identity.tmdb" else "Identity.imdb"} " +
-                "seasonSource=Identity.season season=${i.season} " +
-                "episodeSource=Identity.episode episode=${i.episode} movie=${i.movie}")
+
         val root = request("https://api.theintrodb.org/v4/media?" + idParam + suffix,
             trace, "TheIntroDB")
             ?: run {
-                ElevateSkipTrace.log(trace, "THEINTRODB_RESPONSE", "null=true")
+
                 return emptyList()
             }
         // A successful v4 media response has type=tv/movie. Error payloads may
         // be JSON objects without type; never treat them as timestamp arrays.
         val mediaType = root.optString("type")
         if (mediaType != "tv" && mediaType != "movie") {
-            ElevateSkipTrace.log(trace, "THEINTRODB_RESPONSE", "invalidMediaType=$mediaType")
+
             return emptyList()
         }
         val intervals = ArrayList<SkipStamp>()
@@ -1629,9 +1350,7 @@ internal object ElevateSkipRepository {
             }
         }
         val result = stamps("TheIntroDB", intervals, i)
-        ElevateSkipTrace.log(trace, "THEINTRODB_RESPONSE",
-            "mediaType=$mediaType rawCount=${intervals.size} validCount=${result.size} " +
-                "intervals=${ElevateSkipTrace.stamps(result)}")
+
         return result
     }
 
@@ -1639,35 +1358,32 @@ internal object ElevateSkipRepository {
         i: Identity, mapped: ElevateAnimeIdResolver.EpisodeMapping?, trace: String
     ): List<VideoSkipStamp> {
         if (!i.anime) {
-            ElevateSkipTrace.log(trace, "ANISKIP_SKIP", "reason=notAnime")
+
             return emptyList()
         }
         val mal = mapped?.mal ?: i.mal ?: run {
-            ElevateSkipTrace.log(trace, "ANISKIP_SKIP", "reason=missingMal")
+
             return emptyList()
         }
         val episode = mapped?.episode ?: i.episode
-        ElevateSkipTrace.log(trace, "ANISKIP_REQUEST",
-            "mal=$mal malSource=${if (mapped?.mal != null) "AIOStreams" else "Identity"} " +
-                "episode=$episode episodeSource=${if (mapped != null) "AIOStreams.local" else "Identity.episode"} " +
-                "originSeason=${i.season} originEpisode=${i.episode} durationMs=${i.duration}")
+
         if (episode <= 0) {
-            ElevateSkipTrace.log(trace, "ANISKIP_SKIP", "reason=invalidEpisode")
+
             return emptyList()
         }
         val url = "https://api.aniskip.com/v2/skip-times/" + mal + "/" + episode +
             "?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed&episodeLength=" +
             i.duration / 1000L
         val root = request(url, trace, "AniSkip") ?: run {
-            ElevateSkipTrace.log(trace, "ANISKIP_RESPONSE", "null=true")
+
             return emptyList()
         }
         if (!root.optBoolean("found")) {
-            ElevateSkipTrace.log(trace, "ANISKIP_RESPONSE", "found=false")
+
             return emptyList()
         }
         val items = root.optJSONArray("results") ?: run {
-            ElevateSkipTrace.log(trace, "ANISKIP_RESPONSE", "found=true results=null")
+
             return emptyList()
         }
         val intervals = ArrayList<SkipStamp>()
@@ -1687,9 +1403,7 @@ internal object ElevateSkipRepository {
             intervals.add(SkipStamp(type, start, end))
         }
         val result = stamps("AniSkip", intervals, i)
-        ElevateSkipTrace.log(trace, "ANISKIP_RESPONSE",
-            "found=true rawItems=${items.length()} rawIntervals=${intervals.size} " +
-                "validCount=${result.size} intervals=${ElevateSkipTrace.stamps(result)}")
+
         return result
     }
 
@@ -1697,11 +1411,11 @@ internal object ElevateSkipRepository {
         i: Identity, mapped: ElevateAnimeIdResolver.EpisodeMapping?, trace: String
     ): List<VideoSkipStamp> {
         if (!i.anime) {
-            ElevateSkipTrace.log(trace, "ANIMESKIP_SKIP", "reason=notAnime")
+
             return emptyList()
         }
         val anilist = mapped?.anilist ?: i.anilist ?: run {
-            ElevateSkipTrace.log(trace, "ANIMESKIP_SKIP", "reason=missingAnilist")
+
             return emptyList()
         }
         val payload = try { PlainAuthRepo(animeSkipApi).authData()?.token?.payload }
@@ -1710,16 +1424,12 @@ internal object ElevateSkipRepository {
         val clientId = payload?.let {
             runCatching { JSONObject(it).nonEmpty("clientId") }.getOrNull()
         } ?: run {
-            ElevateSkipTrace.log(trace, "ANIMESKIP_SKIP", "reason=missingClientId")
+
             return emptyList()
         }
         val episode = mapped?.episode ?: i.episode
         val season = mapped?.season ?: i.season
-        ElevateSkipTrace.log(trace, "ANIMESKIP_REQUEST",
-            "anilist=$anilist idSource=${if (mapped?.anilist != null) "AIOStreams" else "Identity"} " +
-                "episode=$episode episodeSource=${if (mapped != null) "AIOStreams.local" else "Identity.episode"} " +
-                "season=$season seasonSource=${if (mapped?.season != null) "AIOStreams.imdbTvdbTmdbSeason" else "Identity.season"} " +
-                "identitySeason=${i.season} identityEpisode=${i.episode}")
+
         suspend fun query(stage: String, graphql: String): JSONObject? =
             try {
                 val body = JSONObject(app.post("https://api.anime-skip.com/graphql",
@@ -1728,25 +1438,20 @@ internal object ElevateSkipRepository {
                     timeout = 7L).text)
                 val errors = body.optJSONArray("errors")
                 if (errors != null && errors.length() > 0) {
-                    ElevateSkipTrace.log(trace, "ANIMESKIP_GRAPHQL_ERROR",
-                        "stage=$stage count=${errors.length()} " +
-                            "firstError=${errors.optJSONObject(0)?.optString("message")?.take(160)}")
+
                 }
                 body.node("data")
             } catch (ex: CancellationException) { throw ex }
               catch (ex: Exception) {
-                  ElevateSkipTrace.log(trace, "ANIMESKIP_QUERY_ERROR",
-                      "stage=$stage error=${ex.javaClass.simpleName} message=${ex.message?.take(160)}")
+
                   null
               }
         val shows = query("showLookup", "{ findShowsByExternalId(service: ANILIST, serviceId: \"" +
             anilist + "\") { id } }")?.optJSONArray("findShowsByExternalId") ?: run {
-                ElevateSkipTrace.log(trace, "ANIMESKIP_SHOWS", "anilist=$anilist absent=true")
+
                 return emptyList()
             }
-        ElevateSkipTrace.log(trace, "ANIMESKIP_SHOWS",
-            "anilist=$anilist count=${shows.length()} " +
-                "showIds=${(0 until shows.length()).mapNotNull { shows.optJSONObject(it)?.nonEmpty("id") }}")
+
         var best = emptyList<VideoSkipStamp>()
         var bestRank = -1
         var bestKinds = -1
@@ -1759,12 +1464,10 @@ internal object ElevateSkipRepository {
                 "\") { season number absoluteNumber timestamps { at type { name } } } }")
                 ?.optJSONArray("findEpisodesByShowId")
             if (episodes == null) {
-                ElevateSkipTrace.log(trace, "ANIMESKIP_EPISODES",
-                    "showId=$showId missing=true")
+
                 continue
             }
-            ElevateSkipTrace.log(trace, "ANIMESKIP_EPISODES",
-                "showId=$showId count=${episodes.length()}")
+
             val availableSeasons = (0 until episodes.length()).mapNotNull { index ->
                 episodes.optJSONObject(index)?.optString("season")?.toIntOrNull()
             }.distinct()
@@ -1779,10 +1482,7 @@ internal object ElevateSkipRepository {
                     seasonLocalShow else availableSeasons.size == 1 &&
                     epSeason == availableSeasons[0]
                 if (!matchingSeason) {
-                    ElevateSkipTrace.log(trace, "ANIMESKIP_CANDIDATE",
-                        "showId=$showId index=$n season=$epSeason number=$number " +
-                            "absoluteNumber=$absoluteNumber expectedSeason=$season " +
-                            "expectedEpisode=$episode reason=seasonMismatch")
+
                     continue
                 }
                 var rank = if (number == episode) 2 else -1
@@ -1791,23 +1491,16 @@ internal object ElevateSkipRepository {
                         absoluteFetched = true
                         absolute = ElevateAnimeIdResolver.kitsuAbsoluteEpisodes(
                             mapped?.kitsu ?: i.kitsu, trace)[episode]
-                        ElevateSkipTrace.log(trace, "ANIMESKIP_ABSOLUTE",
-                            "kitsu=${mapped?.kitsu ?: i.kitsu} localEpisode=$episode " +
-                                "absoluteEpisode=$absolute")
+
                     }
                     if (absolute != null && (number == absolute || absoluteNumber == absolute))
                         rank = if (matchingSeason) 1 else 0
                 }
-                ElevateSkipTrace.log(trace, "ANIMESKIP_CANDIDATE",
-                    "showId=$showId index=$n season=$epSeason number=$number " +
-                        "absoluteNumber=$absoluteNumber expectedSeason=$season " +
-                        "expectedEpisode=$episode computedAbsolute=$absolute " +
-                        "seasonLocalShow=$seasonLocalShow matchRank=$rank")
+
                 if (rank < 0) continue
                 val marks = ep.optJSONArray("timestamps")
                 if (marks == null) {
-                    ElevateSkipTrace.log(trace, "ANIMESKIP_CANDIDATE_RESULT",
-                        "showId=$showId index=$n reason=missingTimestamps")
+
                     continue
                 }
                 val sorted = (0 until marks.length()).mapNotNull { marks.optJSONObject(it) }
@@ -1832,10 +1525,7 @@ internal object ElevateSkipRepository {
                 }
                 val result = stamps("AnimeSkip", segments, i)
                 val kinds = result.map { category(it.timestamp.type) }.distinct().size
-                ElevateSkipTrace.log(trace, "ANIMESKIP_CANDIDATE_RESULT",
-                    "showId=$showId index=$n rawMarks=${marks.length()} " +
-                        "rawSegments=${segments.size} validCount=${result.size} " +
-                        "rank=$rank kinds=$kinds intervals=${ElevateSkipTrace.stamps(result)}")
+
                 if (result.isNotEmpty() && (rank > bestRank ||
                     rank == bestRank && (kinds > bestKinds ||
                         kinds == bestKinds && result.size > bestCount))) {
@@ -1843,15 +1533,11 @@ internal object ElevateSkipRepository {
                     bestRank = rank
                     bestKinds = kinds
                     bestCount = result.size
-                    ElevateSkipTrace.log(trace, "ANIMESKIP_BEST_UPDATE",
-                        "showId=$showId index=$n rank=$rank kinds=$kinds " +
-                            "count=${result.size}")
+
                 }
             }
         }
-        ElevateSkipTrace.log(trace, "ANIMESKIP_RESULT",
-            "count=${best.size} bestRank=$bestRank bestKinds=$bestKinds " +
-                "intervals=${ElevateSkipTrace.stamps(best)}")
+
         return best
     }
 
@@ -1860,44 +1546,36 @@ internal object ElevateSkipRepository {
     ): List<VideoSkipStamp> =
         try {
             val result = withTimeoutOrNull(8_000L) { block() }
-            ElevateSkipTrace.log(trace, "PROVIDER_COMPLETE",
-                "provider=$name status=${if (result == null) "timeout" else "complete"} " +
-                    "count=${result?.size ?: 0} " +
-                    "intervals=${ElevateSkipTrace.stamps(result.orEmpty())}")
+
             result.orEmpty()
         } catch (ex: CancellationException) { throw ex }
           catch (ex: Exception) {
-              ElevateSkipTrace.log(trace, "PROVIDER_ERROR",
-                  "provider=$name exception=${ex.javaClass.simpleName} message=${ex.message?.take(160)}")
+
               emptyList()
           }
 
     suspend fun fetch(
         i: Identity, preferLocal: Boolean = false,
-        trace: String = "prefetch:${i.season}:${i.episode}"
+        trace: String = ""
     ): List<VideoSkipStamp> =
         withContext(Dispatchers.IO) {
-        ElevateSkipTrace.log(trace, "FETCH_START",
-            "identity=${ElevateSkipTrace.identity(i)} preferLocal=$preferLocal")
+
         if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) {
-            ElevateSkipTrace.log(trace, "FETCH_SKIP", "reason=invalidDuration")
+
             return@withContext emptyList()
         }
         val now = System.currentTimeMillis()
         if (preferLocal) {
             val ctx = CloudStreamApp.context
             val offline = ctx?.let { ElevateOfflineMedia.stamps(it, i) }
-            ElevateSkipTrace.log(trace, "CACHE_OFFLINE",
-                "hit=${offline != null} contextAvailable=${ctx != null} " +
-                    "intervals=${ElevateSkipTrace.stamps(offline.orEmpty())}")
+
             if (offline != null) return@withContext offline
         }
         resultCache[i.key]?.takeIf { it.until > now }?.let {
-            ElevateSkipTrace.log(trace, "CACHE_MEMORY",
-                "hit=true count=${it.data.size} intervals=${ElevateSkipTrace.stamps(it.data)}")
+
             return@withContext it.data
         }
-        ElevateSkipTrace.log(trace, "CACHE_MEMORY", "hit=false")
+
         val needsSimkl = i.simkl != null && (!i.anime || i.imdb == null && i.tmdb == null)
         val result = withTimeoutOrNull(if (needsSimkl) 25_000L else 19_000L) {
             val target = if (needsSimkl) {
@@ -1911,34 +1589,27 @@ internal object ElevateSkipRepository {
                     anime = i.anime || ids.animeIds || ids.simklAnime
                 )
             } else i
-            ElevateSkipTrace.log(trace, "FETCH_RESOLVED_IDENTITY",
-                "simklEnriched=$needsSimkl identity=${ElevateSkipTrace.identity(target)}")
+
             coroutineScope {
                 val mapping = async {
                     try {
                         val found = withTimeoutOrNull(8_000L) { mapped(target, trace) }
-                        ElevateSkipTrace.log(trace, "AIO_MAPPING_DONE", "value=$found")
+
                         found
                     } catch (ex: CancellationException) { throw ex }
                       catch (ex: Exception) {
-                          ElevateSkipTrace.log(trace, "AIO_MAPPING_ERROR",
-                              "exception=${ex.javaClass.simpleName} message=${ex.message?.take(160)}")
+
                           null
                       }
                 }
                 val intro = async {
                     val mappedIdentity = introDbIdentity(target, mapping.await())
-                    ElevateSkipTrace.log(trace, "INTRODB_MAPPING",
-                        "inputSeason=${target.season} inputEpisode=${target.episode} " +
-                            "season=${mappedIdentity.season} episode=${mappedIdentity.episode}")
+
                     provider(trace, "IntroDb") { introDb(mappedIdentity, trace) }
                 }
                 val theIntro = async {
                     val mappedIdentity = theIntroDbIdentity(target, mapping.await())
-                    ElevateSkipTrace.log(trace, "THEINTRODB_MAPPING",
-                        "id=${if (target.tmdb != null) "tmdb" else "imdb"} " +
-                            "inputSeason=${target.season} inputEpisode=${target.episode} " +
-                            "season=${mappedIdentity.season} episode=${mappedIdentity.episode}")
+
                     provider(trace, "TheIntroDB") { theIntroDB(mappedIdentity, trace) }
                 }
                 val ani = async {
@@ -1948,31 +1619,21 @@ internal object ElevateSkipRepository {
                     provider(trace, "AnimeSkip") { animeSkip(target, mapping.await(), trace) }
                 }
                 val groups = listOf(intro.await(), ani.await(), anime.await(), theIntro.await())
-                ElevateSkipTrace.log(trace, "MERGE_INPUT",
-                    "priority=IntroDb>AniSkip>AnimeSkip>TheIntroDB " +
-                        "IntroDb=${ElevateSkipTrace.stamps(groups[0])} " +
-                        "AniSkip=${ElevateSkipTrace.stamps(groups[1])} " +
-                        "AnimeSkip=${ElevateSkipTrace.stamps(groups[2])} " +
-                        "TheIntroDB=${ElevateSkipTrace.stamps(groups[3])}")
+
                 val selected = choose(*groups.toTypedArray())
-                ElevateSkipTrace.log(trace, "MERGE_SELECTED",
-                    "intervals=${ElevateSkipTrace.stamps(selected)}")
+
                 selected
             }
-        }.also {
-            if (it == null) ElevateSkipTrace.log(trace, "FETCH_TIMEOUT",
-                "limitMs=${if (needsSimkl) 25_000 else 19_000}")
         } ?: emptyList<VideoSkipStamp>()
         if (resultCache.size >= 400) resultCache.clear()
         resultCache[i.key] = Timed(result, now + if (result.isEmpty()) MISS else DAY)
         if (result.isNotEmpty()) {
             CloudStreamApp.context?.let {
                 ElevateOfflineMedia.putStamps(it, i, result)
-                ElevateSkipTrace.log(trace, "CACHE_PERSIST", "wrote=true count=${result.size}")
+
             }
         }
-        ElevateSkipTrace.log(trace, "FETCH_RETURN",
-            "count=${result.size} intervals=${ElevateSkipTrace.stamps(result)}")
+
         result
     }
 }

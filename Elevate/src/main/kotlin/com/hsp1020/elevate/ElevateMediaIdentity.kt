@@ -160,20 +160,6 @@ internal object ElevateMediaIdentity {
         }
         return input.merge(fromUrls).copy(original = fromUrls.original ?: input.original)
     }
-    /** Diagnose skip ID precedence without logging sensitive URLs or sync payloads. */
-    internal fun traceSkipSources(response: LoadResponse, episodeData: String?): String {
-        val ignored = ignoreNativeAnimeIds(response)
-        val native = Ids(
-            imdb(response.getImdbId()), number(response.getTMDbId(), "tmdb"),
-            if (ignored) null else number(response.getMalId(), "mal"),
-            if (ignored) null else number(response.getAniListId(), "anilist"),
-            if (ignored) null else number(response.getKitsuId(), "kitsu")
-        )
-        return "nativeIds=$native episodeDataIds=${parseJson(episodeData)} " +
-            "responseSyncIds=${parseSync(response.syncData)} " +
-            "responseUrlIds=${parseUrl(response.url)} ignoredNativeAnimeIds=$ignored"
-    }
-
     fun fromMap(ids: Map<String, String>): Ids = parseSync(ids)
     fun anime(response: LoadResponse?, episode: ResultEpisode?, ids: Ids): Boolean {
         val type = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
