@@ -3,6 +3,8 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -1172,6 +1174,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
 
 
         private fun updateMetadata(page: ResultData) {
+            val started = SystemClock.elapsedRealtime()
             val response = runCatching { responseField?.get(resultModel) as? LoadResponse }
                 .getOrNull()?.takeIf { it.url == page.url }
             speculativeAnimeIds = ElevateMediaIdentity.ignoreNativeAnimeIds(response)
@@ -1214,6 +1217,8 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     }
                 }
             }
+            Log.i("ElevateMetaTiming",
+                "phase=HISTORY_IDS key=${page.url.hashCode()} episodes=${episodes.size} seasons=${seasonEpisodeIds.size} elapsedMs=${SystemClock.elapsedRealtime() - started}")
         }
 
         private fun isSpecialSeason(season: Int): Boolean =

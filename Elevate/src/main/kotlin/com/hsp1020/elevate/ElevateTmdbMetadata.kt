@@ -1,6 +1,8 @@
 package com.hsp1020.elevate
 
 import com.lagradost.cloudstream3.app
+import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -126,12 +128,19 @@ internal object ElevateTmdbMetadata {
         val number = id.toLongOrNull()?.takeIf { it > 0 } ?: return null
         if (season !in 0..99) return null
         val key = "$number:$season:${locale.lowercase(Locale.ROOT)}"
+        val callStarted = SystemClock.elapsedRealtime()
         val now = System.currentTimeMillis()
         val task = synchronized(seasonCache) {
             seasonCache[key]?.takeIf { now - it.first in 0 until SEASON_TTL }?.let {
+                Log.i("ElevateMetaTiming",
+                    "phase=TMDB_SEASON id=$number season=$season cache=RAM elapsedMs=${SystemClock.elapsedRealtime() - callStarted} success=true")
                 return it.second
             }
             seasonFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                val requestStarted = SystemClock.elapsedRealtime()
+                var cacheSource = "MISS"
+                var httpMs = -1L
+                var status = "EMPTY"
                 try {
                     ElevateMetadataDiskCache.read("tmdb_season", key)?.let { entry ->
                         runCatching { JSONObject(entry.body) }.getOrNull()?.let { json ->
@@ -140,22 +149,41 @@ internal object ElevateTmdbMetadata {
                                 if (seasonCache.size > 128)
                                     seasonCache.remove(seasonCache.keys.first())
                             }
+                            cacheSource = "DISK"
+                            status = "OK"
                             return@async json
                         }
                     }
                     val apiKey = ElevateIdResolver.tmdbApiKey() ?: return@async null
-                    val response = app.get("https://api.themoviedb.org/3/tv/$number/season/$season",
-                        params = mapOf("api_key" to apiKey, "language" to locale), timeout = 12L)
-                    if (response.code !in 200..299) return@async null
+                    val httpStarted = SystemClock.elapsedRealtime()
+                    val response = try {
+                        app.get("https://api.themoviedb.org/3/tv/$number/season/$season",
+                            params = mapOf("api_key" to apiKey, "language" to locale), timeout = 12L)
+                    } finally {
+                        httpMs = SystemClock.elapsedRealtime() - httpStarted
+                    }
+                    if (response.code !in 200..299) {
+                        status = "HTTP_${response.code}"
+                        return@async null
+                    }
                     JSONObject(response.text).also { json ->
                         synchronized(seasonCache) {
                             seasonCache[key] = System.currentTimeMillis() to json
                             if (seasonCache.size > 128) seasonCache.remove(seasonCache.keys.first())
                         }
                         ElevateMetadataDiskCache.write("tmdb_season", key, json.toString(), SEASON_TTL)
+                        status = "OK"
                     }
-                } catch (cancelled: CancellationException) { throw cancelled }
-                  catch (_: Exception) { null }
+                } catch (cancelled: CancellationException) {
+                    status = "CANCELLED"
+                    throw cancelled
+                } catch (error: Exception) {
+                    status = error.javaClass.simpleName
+                    null
+                } finally {
+                    Log.i("ElevateMetaTiming",
+                        "phase=TMDB_SEASON_REQUEST id=$number season=$season cache=$cacheSource httpMs=$httpMs elapsedMs=${SystemClock.elapsedRealtime() - requestStarted} status=$status")
+                }
             }.also { active ->
                 seasonFlights[key] = active
                 active.invokeOnCompletion {
@@ -166,7 +194,10 @@ internal object ElevateTmdbMetadata {
             }
         }
         task.start()
-        return task.await()
+        val result = task.await()
+        Log.i("ElevateMetaTiming",
+            "phase=TMDB_SEASON_AWAIT id=$number season=$season elapsedMs=${SystemClock.elapsedRealtime() - callStarted} success=${result != null}")
+        return result
     }
 
     private suspend fun resolve(

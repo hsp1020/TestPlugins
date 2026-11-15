@@ -11,6 +11,8 @@ import com.google.android.material.chip.ChipGroup
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadResult
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -876,6 +878,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 return
             }
             nativePageLoading(page)
+            val swapStarted = SystemClock.elapsedRealtime()
+            val traceKey = page.url.hashCode()
+            Log.i("ElevateMetaTiming", "phase=SWAP_START key=$traceKey provider=$provider")
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -894,7 +899,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             Addon.load(manifest, movie, aioIds, page.url, locale, policy == "true")
                                 ?.let { metadataFromAddon(it, includeActors) }
                         else null
+                        val idStarted = SystemClock.elapsedRealtime()
                         val id = tmdbId(aioIds, movie)
+                        Log.i("ElevateMetaTiming",
+                            "phase=ID_RESOLVE key=$traceKey id=${id ?: "NONE"} elapsedMs=${SystemClock.elapsedRealtime() - idStarted}")
+                        val detailStarted = SystemClock.elapsedRealtime()
                         val tmdb = id?.let { key ->
                             ElevateTmdbMetadata.details(key, movie, locale,
                                 includeCredits = includeActors)?.let { json ->
@@ -909,14 +918,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 }
                             }
                         }
+                        Log.i("ElevateMetaTiming",
+                            "phase=TMDB_DETAIL key=$traceKey id=${id ?: "NONE"} elapsedMs=${SystemClock.elapsedRealtime() - detailStarted} success=${tmdb != null}")
                         (if (provider == "AIO") aio?.withFallback(tmdb)
                             else tmdb) to id
                     }
                 } catch (cancelled: CancellationException) {
+                    Log.i("ElevateMetaTiming",
+                        "phase=SWAP_CANCEL key=$traceKey elapsedMs=${SystemClock.elapsedRealtime() - swapStarted}")
                     throw cancelled
                 } catch (error: Exception) {
+                    Log.i("ElevateMetaTiming",
+                        "phase=SWAP_ERROR key=$traceKey error=${error.javaClass.simpleName}")
                     null to null
                 }
+                Log.i("ElevateMetaTiming",
+                    "phase=SWAP_RESOLVED key=$traceKey elapsedMs=${SystemClock.elapsedRealtime() - swapStarted} success=${resolved.first != null}")
                 val current = resolved.first
                 if (current == null) {
                     if (generation != serial || original !== page || !fragment.isAdded) {
@@ -947,6 +964,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 swapped?.let { nativePage(model, it) }
                 activateLinks()
                 suppressNativeTrailers()
+                Log.i("ElevateMetaTiming",
+                    "phase=SWAP_PUBLISHED key=$traceKey elapsedMs=${SystemClock.elapsedRealtime() - swapStarted}")
                 updateEpisodes()
             }
         }
@@ -1038,6 +1057,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val generation = serial
             episodeJob?.cancel()
             episodeJob = scope.launch {
+                val episodeStarted = SystemClock.elapsedRealtime()
+                val traceKey = original?.url?.hashCode()
                 val ids = ElevateMediaIdentity.collect(nativeResponse,
                     extraSync = original?.syncData, urls = listOfNotNull(original?.url))
                 val anime = ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids) ||
@@ -1069,11 +1090,16 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
                     else null
                 // Reuse the existing AIOStreams season resolver, not a second API client.
+                val mappingStarted = SystemClock.elapsedRealtime()
                 val seasonMappings = if (imdb != null) withContext(Dispatchers.IO) {
                     seasons.associateWith { season ->
                         ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
                     }
                 } else emptyMap()
+                Log.i("ElevateMetaTiming",
+                    "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.size} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
+                val seasonStarted = SystemClock.elapsedRealtime()
+                val activeSeasonRequests = java.util.concurrent.atomic.AtomicInteger(0)
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
                     val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                     val responses = seasons.mapNotNull { sourceSeason ->
@@ -1116,11 +1142,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                         info.runTime != null && info.rating != null
                                 }
                             }) return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
+                            val queuedAt = SystemClock.elapsedRealtime()
+                            var queueMs = -1L
+                            var concurrency = 0
                             val response = withTimeoutOrNull(10_000L) {
                                 seasonRequests.withPermit {
-                                    ElevateTmdbMetadata.season(id, actualSeason, detailLocale)
+                                    queueMs = SystemClock.elapsedRealtime() - queuedAt
+                                    concurrency = activeSeasonRequests.incrementAndGet()
+                                    try {
+                                        ElevateTmdbMetadata.season(id, actualSeason, detailLocale)
+                                    } finally {
+                                        activeSeasonRequests.decrementAndGet()
+                                    }
                                 }
                             }
+                            Log.i("ElevateMetaTiming",
+                                "phase=SEASON_WAIT id=$id season=$actualSeason sourceSeason=$sourceSeason queueMs=$queueMs concurrent=$concurrency elapsedMs=${SystemClock.elapsedRealtime() - queuedAt} success=${response != null}")
                             val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                             val values = response?.optJSONArray("episodes")
                             if (values != null) {
@@ -1160,6 +1197,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     for (items in responses) result.putAll(items)
                     result
                 }
+                Log.i("ElevateMetaTiming",
+                    "phase=SEASONS_DONE key=$traceKey seasons=${seasons.size} tmdbEpisodes=${tmdbEpisodes.size} elapsedMs=${SystemClock.elapsedRealtime() - seasonStarted}")
                 if (generation != serial || metadata !== source ||
                     originalEpisodes !== baseRef || !fragment.isAdded) {
                     return@launch
@@ -1182,6 +1221,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             }
                             rebuildingHost = false
                             if (published) {
+                                Log.i("ElevateMetaTiming",
+                                    "phase=EPISODES_DONE key=$traceKey mode=AIO totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
                                 return@launch
                             }
                     }
@@ -1189,6 +1230,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val fallback = originalEpisodes.orEmpty()
                     swappedEpisodes = fallback
                     nativeEpisodes(fallback)
+                    Log.i("ElevateMetaTiming",
+                        "phase=EPISODES_DONE key=$traceKey mode=FALLBACK episodes=${fallback.size} totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
                     return@launch
                 }
                 val result = base.map { episode ->
@@ -1212,6 +1255,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
                 swappedEpisodes = result
                 nativeEpisodes(result)
+                Log.i("ElevateMetaTiming",
+                    "phase=EPISODES_DONE key=$traceKey mode=TMDB episodes=${result.size} tmdbEpisodes=${tmdbEpisodes.size} totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
             }
         }
 

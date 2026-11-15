@@ -2539,11 +2539,18 @@ open class StremioC(
         val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
+        val startedAt = SystemClock.elapsedRealtime()
+        android.util.Log.i("MetaLoadTiming", "phase=LOAD_START key=${effectiveUrl.hashCode()}")
+        var outcome = "OK"
         return try {
             loadInternal(effectiveUrl, forceRefresh).also { result ->
             }
         } catch (error: Throwable) {
+            outcome = error.javaClass.simpleName
             throw error
+        } finally {
+            android.util.Log.i("MetaLoadTiming",
+                "phase=LOAD_END key=${effectiveUrl.hashCode()} elapsedMs=${SystemClock.elapsedRealtime() - startedAt} outcome=$outcome")
         }
     }
 
@@ -4614,6 +4621,7 @@ open class StremioC(
                 "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
                 *videoLanguages)
             val cacheKey = detailUrl
+            val detailLookupStarted = SystemClock.elapsedRealtime()
             val fromRam = stremioCacheMemoryRead(tmdbDetailsCache[cacheKey], METADATA_CACHE_TTL)
             val cached = fromRam ?: MetadataDiskCache.read("detail", cacheKey)?.let { (json, stamp) ->
                 runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
@@ -4637,6 +4645,8 @@ open class StremioC(
                 fetched
             }
 
+            android.util.Log.i("MetaLoadTiming",
+                "phase=DETAIL id=$tmdbIdStr cache=${if (preFetchedDetail != null) "PREFETCH" else if (fromRam != null) "RAM" else if (cached != null) "DISK" else "NETWORK"} elapsedMs=${SystemClock.elapsedRealtime() - detailLookupStarted} success=${detailRes != null}")
             if (detailRes == null) {
                 
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
@@ -4652,6 +4662,8 @@ open class StremioC(
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
             val langCode = StremioTmdb.language()
+            val seasonBatchStarted = SystemClock.elapsedRealtime()
+            val activeSeasons = java.util.concurrent.atomic.AtomicInteger(0)
 
             coroutineScope {
                 val shouldFocusEpisodes = tmdbMediaType == "tv"
@@ -4673,44 +4685,65 @@ open class StremioC(
                             else listOf(preferred)
                         }.distinct()
                     }
+                    android.util.Log.i("MetaLoadTiming",
+                        "phase=SEASONS_START id=$tmdbIdStr count=${requiredSeasons.size}")
                     requiredSeasons.map { seasonNum ->
+                        val queuedAt = SystemClock.elapsedRealtime()
                         async(Dispatchers.IO) {
-                            run {
-                            run {
-                            StremioC.networkSemaphore.withPermit {
-                                val completed = withTimeoutOrNull(10000L) {
-                                    runSuspendCatching {
-                                        val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
-                                        val seasonCacheKey = seasonUrl
-                                        val cachedSeason = stremioCacheMemoryRead(tmdbSeasonCache[seasonCacheKey], SEASON_CACHE_TTL) ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
-                                            runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
-                                                Pair(value, stamp).also {
-                                                    tmdbSeasonCache[seasonCacheKey] = it
+                            var queueMs = -1L
+                            var httpMs = -1L
+                            var cacheSource = "MISS"
+                            var status = "EMPTY"
+                            var concurrency = 0
+                            try {
+                                StremioC.networkSemaphore.withPermit {
+                                    queueMs = SystemClock.elapsedRealtime() - queuedAt
+                                    concurrency = activeSeasons.incrementAndGet()
+                                    try {
+                                        val completed = withTimeoutOrNull(10000L) {
+                                            runSuspendCatching {
+                                                val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
+                                                val seasonCacheKey = seasonUrl
+                                                val ram = stremioCacheMemoryRead(tmdbSeasonCache[seasonCacheKey], SEASON_CACHE_TTL)
+                                                val cachedSeason = ram ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
+                                                    runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
+                                                        Pair(value, stamp).also {
+                                                            tmdbSeasonCache[seasonCacheKey] = it
+                                                        }
+                                                    }
                                                 }
+                                                cacheSource = if (ram != null) "RAM" else if (cachedSeason != null) "DISK" else "MISS"
+                                                val seasonRes = if (cachedSeason != null) {
+                                                    cachedSeason.first
+                                                } else {
+                                                    val httpStarted = SystemClock.elapsedRealtime()
+                                                    val fetchedSeasonText = try {
+                                                        fetchSharedMetadataText(seasonUrl)
+                                                    } finally {
+                                                        httpMs = SystemClock.elapsedRealtime() - httpStarted
+                                                    }
+                                                    val fetchedSeason = run {
+                                                        if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
+                                                    }
+                                                    if (fetchedSeason != null) {
+                                                        tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
+                                                        MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
+                                                    }
+                                                    fetchedSeason
+                                                }
+                                                status = if (seasonRes != null) "OK" else "EMPTY"
+                                                seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
                                             }
+                                            true
                                         }
-                                        val seasonRes = if (cachedSeason != null) {
-                                            cachedSeason.first
-                                        } else {
-                                            val fetchedSeasonText = run {
-                                                fetchSharedMetadataText(seasonUrl)
-                                            }
-                                            val fetchedSeason = run {
-                                                if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
-                                            }
-                                            if (fetchedSeason != null) {
-                                                tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
-                                                MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
-                                            } else {
-                                            }
-                                            fetchedSeason
-                                        }
-                                        seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
+                                        if (completed == null) status = "TIMEOUT"
+                                    } finally {
+                                        activeSeasons.decrementAndGet()
                                     }
-                                    true
                                 }
-                            }
-                            }
+                            } finally {
+                                android.util.Log.i("MetaLoadTiming",
+                                    "phase=SEASON id=$tmdbIdStr season=$seasonNum cache=$cacheSource queueMs=$queueMs httpMs=$httpMs totalMs=${SystemClock.elapsedRealtime() - queuedAt} concurrent=$concurrency status=$status")
                             }
                         }
                     }
@@ -4735,6 +4768,8 @@ open class StremioC(
 
                 val collectionParts = run { collectionDeferred.await() }
                 run { episodeDeferred?.awaitAll() }
+                if (shouldFocusEpisodes) android.util.Log.i("MetaLoadTiming",
+                    "phase=SEASONS_END id=$tmdbIdStr count=${episodeDeferred?.size ?: 0} episodes=${episodeTmdbMeta.size} elapsedMs=${SystemClock.elapsedRealtime() - seasonBatchStarted}")
 
                 // No per-recommendation Simkl or TMDB detail calls: use lightweight rows
                 // from the two existing responses and keep collection ordering native.
