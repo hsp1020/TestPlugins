@@ -112,6 +112,7 @@ internal object ElevateFeaturePrefs {
     const val WATCH_PROGRESS_ADDON_URL = "HISTORY_SYNC_URL"
     const val METADATA_SWAP_PROVIDER = "METADATA_SWAP_PROVIDER"
     const val METADATA_SWAP_ADDON_URL = "METADATA_SWAP_ADDON_URL"
+    const val METADATA_CACHE_BYPASS = "METADATA_CACHE_BYPASS"
     fun defaultEnabled(@Suppress("UNUSED_PARAMETER") feature: ElevateFeature): Boolean = false
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -378,6 +379,36 @@ class ElevateSettingsFragment : DialogFragment() {
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                         addView(addonInput, LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                        addView(LinearLayout(ctx).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            val label = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.VERTICAL
+                                addView(TextView(ctx).apply {
+                                    text = "Disable Metadata Caches (diagnostics)"
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                                    applyElevateNativeFont()
+                                })
+                                addView(TextView(ctx).apply {
+                                    text = "While enabled, StremioC and Elevate bypass metadata caches on every request."
+                                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                    applyElevateNativeFont()
+                                    alpha = 0.73f
+                                })
+                            }
+                            addView(label, LinearLayout.LayoutParams(0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                            addView(SwitchCompat(ctx).apply {
+                                contentDescription = "Disable Metadata Caches (diagnostics)"
+                                isChecked = preferences.getBoolean(ElevateFeaturePrefs.METADATA_CACHE_BYPASS, false)
+                                setOnCheckedChangeListener { _, checked ->
+                                    preferences.edit().putBoolean(
+                                        ElevateFeaturePrefs.METADATA_CACHE_BYPASS, checked).apply()
+                                }
+                            })
+                        }, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT))
                     }
                 } else null
                 val mdbControls = if (feature == ElevateFeature.MDB_RATINGS) {

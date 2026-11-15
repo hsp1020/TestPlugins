@@ -880,7 +880,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             nativePageLoading(page)
             val swapStarted = SystemClock.elapsedRealtime()
             val traceKey = page.url.hashCode()
-            Log.i("ElevateMetaTiming", "phase=SWAP_START key=$traceKey provider=$provider")
+            Log.i("ElevateMetaTiming",
+                "phase=SWAP_START key=$traceKey provider=$provider bypass=${ElevateMetadataCacheDiagnostics.enabled()}")
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -1118,15 +1119,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         val id = if (animeLookup != null && mapping == null &&
                             kitsuId == null) null
                             else mapping?.tmdb?.takeIf { mapping.tmdbSeason != null } ?: detailId
-                        if (id == null) return@mapNotNull null
+                        if (id == null) {
+                            if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_SEASON_SKIP appSeason=$sourceSeason reason=NO_TMDB_ID")
+                            return@mapNotNull null
+                        }
                         val requestedSeason = mapping?.tmdbSeason ?: sourceSeason
                         val known = if (id == detailId) source.tmdbSeasons else emptyMap()
                         val onlySeason = known.keys.filter { it > 0 }.singleOrNull()
                         val actualSeason = if (anime &&
                             known.isNotEmpty() && requestedSeason !in known &&
                             onlySeason != null) onlySeason else requestedSeason
-                        if (known.isNotEmpty() && actualSeason !in known)
+                        if (known.isNotEmpty() && actualSeason !in known) {
+                            if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_SEASON_SKIP appSeason=$sourceSeason tmdb=$id:$actualSeason reason=NOT_IN_DETAIL_SEASONS")
                             return@mapNotNull null
+                        }
                         val start = mapping?.tmdbFromEpisode
                             ?.takeIf { actualSeason == requestedSeason } ?: 1
                         async(Dispatchers.IO) {
@@ -1158,8 +1166,14 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             }
                             Log.i("ElevateMetaTiming",
                                 "phase=SEASON_WAIT id=$id season=$actualSeason sourceSeason=$sourceSeason queueMs=$queueMs concurrent=$concurrency elapsedMs=${SystemClock.elapsedRealtime() - queuedAt} success=${response != null}")
+                            if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_SEASON appSeason=$sourceSeason tmdb=$id:$actualSeason requestedSeason=$requestedSeason" +
+                                    " offset=$start mapping=${mapping != null} kitsu=${kitsuId != null}" +
+                                    " apiEpisodes=${response?.optJSONArray("episodes")?.length() ?: -1}")
                             val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                             val values = response?.optJSONArray("episodes")
+                            if (values == null && sourceSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_SEASON_EMPTY appSeason=$sourceSeason tmdb=$id:$actualSeason reason=${if (response == null) "NO_RESPONSE" else "MISSING_EPISODES"}")
                             if (values != null) {
                                 val byNumber = (0 until values.length()).mapNotNull { index ->
                                     values.optJSONObject(index)?.let { ep ->
@@ -1167,6 +1181,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                             ?.let { it to ep.episodeMeta(true) }
                                     }
                                 }.toMap()
+                                if (sourceSeason >= 21) for ((tmdbEpisode, fields) in byNumber) {
+                                    Log.i("MetaEpisodeMap",
+                                        "phase=TMDB_SOURCE tmdb=S$actualSeason:E$tmdbEpisode appSeason=$sourceSeason" +
+                                            " thumb=${!fields.poster.isNullOrBlank()} plot=${!fields.description.isNullOrBlank()}" +
+                                            " rating=${fields.rating} airDate=${fields.date}")
+                                }
                                 val localNumbers = if (completeAio)
                                     source.videos.filter { it.season == sourceSeason }
                                         .mapNotNull { it.number?.takeIf { num -> num > 0 } }
@@ -1186,9 +1206,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     val direct = if (!noMapping && actualSeason == requestedSeason)
                                         byNumber[start + number - 1] else null
                                     val fallback = absolutes[number]?.let { byNumber[it] }
-                                    (direct ?: fallback)?.let { info ->
-                                        found[sourceSeason to number] = info
-                                    }
+                                    val info = direct ?: fallback
+                                    if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
+                                        "phase=TMDB_MAP app=S$sourceSeason:E$number tmdb=S$actualSeason:E${if (direct != null) start + number - 1 else absolutes[number] ?: start + number - 1}" +
+                                            " via=${if (direct != null) "DIRECT" else if (fallback != null) "KITSU_ABSOLUTE" else "MISS"}" +
+                                            " directCandidate=${start + number - 1} absoluteCandidate=${absolutes[number]}" +
+                                            " noMapping=$noMapping seasonMatch=${actualSeason == requestedSeason}" +
+                                            " found=${info != null} thumb=${!info?.poster.isNullOrBlank()}" +
+                                            " plot=${!info?.description.isNullOrBlank()} rating=${info?.rating} airDate=${info?.date}")
+                                    if (info != null) found[sourceSeason to number] = info
                                 }
                             }
                             found
@@ -1242,7 +1268,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val addon = key?.let { source.episodes[it] }
                     val tmdb = key?.let { tmdbEpisodes[it] }
                     val info = (if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
-                        else tmdb) ?: return@map episode
+                        else tmdb)
+                    if ((season ?: -1) >= 21) Log.i("MetaEpisodeMap",
+                        "phase=TMDB_APPLY app=S$season:E${episode.episode} found=${info != null}" +
+                            " beforeThumb=${!episode.poster.isNullOrBlank()} beforePlot=${!episode.description.isNullOrBlank()}" +
+                            " beforeRating=${episode.score != null} beforeAirDate=${episode.airDate != null}" +
+                            " tmdbThumb=${!tmdb?.poster.isNullOrBlank()} tmdbPlot=${!tmdb?.description.isNullOrBlank()}" +
+                            " tmdbRating=${tmdb?.rating} tmdbAirDate=${tmdb?.date}" +
+                            " finalThumb=${!info?.poster.isNullOrBlank() || !episode.poster.isNullOrBlank()}" +
+                            " finalPlot=${!info?.description.isNullOrBlank() || !episode.description.isNullOrBlank()}" +
+                            " finalRating=${info?.rating ?: episode.score} finalAirDate=${info?.date ?: episode.airDate}")
+                    if (info == null) return@map episode
                     // Keep the original field whenever the TMDB value is missing.
                     episode.copy(
                         name = info.name ?: episode.name,
@@ -1409,7 +1445,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             request: suspend () -> Fetched?
         ): JSONObject? {
             val now = System.currentTimeMillis()
-            val ram = synchronized(cache) {
+            val ram = if (ElevateMetadataCacheDiagnostics.enabled()) null else synchronized(cache) {
                 cache[key]?.takeIf { now >= it.at && now - it.at < it.ttlMs }?.bytes
             }
             if (ram != null) runCatching { JSONObject(String(ram, Charsets.UTF_8)) }
@@ -1428,7 +1464,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         }
                     }
                     val fetched = request()
-                    if (fetched != null && fetched.ttlMs > 0L) {
+                    if (fetched != null && fetched.ttlMs > 0L &&
+                        !ElevateMetadataCacheDiagnostics.enabled()) {
                         val body = fetched.json.toString()
                         val raw = body.toByteArray(Charsets.UTF_8)
                         if (raw.size <= MAX_RAW_BYTES) {
@@ -1492,7 +1529,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
 
         private suspend fun request(url: String, movie: Boolean?): Fetched? = try {
-            val response = app.get(url, timeout = 12L)
+            val response = app.get(url,
+                headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 12L)
             if (response.code !in 200..299) null else {
                 val text = response.text
                 val raw = JSONObject(text)

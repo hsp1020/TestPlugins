@@ -149,7 +149,7 @@ internal object ElevateAnimeIdResolver {
         val now = System.currentTimeMillis()
         synchronized(kitsuCache) {
             kitsuCache[id]?.takeIf {
-                now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
+                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
             }?.let {
 
                 return it.second
@@ -162,7 +162,8 @@ internal object ElevateAnimeIdResolver {
                     withTimeoutOrNull(10_000L) {
                         limiter.withPermit {
                             val text = app.get("https://anime-kitsu.strem.fun/meta/series/kitsu:" +
-                                id + ".json", timeout = 8L).text
+                                id + ".json", headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                timeout = 8L).text
                             val videos = JSONObject(text).optJSONObject("meta")?.optJSONArray("videos")
                             buildMap<Int, Int> {
                                 if (videos != null) for (n in 0 until videos.length()) {
@@ -183,7 +184,7 @@ internal object ElevateAnimeIdResolver {
 
                       emptyMap()
                   }
-                synchronized(kitsuCache) {
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(kitsuCache) {
                     kitsuCache[id] = System.currentTimeMillis() to result
                 }
                 result
@@ -211,7 +212,7 @@ internal object ElevateAnimeIdResolver {
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.takeIf {
-                now - it.first < if (it.second == null) 300_000L else 86_400_000L
+                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first < if (it.second == null) 300_000L else 86_400_000L
             }?.let {
 
                 return it.second
@@ -219,7 +220,8 @@ internal object ElevateAnimeIdResolver {
         }
         val flight = synchronized(cache) {
             cache[key]?.takeIf {
-                System.currentTimeMillis() - it.first in 0 until
+                !ElevateMetadataCacheDiagnostics.enabled() &&
+                    System.currentTimeMillis() - it.first in 0 until
                     if (it.second == null) 300_000L else 86_400_000L
             }?.let {
 
@@ -235,7 +237,9 @@ internal object ElevateAnimeIdResolver {
                             "&idValue=" + id + (season?.let { "&season=$it" } ?: "")
 
                         val root = try {
-                            JSONObject(app.get(url, timeout = 5L).text)
+                            JSONObject(app.get(url,
+                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                timeout = 5L).text)
                         } catch (e: CancellationException) { throw e }
                           catch (ex: Exception) {
 
@@ -307,7 +311,9 @@ internal object ElevateAnimeIdResolver {
             }
         } catch (e: CancellationException) { throw e }
           catch (_: Exception) { null }
-                synchronized(cache) { cache[key] = System.currentTimeMillis() to found }
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(cache) {
+                    cache[key] = System.currentTimeMillis() to found
+                }
                 found
             }.also { task ->
                 flights[key] = task

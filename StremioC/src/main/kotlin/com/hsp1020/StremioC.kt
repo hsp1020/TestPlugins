@@ -159,9 +159,14 @@ internal fun stremioManifestCachePolicy(
     return StremioManifestCachePolicy(ttl, false)
 }
 
+private fun stremioMetadataDiagnosticBypass(): Boolean =
+    CloudStreamApp.context?.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+        ?.getBoolean("METADATA_CACHE_BYPASS", false) == true
+
 internal fun <T> stremioCacheMemoryRead(
     cached: Pair<T, Long>?, ttlMs: Long
 ): Pair<T, Long>? {
+    if (stremioMetadataDiagnosticBypass()) return null
     if (cached == null) {
         return null
     }
@@ -207,6 +212,7 @@ private object MetadataDiskCache {
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
     suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
+        if (stremioMetadataDiagnosticBypass()) return@withContext null
         // Writers publish complete files using atomic rename. Reading a completed
         // file does not need the writer's global eviction/quota monitor.
         val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
@@ -256,6 +262,7 @@ private object MetadataDiskCache {
     }
 
     suspend fun write(kind: String, key: String, json: String, ttlMs: Long = TTL_MS) {
+        if (stremioMetadataDiagnosticBypass()) return
         if (kind == "meta" && ttlMs <= 0L) {
             return
         }
@@ -1285,7 +1292,10 @@ open class StremioC(
                 metadataTextFlights[url]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
-                        val response = customSession.get(url)
+                        val response = customSession.get(url,
+                            headers = if (stremioMetadataDiagnosticBypass())
+                                mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
+                            else emptyMap())
                         val text = response.text
                         text
                     } catch (error: Throwable) {
@@ -1324,6 +1334,7 @@ open class StremioC(
         }
 
         private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long, stamp: Long = System.currentTimeMillis()) {
+            if (stremioMetadataDiagnosticBypass()) return
             val bytes = text.toByteArray(Charsets.UTF_8)
             if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) {
                 return
@@ -1349,6 +1360,7 @@ open class StremioC(
         }
 
         private fun cachedAddonMetaInRam(url: String): String? {
+            if (stremioMetadataDiagnosticBypass()) return null
             val bytes = synchronized(addonMetaCache) {
                 val held = addonMetaCache[url]
                 if (held != null && System.currentTimeMillis() - held.at < held.ttlMs) {
@@ -1485,8 +1497,9 @@ open class StremioC(
             }
             val storageKey = addonMetaStorageKey(url)
             // The catalog's own Metadata Sync switch controls its original meta cache.
-            val skipCache = isMetadataSwapAllowed(url.substringBefore("/meta/"))
-            if (skipCache) {
+            val diagnosticBypass = stremioMetadataDiagnosticBypass()
+            val skipCache = diagnosticBypass || isMetadataSwapAllowed(url.substringBefore("/meta/"))
+            if (skipCache && !diagnosticBypass) {
                 invalidateAddonMetaInRam(storageKey)
                 MetadataDiskCache.invalidate("meta", storageKey)
             }
@@ -1508,8 +1521,9 @@ open class StremioC(
                 addonMetaFlights[flightKey]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
-                        val response = customSession.get(url, headers = if (forceRefresh)
-                            mapOf("Cache-Control" to "no-cache") else emptyMap())
+                        val response = customSession.get(url, headers = if (diagnosticBypass)
+                            mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
+                        else if (forceRefresh) mapOf("Cache-Control" to "no-cache") else emptyMap())
                         if (response.code !in 200..299) {
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
@@ -2540,7 +2554,7 @@ open class StremioC(
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
         val startedAt = SystemClock.elapsedRealtime()
-        android.util.Log.i("MetaLoadTiming", "phase=LOAD_START key=${effectiveUrl.hashCode()}")
+        android.util.Log.i("MetaLoadTiming", "phase=LOAD_START key=${effectiveUrl.hashCode()} bypass=${stremioMetadataDiagnosticBypass()}")
         var outcome = "OK"
         return try {
             loadInternal(effectiveUrl, forceRefresh).also { result ->
@@ -3485,7 +3499,7 @@ open class StremioC(
         if (cachedAnime != null) {
             return cachedAnime.first
         }
-        val noMappingStamp = animeNoMappingCache[query]
+        val noMappingStamp = if (stremioMetadataDiagnosticBypass()) null else animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
@@ -4996,6 +5010,12 @@ open class StremioC(
                         ("1_" + absolute).takeIf { episodeTmdbMeta.containsKey(it) }
                     }
                     val mappedKey = directKey ?: absoluteKey
+                    if (displaySeason >= 21) android.util.Log.i("MetaEpisodeMap",
+                        "phase=STREMIOC_REQUEST app=S$displaySeason:E$displayEpisode" +
+                            " mappingTmdbSeason=$tmdbSeason mappingOffset=${mapping?.tmdbFromEpisode}" +
+                            " directCandidate=${tmdbSeason?.let { it.toString() + "_" + directEpisode }}" +
+                            " directKey=$directKey absoluteKey=$absoluteKey mappedKey=$mappedKey" +
+                            " mappedOnly=${mapping != null || kitsuEpisodes.containsKey(displaySeason)}")
                     val ep = video.toEpisode(
                         provider, type, epImdbId, episodeTmdbMeta, 
                         displaySeason, displayEpisode, showTitle, tmdbId, 
@@ -5665,6 +5685,16 @@ open class StremioC(
                 else -> tmdbMetaMap["${displaySeason}_${displayEpisode}"]
                     ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             }
+            val traceTmdbKey = if (displaySeason < 21 || unknownEpisode) null else if (mappedTmdbOnly)
+                tmdbEpisodeKey else listOf(
+                    "${displaySeason}_${displayEpisode}",
+                    "${seasonNumber ?: 0}_${episode ?: number ?: 0}"
+                ).firstOrNull { tmdbMetaMap.containsKey(it) }
+            if (displaySeason >= 21) android.util.Log.i("MetaEpisodeMap",
+                "phase=STREMIOC_MAP app=S$displaySeason:E$displayEpisode tmdbKey=$traceTmdbKey mappedOnly=$mappedTmdbOnly found=${tmdbEp != null}" +
+                    " sourceThumb=${!thumbnail.isNullOrBlank()} sourcePlot=${!(overview ?: description).isNullOrBlank()}" +
+                    " tmdbThumb=${!tmdbEp?.stillPath.isNullOrBlank()} tmdbPlot=${!tmdbEp?.overview.isNullOrBlank()}" +
+                    " tmdbRating=${tmdbEp?.voteAverage} tmdbAirDate=${tmdbEp?.airDate}")
             val finalAirDate = if (unknownEpisode) null else (
                 tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             )
@@ -5724,6 +5754,10 @@ open class StremioC(
                 episodeRating?.let { this.score = Score.from10(it) }
 
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
+                if (displaySeason >= 21) android.util.Log.i("MetaEpisodeMap",
+                    "phase=STREMIOC_FINAL app=S$displaySeason:E$displayEpisode tmdbKey=$traceTmdbKey" +
+                        " finalThumb=${!this.posterUrl.isNullOrBlank()} finalPlot=${!this.description.isNullOrBlank()}" +
+                        " finalRating=$episodeRating finalAirDate=$finalAirDate")
             }
         }
     }

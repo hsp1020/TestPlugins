@@ -123,13 +123,14 @@ internal object ElevateIdResolver {
                 val accountPrefix = "$accountKey:$id:$movie:"
                 val known = listOf("movies", "tv", "anime").mapNotNull { type ->
                     simklCache[accountPrefix + type]?.takeIf {
-                        now - it.at in 0 until 3_600_000L
+                        !ElevateMetadataCacheDiagnostics.enabled() &&
+                            now - it.at in 0 until 3_600_000L
                     }?.value?.takeIf { it.movie == movie }
                 }.distinct()
                 if (known.size == 1) return known.first()
             }
             simklCache[key]?.takeIf {
-                now - it.at in 0 until if (it.value == null) 300_000L else 3_600_000L
+                !ElevateMetadataCacheDiagnostics.enabled() && now - it.at in 0 until if (it.value == null) 300_000L else 3_600_000L
             }?.let { return it.value }
             simklFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 val found = try {
@@ -185,14 +186,14 @@ internal object ElevateIdResolver {
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (e: Exception) { null }
-                synchronized(simklCache) {
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(simklCache) {
                     val entry = Cached(System.currentTimeMillis(), found)
                     simklCache[key] = entry
                     if (found != null) simklCache["$accountKey:$id:$movie:${found.segment}"] = entry
                     if (simklCache.size > 96) simklCache.remove(simklCache.keys.first())
                 }
                 // Only unambiguous movie/TV identifiers can seed TMDB-to-IMDb.
-                if (found?.segment != "anime" && found?.imdb != null &&
+                if (!ElevateMetadataCacheDiagnostics.enabled() && found?.segment != "anime" && found?.imdb != null &&
                     found.tmdb != null) {
                     synchronized(tmdbCache) {
                         val type = if (found.movie) "movie" else "tv"
@@ -221,7 +222,7 @@ internal object ElevateIdResolver {
         val now = System.currentTimeMillis()
         val flight = synchronized(tmdbCache) {
             tmdbCache[key]?.takeIf {
-                now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
+                !ElevateMetadataCacheDiagnostics.enabled() && now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
             }?.let { return it.value }
             tmdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 val found = try {
@@ -230,7 +231,8 @@ internal object ElevateIdResolver {
                         withTimeoutOrNull(8_000L) {
                         val type = if (movie) "movie" else "tv"
                         val response = app.get("https://api.themoviedb.org/3/$type/$id/external_ids",
-                            params = mapOf("api_key" to apiKey), timeout = 7L)
+                            params = mapOf("api_key" to apiKey),
+                            headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 7L)
                         JSONObject(response.text).optString("imdb_id")
                             .takeIf(imdbPattern::matches)
                         }
@@ -238,7 +240,7 @@ internal object ElevateIdResolver {
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) { null }
-                synchronized(tmdbCache) {
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(tmdbCache) {
                     tmdbCache[key] = Cached(System.currentTimeMillis(), found)
                     if (tmdbCache.size > 256) tmdbCache.remove(tmdbCache.keys.first())
                 }
@@ -268,7 +270,7 @@ internal object ElevateIdResolver {
         val now = System.currentTimeMillis()
         val task = synchronized(imdbCache) {
             imdbCache[key]?.takeIf {
-                now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
+                !ElevateMetadataCacheDiagnostics.enabled() && now - it.at in 0 until if (it.value == null) 300_000L else 86_400_000L
             }?.let { return it.value }
             imdbFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 // Prefer the direct TMDB find endpoint, then retain Simkl as fallback.
@@ -277,7 +279,8 @@ internal object ElevateIdResolver {
                         withTimeoutOrNull(9_000L) {
                             val res = app.get("https://api.themoviedb.org/3/find/$imdb",
                                 params = mapOf("api_key" to apiKey,
-                                    "external_source" to "imdb_id"), timeout = 8L)
+                                    "external_source" to "imdb_id"),
+                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 8L)
                             val rows = JSONObject(res.text).optJSONArray(
                                 if (movie) "movie_results" else "tv_results")
                             val unique = (0 until (rows?.length() ?: 0)).mapNotNull {
@@ -316,7 +319,7 @@ internal object ElevateIdResolver {
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                   catch (e: Exception) { null }
-                synchronized(imdbCache) {
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(imdbCache) {
                     imdbCache[key] = Cached(System.currentTimeMillis(), result)
                     if (imdbCache.size > 256) imdbCache.remove(imdbCache.keys.first())
                 }
