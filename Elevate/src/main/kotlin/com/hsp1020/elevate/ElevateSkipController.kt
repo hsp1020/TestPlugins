@@ -72,7 +72,7 @@ internal object ElevateSkipTrace {
     private const val TAG = "ElevateSkipTrace"
 
     fun log(run: String, step: String, detail: String) {
-        android.util.Log.i(TAG, "run=$run step=$step $detail")
+        android.util.Log.i(TAG, "tMs=${SystemClock.uptimeMillis()} run=$run step=$step $detail")
     }
 
     fun identity(i: ElevateSkipRepository.Identity): String =
@@ -103,6 +103,13 @@ internal class ElevateSkipController(private val application: Application) :
     private val rootLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
         if (fragment?.playerView?.player !== mediaPlayer) refresh()
     }
+    private val traceTick = object : Runnable {
+        override fun run() {
+            if (fragment == null || model == null) return
+            traceState("watchdog")
+            main.postDelayed(this, 150L)
+        }
+    }
     // Nuvio Mobile-style: hide before the first READY, not during rebuffering.
     private var initialLoadCompleted = false
     private var initialLoadInstance = -1
@@ -116,6 +123,20 @@ internal class ElevateSkipController(private val application: Application) :
     private var native = emptyList<VideoSkipStamp>()
     private var custom = emptyList<VideoSkipStamp>()
     private var published = emptyList<VideoSkipStamp>()
+    // Temporary diagnostics: compare VM, LiveData and core player's private stamp list.
+    // Poll only reference changes; never retain media URLs or allocate a log per frame.
+    private var tracedVmStamps: List<VideoSkipStamp>? = null
+    private var tracedLiveStamps: List<VideoSkipStamp>? = null
+    private var tracedEngineStamps: List<VideoSkipStamp>? = null
+    private var tracedLiveInstance: Int? = null
+    private var tracedInstance: Int? = null
+    private var tracedEpisode: Int? = null
+    private var tracedGenerator: Int? = null
+    private var tracedCoreRequested: Boolean? = null
+    private var tracedEngine: Any? = null
+    private var tracedEngineField: java.lang.reflect.Field? = null
+    private var tracedAutoDecision: String? = null
+    private var tracedAutoScheduling: Boolean? = null
     private val autoSkipped = hashSetOf<String>()
     // Preserve explicit Media3 seek origins/destinations, as Nuvio Mobile does.
     // No sampled position-difference heuristic, including for small seeks.
@@ -204,6 +225,8 @@ internal class ElevateSkipController(private val application: Application) :
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key?.startsWith("AUTO_SKIP_") == true) main.post {
+            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SETTING_CHANGED",
+                "key=$key enabled=${settings.getBoolean(key, false)}")
             scheduleAutoSkip()
             skipButtonTimer?.refreshVisibility()
         }
@@ -218,6 +241,10 @@ internal class ElevateSkipController(private val application: Application) :
     ) { proxy, method, args ->
         when (method.name) {
             "onPlaybackStateChanged", "onIsPlayingChanged" -> {
+                ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_EVENT",
+                    "callback=${method.name} playbackState=${mediaPlayer?.playbackState} " +
+                        "isPlaying=${mediaPlayer?.isPlaying} positionMs=${mediaPlayer?.currentPosition}")
+                traceState("media3.${method.name}")
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -228,6 +255,9 @@ internal class ElevateSkipController(private val application: Application) :
                     val from = (args[0] as? Media3Player.PositionInfo)?.positionMs
                     val to = (args[1] as? Media3Player.PositionInfo)?.positionMs
                     if (from != null && to != null) {
+                        ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_SEEK",
+                            "fromMs=$from toMs=$to playerMs=${mediaPlayer?.currentPosition}")
+                        traceState("media3.seek")
                         skipButtonTimer?.onPlaybackSeek(from, to)
                         recordSeek(from, to)
                         scheduleAutoSkip()
@@ -236,6 +266,10 @@ internal class ElevateSkipController(private val application: Application) :
                 null
             }
             "onMediaItemTransition", "onTimelineChanged", "onPlaybackParametersChanged" -> {
+                ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "MEDIA3_EVENT",
+                    "callback=${method.name} playbackState=${mediaPlayer?.playbackState} " +
+                        "isPlaying=${mediaPlayer?.isPlaying} positionMs=${mediaPlayer?.currentPosition}")
+                traceState("media3.${method.name}")
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -285,6 +319,80 @@ internal class ElevateSkipController(private val application: Application) :
         scan(next.supportFragmentManager)
     }
 
+    private fun traceState(cause: String) {
+        val vm = model ?: return
+        val host = fragment ?: return
+        val state = vm.state
+        val episode = skipPlaybackId(state.generatorState?.meta)
+        val generator = state.generatorState?.id
+        val current = state.stamps
+        val live = vm.currentStamps.value
+        val liveStamps = live?.value
+        val coreRequested = host.hasRequestedStamps
+        val engine = runCatching { host.player }.getOrNull()
+        val engineChanged = engine !== tracedEngine
+        if (engineChanged) {
+            tracedEngine = engine
+            tracedEngineField = runCatching {
+                engine?.javaClass?.getDeclaredField("lastTimeStamps")?.apply {
+                    isAccessible = true
+                }
+            }.getOrNull()
+            ElevateSkipTrace.log("${state.instance}:$episode", "ENGINE_PROBE",
+                "cause=$cause engineClass=${engine?.javaClass?.name} " +
+                    "engineRef=${System.identityHashCode(engine)} " +
+                    "lastTimeStampsAccessible=${tracedEngineField != null}")
+        }
+        @Suppress("UNCHECKED_CAST")
+        val engineStamps = runCatching {
+            tracedEngineField?.get(engine) as? List<VideoSkipStamp>
+        }.getOrNull()
+        val changed = current !== tracedVmStamps ||
+            liveStamps !== tracedLiveStamps || engineStamps !== tracedEngineStamps ||
+            live?.instance != tracedLiveInstance || state.instance != tracedInstance ||
+            episode != tracedEpisode || generator != tracedGenerator ||
+            coreRequested != tracedCoreRequested || engineChanged
+        if (changed) {
+            ElevateSkipTrace.log("${state.instance}:$episode", "STAMP_STORE_TRANSITION",
+                "cause=$cause vmInstance=${state.instance} generatorId=$generator " +
+                    "episodeId=$episode activeInstance=$activeInstance activeEpisode=$activeEpisode " +
+                    "coreHasRequestedStamps=$coreRequested " +
+                    "vmRef=${System.identityHashCode(current)} " +
+                    "oldVmRef=${System.identityHashCode(tracedVmStamps)} " +
+                    "liveInstance=${live?.instance} liveRef=${System.identityHashCode(liveStamps)} " +
+                    "engineRef=${System.identityHashCode(engineStamps)} " +
+                    "vmVsPublished=${current == published} " +
+                    "engineVsPublished=${engineStamps?.let { it == published }} " +
+                    "engineVsVm=${engineStamps?.let { it == current }} " +
+                    "vm=${ElevateSkipTrace.stamps(current)} " +
+                    "live=${ElevateSkipTrace.stamps(liveStamps.orEmpty())} " +
+                    "engine=${if (tracedEngineField == null) "unavailable" else ElevateSkipTrace.stamps(engineStamps.orEmpty())} " +
+                    "published=${ElevateSkipTrace.stamps(published)}")
+        }
+        if (coreRequested != tracedCoreRequested) {
+            ElevateSkipTrace.log("${state.instance}:$episode", "CORE_STAMPS_REQUEST_FLAG",
+                "cause=$cause before=$tracedCoreRequested after=$coreRequested " +
+                    "generatorId=$generator mediaDurationMs=${mediaPlayer?.duration}")
+        }
+        tracedVmStamps = current
+        tracedLiveStamps = liveStamps
+        tracedEngineStamps = engineStamps
+        tracedLiveInstance = live?.instance
+        tracedInstance = state.instance
+        tracedEpisode = episode
+        tracedGenerator = generator
+        tracedCoreRequested = coreRequested
+    }
+
+    private fun autoDecision(reason: String, stamp: VideoSkipStamp? = null) {
+        val key = "$reason:${stamp?.let(::stampKey)}"
+        if (key == tracedAutoDecision) return
+        tracedAutoDecision = key
+        ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SKIP_DECISION",
+            "reason=$reason selected=${stamp?.let { ElevateSkipTrace.stamps(listOf(it)) }} " +
+                "positionMs=${mediaPlayer?.currentPosition} isPlaying=${mediaPlayer?.isPlaying}")
+    }
+
     private fun watch(candidate: Fragment) {
         if (candidate !is GeneratorPlayer || !candidate.isAdded || candidate.view == null) return
         if (candidate === fragment) {
@@ -298,10 +406,26 @@ internal class ElevateSkipController(private val application: Application) :
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
+        ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
+            "HOOK_ATTACH", "fragmentRef=${System.identityHashCode(candidate)} " +
+                "vmRef=${System.identityHashCode(vm)} generatorId=${vm.state.generatorState?.id}")
+        main.removeCallbacks(traceTick)
+        main.post(traceTick)
         skipButtonTimer = ElevateSkipButtonTimer(candidate, vm,
             { stamp -> suppressNativeSkipButton(stamp) }, { published }
         ).also { it.attach() }
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
+            if (event != null) {
+                ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
+                    "STAMP_LIVEDATA_DELIVERY",
+                    "eventInstance=${event.instance} currentInstance=${vm.state.instance} " +
+                        "accepted=${event.instance == vm.state.instance} " +
+                        "eventRef=${System.identityHashCode(event.value)} " +
+                        "event=${ElevateSkipTrace.stamps(event.value)} " +
+                        "vm=${ElevateSkipTrace.stamps(vm.state.stamps)} " +
+                        "published=${ElevateSkipTrace.stamps(published)}")
+                traceState("currentStamps.delivery")
+            }
             if (event != null && event.instance == vm.state.instance) {
                 val incoming = event.value
                 if (incoming != published) ElevateSkipTrace.log(
@@ -317,10 +441,16 @@ internal class ElevateSkipController(private val application: Application) :
                             "NATIVE_STAMPS", "count=${incoming.size} intervals=${ElevateSkipTrace.stamps(incoming)}")
                     }
                     publish()
+                    traceState("currentStamps.afterPublish")
                 }
             }
         }
-        val linksObserver = Observer<VideoLive<Set<VideoLink>>> {
+        val linksObserver = Observer<VideoLive<Set<VideoLink>>> { event ->
+            ElevateSkipTrace.log("${vm.state.instance}:${skipPlaybackId(vm.state.generatorState?.meta)}",
+                "LINKS_LIVEDATA_DELIVERY",
+                "eventInstance=${event?.instance} linkCount=${event?.value?.size} " +
+                    "vmInstance=${vm.state.instance} generatorId=${vm.state.generatorState?.id}")
+            traceState("currentLinks.delivery")
             refresh()
             retryPlayerAttach()
         }
@@ -335,6 +465,14 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun detach() {
+        if (fragment != null) {
+            traceState("detach.before")
+            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "HOOK_DETACH",
+                "generation=$generation activeKey=$activeKey " +
+                    "vm=${model?.state?.stamps?.let(ElevateSkipTrace::stamps)} " +
+                    "published=${ElevateSkipTrace.stamps(published)}")
+        }
+        main.removeCallbacks(traceTick)
         ElevateJavaAllocationProfile.traceHook("SkipController", "DETACH", activity, fragment)
         // First unsubscribe: restoring native stamps must not trigger our own observer.
         unobserve?.invoke()
@@ -369,6 +507,18 @@ internal class ElevateSkipController(private val application: Application) :
         manualSeekProtected.clear()
         lastManualSeek = null
         ownSeek = null
+        tracedVmStamps = null
+        tracedLiveStamps = null
+        tracedEngineStamps = null
+        tracedLiveInstance = null
+        tracedInstance = null
+        tracedEpisode = null
+        tracedGenerator = null
+        tracedCoreRequested = null
+        tracedEngine = null
+        tracedEngineField = null
+        tracedAutoDecision = null
+        tracedAutoScheduling = null
     }
 
     private fun restoreNative() {
@@ -376,12 +526,17 @@ internal class ElevateSkipController(private val application: Application) :
         val instance = activeInstance
         val episode = activeEpisode
         if (instance < 0 || activeKey == null) return
+        ElevateSkipTrace.log("$instance:$episode", "RESTORE_NATIVE_BEFORE",
+            "state=${ElevateSkipTrace.stamps(vm.state.stamps)} " +
+                "native=${ElevateSkipTrace.stamps(native)}")
         vm.modifyState {
             if (this.instance != instance ||
                 skipPlaybackId(generatorState?.meta) != episode ||
                 stamps.none { it.source.startsWith("Elevate/") }) this
             else set(native)
         }
+        ElevateSkipTrace.log("$instance:$episode", "RESTORE_NATIVE_AFTER",
+            "state=${ElevateSkipTrace.stamps(vm.state.stamps)}")
     }
 
     private fun refresh() {
@@ -399,6 +554,10 @@ internal class ElevateSkipController(private val application: Application) :
         }
         val playerChanged = nextPlayer !== mediaPlayer
         if (playerChanged) {
+            ElevateSkipTrace.log("${state.instance}:$nextEpisode", "MEDIA3_PLAYER_CHANGED",
+                "oldRef=${System.identityHashCode(mediaPlayer)} " +
+                    "newRef=${System.identityHashCode(nextPlayer)} " +
+                    "newState=${nextPlayer?.playbackState} newDurationMs=${nextPlayer?.duration}")
             mediaPlayer?.removeListener(playerListener)
             mediaPlayer = nextPlayer
             nextPlayer?.addListener(playerListener)
@@ -427,6 +586,7 @@ internal class ElevateSkipController(private val application: Application) :
         val key = state.instance.toString() + ":" + episodeId + ":" +
             (identity?.key ?: "download:${offline?.parentId}:$duration")
         if (activeKey == key) {
+            traceState("refresh.sameKey")
             // A new/reloaded Media3 player can begin inside an already known skip.
             if (nextPlayer?.isPlaying == true) tryAutoSkip()
             scheduleAutoSkip()
@@ -456,6 +616,7 @@ internal class ElevateSkipController(private val application: Application) :
         lastManualSeek = null
         ownSeek = null
         scheduleAutoSkip()
+        traceState("refresh.newKey")
         job = scope.launch {
             val target = identity ?: offline?.let { file ->
                 val header = withContext(Dispatchers.IO) {
@@ -496,8 +657,12 @@ internal class ElevateSkipController(private val application: Application) :
                 "existing=${ElevateSkipTrace.stamps(vm.state.stamps)}")
         if (combined == vm.state.stamps) {
             published = combined
+            ElevateSkipTrace.log("$instance:$episode", "PUBLISH_ALREADY_PRESENT",
+                "vm=${ElevateSkipTrace.stamps(vm.state.stamps)}")
+            traceState("publish.unchanged")
             return
         }
+        traceState("publish.before")
         vm.modifyState {
             if (this.instance != instance || skipPlaybackId(generatorState?.meta) != episode) {
                 this
@@ -509,6 +674,7 @@ internal class ElevateSkipController(private val application: Application) :
         ElevateSkipTrace.log("$instance:$episode", "PUBLISH_APPLIED",
             "matches=${vm.state.stamps == combined} " +
                 "actual=${ElevateSkipTrace.stamps(vm.state.stamps)}")
+        traceState("publish.after")
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
         if (autoEnabled()) {
@@ -578,6 +744,11 @@ internal class ElevateSkipController(private val application: Application) :
     private fun scheduleAutoSkip() {
         val enabled = autoEnabled()
         val next = enabled && fragment?.view != null
+        if (tracedAutoScheduling != next) {
+            tracedAutoScheduling = next
+            ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SCHEDULE",
+                "enabled=$enabled polling=$next publishedCount=${published.size}")
+        }
         polling = next
         main.removeCallbacks(autoTick)
         if (!next) {
@@ -625,46 +796,59 @@ internal class ElevateSkipController(private val application: Application) :
 
     private fun tryAutoSkip() {
         val player = mediaPlayer ?: run {
+            autoDecision("noPlayer")
             return
         }
         val vm = model ?: run {
+            autoDecision("noModel")
             return
         }
         if (vm.state.instance != activeInstance ||
             skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode) {
+            autoDecision("episodeOrInstanceChanged")
             return
         }
         if (published.isEmpty()) {
+            autoDecision("noPublished")
             return
         }
         if (player.duration <= 0L) {
+            autoDecision("unknownDuration")
             return
         }
         val current = player.currentPosition
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
         } ?: run {
+            autoDecision("noActiveInterval")
             return
         }
         if (!settings.getBoolean(autoPreference(active), false)) {
+            autoDecision("preferenceOff", active)
             return
         }
         val key = stampKey(active)
         if (key in manualSeekProtected) {
+            autoDecision("manualSeekProtected", active)
             return
         }
         if (key in autoSkipped) {
+            autoDecision("alreadyAutoSkipped", active)
             return
         }
         if (!player.isPlaying) {
+            autoDecision("notPlaying", active)
             return
         }
         val stamp = active.timestamp
         if (player.duration <= stamp.endMs) {
+            autoDecision("pastDuration", active)
             return
         }
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
         if (target > current && target > 0L && autoSkipped.add(key)) {
+            autoDecision("executing", active)
+            traceState("auto.execute")
             ElevateSkipTrace.log("${activeInstance}:${activeEpisode}", "AUTO_SKIP_EXECUTE",
                 "source=${active.source} type=${stamp.type} intervalMs=${stamp.startMs}-${stamp.endMs} " +
                     "currentMs=$current targetMs=$target playerDurationMs=${player.duration} " +
@@ -737,6 +921,7 @@ internal class ElevateSkipButtonTimer(
     private var elapsedMs = 0L
     private var lastTickMs = 0L
     private var intervalKey: String? = null
+    private var traceButtonStampKey: String? = null
     private var autoHidden = false
     private var hiddenByTimer = false
     private var lastRestoreAtMs = 0L
@@ -859,6 +1044,16 @@ internal class ElevateSkipButtonTimer(
                 manualPendingAtMs = 0L
             }
             val stamp = currentInterval()
+            val traceKey = stamp?.let(::stampKey)
+            if (traceKey != traceButtonStampKey) {
+                ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
+                    "BUTTON_INTERVAL_TRANSITION",
+                    "before=$traceButtonStampKey after=$traceKey " +
+                        "positionMs=${fragment.playerView?.player?.currentPosition} " +
+                        "vm=${ElevateSkipTrace.stamps(model.state.stamps)} " +
+                        "published=${ElevateSkipTrace.stamps(selectedStamps())}")
+                traceButtonStampKey = traceKey
+            }
             if (stamp == null || isSuppressed() || stampKey(stamp) == completedManualKey) {
                 if (active) {
                     reset()
@@ -1005,6 +1200,7 @@ internal class ElevateSkipButtonTimer(
         lastRestoreAtMs = 0L
         lastNativeHideAtMs = 0L
         intervalKey = null
+        traceButtonStampKey = null
         indicator?.visibility = View.GONE
     }
 
@@ -1675,12 +1871,12 @@ internal object ElevateSkipRepository {
                 val anime = async {
                     provider(trace, "AnimeSkip") { animeSkip(target, mapping.await(), trace) }
                 }
-                val groups = listOf(intro.await(), anime.await(), ani.await(), theIntro.await())
+                val groups = listOf(intro.await(), ani.await(), anime.await(), theIntro.await())
                 ElevateSkipTrace.log(trace, "MERGE_INPUT",
-                    "priority=IntroDb>AnimeSkip>AniSkip>TheIntroDB " +
+                    "priority=IntroDb>AniSkip>AnimeSkip>TheIntroDB " +
                         "IntroDb=${ElevateSkipTrace.stamps(groups[0])} " +
-                        "AnimeSkip=${ElevateSkipTrace.stamps(groups[1])} " +
-                        "AniSkip=${ElevateSkipTrace.stamps(groups[2])} " +
+                        "AniSkip=${ElevateSkipTrace.stamps(groups[1])} " +
+                        "AnimeSkip=${ElevateSkipTrace.stamps(groups[2])} " +
                         "TheIntroDB=${ElevateSkipTrace.stamps(groups[3])}")
                 val selected = choose(*groups.toTypedArray())
                 ElevateSkipTrace.log(trace, "MERGE_SELECTED",
