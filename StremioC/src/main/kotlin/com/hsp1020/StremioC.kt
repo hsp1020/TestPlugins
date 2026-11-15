@@ -2888,15 +2888,40 @@ open class StremioC(
         return@coroutineScope loadRes
     }
 
+    private fun traceSource(traceId: String, phase: String, details: String) {
+        android.util.Log.i("StremioSourceTrace", "trace=$traceId phase=$phase $details")
+    }
+
+    private fun tracePayload(payload: Map<String, Any?>): String =
+        listOf("tvtype", "type", "id", "imdbId", "imdb_id", "tmdbId",
+            "season", "episode", "imdbSeason", "imdbEpisode", "isKitsu",
+            "isAnime", "anilistId", "aniId", "malId", "kitsuId",
+            "year", "airedYear", "firstAired", "airedDate", "date", "lastSeason",
+            "title", "orgTitle", "jpTitle")
+            .joinToString(" ") { key ->
+                "$key=${if (payload.containsKey(key)) payload[key] else "<absent>"}"
+            }
+
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        val traceId = SystemClock.elapsedRealtimeNanos().toString(36)
         if (!isAddonEnabled()) {
+            traceSource(traceId, "EXIT", "reason=ADDON_DISABLED")
             return false
         }
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) {
+            traceSource(traceId, "EXIT", "reason=INVALID_LOAD_DATA error=${e.javaClass.simpleName}")
             null
         } ?: run {
             return false
         }
+        traceSource(traceId, "ENTRY",
+            "source=CloudStream type=${loadData.type} id=${loadData.id} imdbId=${loadData.imdbId}" +
+            " tmdbId=${loadData.tmdbId} S=${loadData.season} E=${loadData.episode}" +
+            " imdbS=${loadData.imdbSeason} imdbE=${loadData.imdbEpisode}" +
+            " originalAnimeId=${loadData.originalAnimeId} mal=${loadData.malId}" +
+            " anilist=${loadData.anilistId} kitsu=${loadData.kitsuId}" +
+            " aired=${loadData.firstAired} airedYear=${loadData.airedYear}" +
+            " isAnime=${loadData.isAnime} embedded=${!loadData.embeddedStreams.isNullOrBlank()}")
 
         val legacyPrimaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -2924,6 +2949,13 @@ open class StremioC(
 
         val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
+        traceSource(traceId, "NORMALIZE",
+            "primaryId=$primaryId legacyPrimaryId=$legacyPrimaryId globalId=$globalId" +
+            " targetType=$targetType integrationType=$integrationTargetType" +
+            " movie=$actualIsMovie orig=S${loadData.season}:E${loadData.episode}" +
+            " imdb=S${loadData.imdbSeason}:E${loadData.imdbEpisode}" +
+            " global=S$globalSeason:E$globalEpisode" +
+            " globalSource=${if (loadData.imdbSeason != null || loadData.imdbEpisode != null) "IMDB_FIELDS" else "DISPLAY_OR_DEFAULT"}")
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
 
@@ -2940,6 +2972,8 @@ open class StremioC(
                 addon.name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
             }
         }
+        val uniqueLinks = java.util.concurrent.atomic.AtomicInteger(0)
+        val duplicateLinks = java.util.concurrent.atomic.AtomicInteger(0)
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             val sourceKey = link.source
                 .removeSuffix("🧲")
@@ -2950,7 +2984,14 @@ open class StremioC(
                 link.quality = Qualities.Unknown.value
             }
             if (seenLinks.add(Triple(link.url, link.referer, link.headers.toMap()))) {
+                val count = uniqueLinks.incrementAndGet()
+                traceSource(traceId, "LINK_ACCEPT",
+                    "source=${link.source} quality=${link.quality} ordinal=$count")
                 callback(link)
+            } else {
+                val count = duplicateLinks.incrementAndGet()
+                traceSource(traceId, "LINK_DUPLICATE",
+                    "source=${link.source} ordinal=$count")
             }
         }
 
@@ -3114,11 +3155,20 @@ open class StremioC(
                 "$cleanSubtitleBase/subtitles/$requestType/${subId.urlEncode()}.json$subtitleSuffix"
 
             val animeIdRequest = subId.startsWith("anilist:", ignoreCase = true)
-            if (!requestedSubtitleUrls.add(subtitleRequestUrl)) return
+            if (!requestedSubtitleUrls.add(subtitleRequestUrl)) {
+                traceSource(traceId, "STREMIO_SUBTITLE_SKIP",
+                    "type=$requestType id=$subId reason=DUPLICATE")
+                return
+            }
+            traceSource(traceId, "STREMIO_SUBTITLE_REQUEST",
+                "source=${preferredName ?: addonUrl.toHttpUrlOrNull()?.host}" +
+                " type=$requestType id=$subId input=S$season:E$episode group=$group")
             runSuspendCatching {
                 val response = customSession.get(subtitleRequestUrl, timeout = if (animeIdRequest) 50L else 15L)
                 val text = response.text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
+                traceSource(traceId, "STREMIO_SUBTITLE_RESPONSE",
+                    "type=$requestType id=$subId count=${res?.subtitles?.size ?: 0}")
                 val addonSource = preferredName?.takeIf { it.isNotBlank() }
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
@@ -3127,13 +3177,25 @@ open class StremioC(
                         stremioSubtitleFrom(addonUrl, group)(file)
                     }
                 } }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                traceSource(traceId, "STREMIO_SUBTITLE_ERROR",
+                    "type=$requestType id=$subId error=${error.javaClass.simpleName}")
             }
 
         }
 
         coroutineScope {
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
-            val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
+            val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData, traceId) else null
+            traceSource(traceId, "AIO_MAPPING",
+                "input=S${loadData.season}:E${loadData.episode}" +
+                " found=${mapped != null} title=${mapped?.title}" +
+                " imdb=${mapped?.imdbId} imdbS=${mapped?.imdbSeason}" +
+                " tvdbS=${mapped?.tvdbSeason} tmdbS=${mapped?.tmdbSeason}" +
+                " tmdbE=${mapped?.tmdbEpisode} from=${mapped?.tmdbFromEpisode}" +
+                " ranges=${mapped?.tmdbRanges?.size ?: 0}" +
+                " kitsu=${mapped?.kitsuId} mal=${mapped?.malId} anilist=${mapped?.aniListId}")
             mapped
         }
 
@@ -3193,6 +3255,11 @@ open class StremioC(
                 id.isBlank() -> null
                 else -> type to (buildStremioId(type, id, season, episode) ?: id)
             }
+            traceSource(traceId, "STREMIO_ROUTE",
+                "inputType=$type inputId=$id input=S$season:E$episode" +
+                " originalFirst=$originalFirst mappedId=$mappedId" +
+                " outputType=${result?.first} outputId=${result?.second}" +
+                " originalAnimeId=${loadData.originalAnimeId}")
             return result
         }
         // Keep stream callbacks in each addon's response order, regardless of preparation time.
@@ -3240,6 +3307,9 @@ open class StremioC(
             if (!actualIsMovie && (season == null || episode == null)) return@coroutineScope
             val type = if (actualIsMovie) "movie" else "series"
             val id = if (actualIsMovie) imdb else "$imdb:$season:$episode"
+            traceSource(traceId, "CINE_INLINE_ROUTE",
+                "animeRoute=$animeRoute type=$type id=$id" +
+                " payload=${tracePayload(payload)}")
             integrationAddons.filter { it.fromCineStream && it.cineInlineSubtitles }.map { addon ->
                 async(Dispatchers.IO) {
                     cineSubtitleLimiter.withPermit {
@@ -3248,10 +3318,19 @@ open class StremioC(
                         val suffix = addon.url.substringAfter("?", "").takeIf { it.isNotEmpty() }
                             ?.let { "?$it" } ?: ""
                         val requestUrl = "$base/stream/$type/${id.urlEncode()}.json$suffix"
-                        if (!cineSubtitleRequests.add(requestUrl)) return@withPermit
+                        if (!cineSubtitleRequests.add(requestUrl)) {
+                            traceSource(traceId, "CINE_INLINE_SKIP",
+                                "source=${addon.name} id=$id reason=DUPLICATE")
+                            return@withPermit
+                        }
+                        traceSource(traceId, "CINE_INLINE_REQUEST",
+                            "source=${addon.name} type=$type id=$id")
                         runSuspendCatching {
                             val text = customSession.get(requestUrl, timeout = 30L).text
                             val response = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                            traceSource(traceId, "CINE_INLINE_RESPONSE",
+                                "source=${addon.name} id=$id streams=${response?.streams?.size ?: 0}" +
+                                " subtitles=${response?.streams?.sumOf { it.subtitles.size } ?: 0}")
                             response?.streams.orEmpty().forEach { stream ->
                                 if (stream.url == null && stream.infoHash == null &&
                                     stream.externalUrl == null && stream.ytId == null) return@forEach
@@ -3262,6 +3341,10 @@ open class StremioC(
                                     }
                                 }
                             }
+                        }.onFailure { error ->
+                            if (error is CancellationException) throw error
+                            traceSource(traceId, "CINE_INLINE_ERROR",
+                                "source=${addon.name} id=$id error=${error.javaClass.simpleName}")
                         }
                     }
                 }
@@ -3279,9 +3362,12 @@ open class StremioC(
                             if (stream.name == null && stream.title == null && stream.description == null)
                                 stream.copy(title = loadData.embeddedStreamTitle) else stream
                         }
-                        emitOrderedAddonStreams(namedStreams, name,
+                        val count = emitOrderedAddonStreams(namedStreams, name,
                             stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl),
                             "embedded", addonUrl = currentMainUrl)
+                        traceSource(traceId, "STREMIO_EMBEDDED",
+                            "source=$name streams=${namedStreams.size} emitted=$count" +
+                            " input=S${loadData.season}:E${loadData.episode}")
                     }
                 }
             },
@@ -3290,15 +3376,28 @@ open class StremioC(
                 if (cleanBaseUrl.isNotBlank() && request != null) {
                     suspend fun fetchMainStreams(route: Pair<String, String>): Int =
                         runSuspendCatching {
+                            val startedAt = SystemClock.elapsedRealtime()
+                            traceSource(traceId, "STREMIO_MAIN_REQUEST",
+                                "source=$name type=${route.first} id=${route.second}" +
+                                " original=S${loadData.season}:E${loadData.episode}")
                             val streamRequestUrl = "$cleanBaseUrl/stream/${route.first}/${route.second.urlEncode()}.json$querySuffix"
                             val response = customSession.get(streamRequestUrl, timeout = 30L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                            emitOrderedAddonStreams(res?.streams, name,
+                            val emitted = emitOrderedAddonStreams(res?.streams, name,
                                 stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl),
                                 "main", addonUrl = currentMainUrl)
-                        }
-                            .getOrDefault(0)
+                            traceSource(traceId, "STREMIO_MAIN_RESPONSE",
+                                "source=$name type=${route.first} id=${route.second}" +
+                                " streams=${res?.streams?.size ?: 0} emitted=$emitted" +
+                                " elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+                            emitted
+                        }.onFailure { error ->
+                            if (error is CancellationException) throw error
+                            traceSource(traceId, "STREMIO_MAIN_ERROR",
+                                "source=$name type=${route.first} id=${route.second}" +
+                                " error=${error.javaClass.simpleName}")
+                        }.getOrDefault(0)
 
                     val originalLinks = fetchMainStreams(request)
                     if (targetType != "movie" && targetType != "series" && originalLinks == 0) {
@@ -3308,6 +3407,9 @@ open class StremioC(
                             mappedAnimeStremioId()?.let { "series" to it }
                         }
                         if (fallbackRequest != null && fallbackRequest != request) {
+                            traceSource(traceId, "STREMIO_MAIN_FALLBACK",
+                                "from=${request.first}:${request.second}" +
+                                " to=${fallbackRequest.first}:${fallbackRequest.second}")
                             fetchMainStreams(fallbackRequest)
                         }
                     }
@@ -3345,6 +3447,10 @@ open class StremioC(
                                 runAllAsync({
                                     if (request != null && base.isNotBlank()) {
                                         suspend fun fetchExtraStreams(route: Pair<String, String>): Int = runSuspendCatching {
+                                            val startedAt = SystemClock.elapsedRealtime()
+                                            traceSource(traceId, "STREMIO_EXTRA_REQUEST",
+                                                "source=$source type=${route.first} id=${route.second}" +
+                                                " original=S${loadData.season}:E${loadData.episode}")
                                             val requestUrl = "$base/stream/${route.first}/${route.second.urlEncode()}.json$suffix"
                                             val response = customSession.get(requestUrl, timeout = 30L)
                                             val text = response.text
@@ -3352,7 +3458,18 @@ open class StremioC(
                                             val emitted = emitOrderedAddonStreams(streams?.streams, source,
                                                 stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
                                                 "extra", addon.name, addonUrl, streamsAddonEnabled, subtitlesAddonEnabled)
-                                            if (streamsAddonEnabled) emitted else streams?.streams?.count { it.subtitles.isNotEmpty() } ?: 0
+                                            val resultCount = if (streamsAddonEnabled) emitted
+                                                else streams?.streams?.count { it.subtitles.isNotEmpty() } ?: 0
+                                            traceSource(traceId, "STREMIO_EXTRA_RESPONSE",
+                                                "source=$source type=${route.first} id=${route.second}" +
+                                                " streams=${streams?.streams?.size ?: 0} emitted=$resultCount" +
+                                                " elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+                                            resultCount
+                                        }.onFailure { error ->
+                                            if (error is CancellationException) throw error
+                                            traceSource(traceId, "STREMIO_EXTRA_ERROR",
+                                                "source=$source type=${route.first} id=${route.second}" +
+                                                " error=${error.javaClass.simpleName}")
                                         }.getOrDefault(0)
                                         val originalLinks = fetchExtraStreams(request)
                                         if (extraType != "movie" && extraType != "series" && originalLinks == 0) {
@@ -3361,7 +3478,12 @@ open class StremioC(
                                             } else {
                                                 mappedAnimeStremioId()?.let { "series" to it }
                                             }
-                                            if (fallback != null && fallback != request) fetchExtraStreams(fallback)
+                                            if (fallback != null && fallback != request) {
+                                                traceSource(traceId, "STREMIO_EXTRA_FALLBACK",
+                                                    "source=$source from=${request.first}:${request.second}" +
+                                                    " to=${fallback.first}:${fallback.second}")
+                                                fetchExtraStreams(fallback)
+                                            }
                                         }
                                     }
                                 }, {
@@ -3392,7 +3514,7 @@ open class StremioC(
                 }
             },
             {
-                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred, ::fetchCineInlineSubtitles)
+                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred, ::fetchCineInlineSubtitles, traceId)
             },
             {
                 invokeTmdbStremioIntegrationFallback(
@@ -3403,11 +3525,12 @@ open class StremioC(
                     globalEpisode,
                     { sub, url, group -> stremioSubtitleFrom(url, group)(sub) },
                     { sub, url, group -> extractorSubtitleFrom(url, group)(sub) },
-                    wrappedCallback
+                    wrappedCallback,
+                    traceId
                 )
             },
-            { 
-                invokeStreamPlay(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(2), wrappedCallback, mappingDeferred)
+            {
+                invokeStreamPlay(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(2), wrappedCallback, mappingDeferred, traceId)
             },
             {
                 if (isIntegrationEnabled("vixsrc_integration_enabled")) {
@@ -3417,6 +3540,7 @@ open class StremioC(
         )
         mappingDeferred.cancel()
         }
+        traceSource(traceId, "EXIT", "reason=COMPLETE uniqueLinks=$uniqueLinks duplicateLinks=$duplicateLinks")
         return true
     }
 
@@ -3475,7 +3599,9 @@ open class StremioC(
         return episodes
     }
 
-    private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
+    private suspend fun fetchAnimeSeasonMapping(
+        loadData: LoadData, traceId: String? = null
+    ): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
             ?: loadData.anilistId?.takeIf { it > 0 }
@@ -3515,6 +3641,10 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
+        if (traceId != null) traceSource(traceId, "AIO_QUERY",
+            "idType=${query.substringBefore('&')} requested=S$season:E$episode" +
+            " byKitsu=$byKitsu byMal=$byMal byAniList=$byAniList" +
+            " originalAnimeId=${loadData.originalAnimeId}")
         val memoryAnime = stremioCacheMemoryRead(animeMappingCache[query], METADATA_CACHE_TTL)
         val cachedAnime = memoryAnime ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
@@ -3549,6 +3679,8 @@ open class StremioC(
         for (host in hosts) {
             var acceptedResponse = false
             val requestStarted = SystemClock.elapsedRealtime()
+            if (traceId != null) traceSource(traceId, "AIO_HOST_REQUEST",
+                "host=$host season=$season episode=$episode")
             val outcome = runSuspendCatching {
             val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
@@ -3644,6 +3776,12 @@ open class StremioC(
             val mapping = outcome.getOrNull()
             if (mapping == null) android.util.Log.i("MetaEpisodeMap",
                 "phase=${if (acceptedResponse) "AIO_ACCEPT_UNUSABLE" else "AIO_RETRY"} season=$season host=$host reason=${if (acceptedResponse) "ID_OR_MAPPING_UNUSABLE" else if (outcome.isFailure) "HTTP_OR_PARSE_ERROR" else "INVALID_RESPONSE"} elapsedMs=${SystemClock.elapsedRealtime() - requestStarted}")
+            if (traceId != null) traceSource(traceId, "AIO_HOST_RESULT",
+                "host=$host accepted=$acceptedResponse mapped=${mapping != null}" +
+                " season=$season sourceTmdbS=${mapping?.tmdbSeason}" +
+                " ranges=${mapping?.tmdbRanges?.size ?: 0}" +
+                " elapsedMs=${SystemClock.elapsedRealtime() - requestStarted}" +
+                " error=${outcome.exceptionOrNull()?.javaClass?.simpleName}")
             if (acceptedResponse && mapping == null) return null
             if (mapping != null) {
                 android.util.Log.i("MetaEpisodeMap", "phase=AIO_ACCEPT season=$season host=$host ranges=${mapping.tmdbRanges.size} kitsu=${mapping.kitsuId} elapsedMs=${SystemClock.elapsedRealtime() - requestStarted}")
@@ -3906,14 +4044,18 @@ open class StremioC(
         globalEpisode: Int?,
         stremioSubtitleCallback: (SubtitleFile, String, Int) -> Unit,
         extractorSubtitleCallback: (SubtitleFile, String, Int) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        traceId: String
     ) {
         if (targetType != "movie" && targetType != "series") {
+            traceSource(traceId, "STREMIO_TMDB_FALLBACK_SKIP", "reason=TYPE type=$targetType")
             return
         }
 
         val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode)
         if (!media.imdbId.isNullOrBlank()) {
+            traceSource(traceId, "STREMIO_TMDB_FALLBACK_SKIP",
+                "reason=IMDB_PRESENT id=${media.imdbId} input=S${loadData.season}:E${loadData.episode}")
             return
         }
 
@@ -3928,6 +4070,8 @@ open class StremioC(
             "tmdb:$tmdbId"
         }
         val encodedId = stremioId.urlEncode()
+        traceSource(traceId, "STREMIO_TMDB_FALLBACK_ROUTE",
+            "type=$targetType id=$stremioId source=S${loadData.season}:E${loadData.episode}")
         val addons = getIntegrationStremioAddons()
         if (addons.isEmpty()) return
 
@@ -3943,6 +4087,10 @@ open class StremioC(
                             ?.let { "?$it" }
                             ?: ""
 
+                        val startedAt = SystemClock.elapsedRealtime()
+                        traceSource(traceId, "STREMIO_TMDB_ADDON_REQUEST",
+                            "source=${addon.name} category=${if (addon.subtitleOnly) "subtitle" else "stream"}" +
+                            " type=$targetType id=$stremioId")
                         if (addon.subtitleOnly) {
                             val requestUrl = "$cleanBaseUrl/subtitles/$targetType/${encodedId}.json$querySuffix"
                             val text = customSession.get(requestUrl, timeout = 15L).text
@@ -3952,6 +4100,10 @@ open class StremioC(
                                     stremioSubtitleCallback(subFile, addon.url, if (addon.fromCineStream) 1 else 2)
                                 }
                             }
+                            traceSource(traceId, "STREMIO_TMDB_ADDON_RESPONSE",
+                                "source=${addon.name} type=$targetType id=$stremioId" +
+                                " subtitles=${res?.subtitles?.size ?: 0}" +
+                                " elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                         } else {
                             val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
                             val response = customSession.get(requestUrl, timeout = 30L)
@@ -3971,9 +4123,16 @@ open class StremioC(
                                     addonUrl = addon.url
                                 )
                             }
+                            traceSource(traceId, "STREMIO_TMDB_ADDON_RESPONSE",
+                                "source=${addon.name} type=$targetType id=$stremioId" +
+                                " streams=${res?.streams?.size ?: 0}" +
+                                " elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                         }
                     }.onFailure { error ->
                         if (error is CancellationException) throw error
+                        traceSource(traceId, "STREMIO_TMDB_ADDON_ERROR",
+                            "source=${addon.name} type=$targetType id=$stremioId" +
+                            " error=${error.javaClass.simpleName}")
                     }
                 }
             }.awaitAll()
@@ -3990,19 +4149,35 @@ open class StremioC(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
         mappingDeferred: Deferred<AnimeSeasonMapping?>?,
-        inlineSubtitleLoader: suspend (Map<String, Any?>) -> Unit
+        inlineSubtitleLoader: suspend (Map<String, Any?>) -> Unit,
+        traceId: String
     ) {
         if (!isIntegrationEnabled("cinestream_integration_enabled")) {
+            traceSource(traceId, "CINE_SKIP", "reason=DISABLED")
             return
         }
         if (targetType != "movie" && targetType != "series") {
+            traceSource(traceId, "CINE_SKIP", "reason=TYPE type=$targetType")
             return
         }
 
         try {
-            val cineStreamProvider = getCineStreamProvider() ?: return
+            val cineStreamProvider = getCineStreamProvider() ?: run {
+                traceSource(traceId, "CINE_SKIP", "reason=PROVIDER_MISSING")
+                return
+            }
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await())
+            traceSource(traceId, "CINE_MEDIA",
+                "input=S${loadData.season}:E${loadData.episode}" +
+                " imdbInput=S${loadData.imdbSeason}:E${loadData.imdbEpisode}" +
+                " global=S$globalSeason:E$globalEpisode" +
+                " mapped=${media.hasSeasonMapping}" +
+                " resolved=S${media.season}:E${media.episode}" +
+                " imdb=S${media.imdbSeason}:E${media.imdbEpisode}" +
+                " tmdb=S${media.tmdbSeason}:E${media.tmdbEpisode}" +
+                " imdbId=${media.imdbId} tmdbId=${media.tmdbId}" +
+                " mal=${media.malId} anilist=${media.aniListId} kitsu=${media.kitsuId}")
             val linksFound = java.util.concurrent.atomic.AtomicInteger(0)
             val trackedCallback: (ExtractorLink) -> Unit = { link ->
                 linksFound.incrementAndGet()
@@ -4016,15 +4191,27 @@ open class StremioC(
                 try {
                     val payload = cinePayload(loadData, targetType, media, animeRoute,
                         japaneseTitle, standardImdbRoute)
+                    val route = if (animeRoute) "ANIME" else if (standardImdbRoute) "IMDB" else "STANDARD"
+                    val startedAt = SystemClock.elapsedRealtime()
+                    traceSource(traceId, "CINE_REQUEST",
+                        "route=$route japaneseTitle=$japaneseTitle ${tracePayload(payload)}")
                     supervisorScope {
                         launch { inlineSubtitleLoader(payload) }
                         withIntegratedSource("cine") { cineStreamProvider.loadLinks(
                             payload.toJson(), isCasting, subtitleCallback, trackedCallback
                         ) }
                     }
+                    traceSource(traceId, "CINE_DONE",
+                        "route=$route japaneseTitle=$japaneseTitle" +
+                        " totalLinks=${linksFound.get()} elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                 } catch (e: CancellationException) {
+                    traceSource(traceId, "CINE_CANCEL",
+                        "animeRoute=$animeRoute standardImdbRoute=$standardImdbRoute")
                     throw e
                 } catch (e: Exception) {
+                    traceSource(traceId, "CINE_ERROR",
+                        "animeRoute=$animeRoute standardImdbRoute=$standardImdbRoute" +
+                        " error=${e.javaClass.simpleName}")
                 }
             }
 
@@ -4060,8 +4247,11 @@ open class StremioC(
                 withTimeoutOrNull(60000L) { callCine(animeRoute = false) }
             }
         } catch (e: CancellationException) {
+            traceSource(traceId, "CINE_CANCEL", "stage=INTEGRATION")
             throw e
         } catch (e: Exception) {
+            traceSource(traceId, "CINE_ERROR",
+                "stage=INTEGRATION error=${e.javaClass.simpleName}")
         }
     }
 
@@ -4074,12 +4264,15 @@ open class StremioC(
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        mappingDeferred: Deferred<AnimeSeasonMapping?>?
+        mappingDeferred: Deferred<AnimeSeasonMapping?>?,
+        traceId: String
     ) {
         if (!isIntegrationEnabled("streamplay_integration_enabled")) {
+            traceSource(traceId, "STREAMPLAY_SKIP", "reason=DISABLED")
             return
         }
         if (targetType != "movie" && targetType != "series") {
+            traceSource(traceId, "STREAMPLAY_SKIP", "reason=TYPE type=$targetType")
             return
         }
 
@@ -4087,12 +4280,42 @@ open class StremioC(
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await())
             val streamPlayProvider = getStreamPlayProvider()
+            traceSource(traceId, "STREAMPLAY_PROVIDER",
+                "general=${streamPlayProvider != null} isAnime=${media.isAnime}" +
+                " hasMapping=${media.hasSeasonMapping} source=S${loadData.season}:E${loadData.episode}")
+            traceSource(traceId, "STREAMPLAY_MEDIA",
+                "input=S${loadData.season}:E${loadData.episode}" +
+                " imdbInput=S${loadData.imdbSeason}:E${loadData.imdbEpisode}" +
+                " global=S$globalSeason:E$globalEpisode mapped=${media.hasSeasonMapping}" +
+                " resolved=S${media.season}:E${media.episode}" +
+                " imdb=S${media.imdbSeason}:E${media.imdbEpisode}" +
+                " tmdb=S${media.tmdbSeason}:E${media.tmdbEpisode}" +
+                " imdbId=${media.imdbId} tmdbId=${media.tmdbId}" +
+                " mal=${media.malId} anilist=${media.aniListId} kitsu=${media.kitsuId}")
+            suspend fun callStreamPlay(route: String, payload: Map<String, Any?>) {
+                val provider = streamPlayProvider ?: return
+                val startedAt = SystemClock.elapsedRealtime()
+                traceSource(traceId, "STREAMPLAY_REQUEST",
+                    "route=$route ${tracePayload(payload)}")
+                try {
+                    withIntegratedSource("streamplay") {
+                        provider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
+                    }
+                    traceSource(traceId, "STREAMPLAY_DONE",
+                        "route=$route elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+                } catch (e: CancellationException) {
+                    traceSource(traceId, "STREAMPLAY_CANCEL", "route=$route")
+                    throw e
+                } catch (e: Exception) {
+                    traceSource(traceId, "STREAMPLAY_ERROR",
+                        "route=$route error=${e.javaClass.simpleName}")
+                    throw e
+                }
+            }
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(60000L) {
-                        withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media).toJson(),
-                            isCasting, subtitleCallback, callback
-                        ) }
+                        callStreamPlay("STANDARD", streamPlayPayload(loadData, targetType, media))
                     }
                 }
                 return
@@ -4127,12 +4350,20 @@ open class StremioC(
                                 "isCartoon" to loadData.isCartoon
                             )
                             withTimeoutOrNull(60000L) {
+                                val startedAt = SystemClock.elapsedRealtime()
+                                traceSource(traceId, "STREAMPLAY_ANIME_REQUEST",
+                                    "route=DEDICATED ${tracePayload(animePayload)}")
                                 withIntegratedSource("anime") { animeProvider.loadLinks(animePayload.toJson(), isCasting, subtitleCallback, callback
                                 ) }
+                                traceSource(traceId, "STREAMPLAY_ANIME_DONE",
+                                    "route=DEDICATED elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                             }
                         } catch (e: CancellationException) {
+                            traceSource(traceId, "STREAMPLAY_ANIME_CANCEL", "route=DEDICATED")
                             throw e
                         } catch (e: Exception) {
+                            traceSource(traceId, "STREAMPLAY_ANIME_ERROR",
+                                "route=DEDICATED error=${e.javaClass.simpleName}")
                         }
                     }
                 }
@@ -4140,9 +4371,7 @@ open class StremioC(
                     val anime = async(Dispatchers.IO) {
                         try {
                             if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
-                                withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media).toJson(),
-                                    isCasting, subtitleCallback, callback
-                                ) }
+                                callStreamPlay("ANIME", streamPlayPayload(loadData, targetType, media))
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -4155,11 +4384,8 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             try {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(
-                                            loadData, targetType, media, generalAnimeRoute = true
-                                        ).toJson(),
-                                        isCasting, subtitleCallback, callback
-                                    ) }
+                                    callStreamPlay("TMDB", streamPlayPayload(
+                                        loadData, targetType, media, generalAnimeRoute = true))
                                 }
                             } catch (e: CancellationException) {
                                 throw e
@@ -4173,10 +4399,8 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             runSuspendCatching {
                                 withTimeoutOrNull(60000L) {
-                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(streamPlayPayload(loadData, targetType, media,
-                                            generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
-                                        isCasting, subtitleCallback, callback
-                                    ) }
+                                    callStreamPlay("IMDB", streamPlayPayload(loadData, targetType, media,
+                                        generalAnimeRoute = true, imdbOnlyRoute = true))
                                 }
                             }
                         }
@@ -4188,8 +4412,11 @@ open class StremioC(
                 dedicatedAnime?.await()
             }
         } catch (e: CancellationException) {
+            traceSource(traceId, "STREAMPLAY_CANCEL", "stage=INTEGRATION")
             throw e
         } catch (e: Exception) {
+            traceSource(traceId, "STREAMPLAY_ERROR",
+                "stage=INTEGRATION error=${e.javaClass.simpleName}")
         }
     }
 
@@ -5844,6 +6071,12 @@ open class StremioC(
             )
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
 
+            if (displaySeason >= 21) android.util.Log.i("StremioSourceTrace",
+                "phase=EPISODE_CREATE id=$id video=S${seasonNumber}:E${episode ?: number}" +
+                    " display=S$displaySeason:E$displayEpisode" +
+                    " imdb=S$imdbSeason:E$imdbEpisode originalAnimeId=$originalAnimeId" +
+                    " tmdbKey=$tmdbEpisodeKey mappedTmdbOnly=$mappedTmdbOnly" +
+                    " aired=$finalAirDate isAnime=$isAnime")
             return provider.newEpisode(LoadData(
                 type = type, 
                 id = id, 

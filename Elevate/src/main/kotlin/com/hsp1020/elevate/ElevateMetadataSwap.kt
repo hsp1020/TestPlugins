@@ -792,9 +792,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     if (list === swappedEpisodes) return@Observer
                     if (rebuildingHost || aioRebuilt) {
                         // Preserve the host's rebuilt episode list across sync/PiP refreshes.
+                        traceEpisodeIndices("REBUILT", list)
                         swappedEpisodes = list
                         return@Observer
                     }
+                    traceEpisodeIndices("ORIGINAL", list)
                     originalEpisodes = list
                     if (pendingPage != null || metadata != null) {
                         val masked = list.map { it.copy(poster = null) }
@@ -813,6 +815,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val loading = Resource.Loading(page.url)
             pendingPage = loading
             live.value = loading
+        }
+
+        private fun traceEpisodeIndices(stage: String, items: List<ResultEpisode>) {
+            val pageKey = original?.url?.hashCode()
+            items.forEachIndexed { index, episode ->
+                if ((episode.seasonIndex ?: -1) >= 21)
+                    Log.i("StremioSourceTrace",
+                        "phase=ELEVATE_EPISODE_INDEX stage=$stage page=$pageKey" +
+                        " index=$index season=${episode.season} seasonIndex=${episode.seasonIndex}" +
+                        " episode=${episode.episode}")
+            }
         }
 
         private fun nativeEpisodes(items: List<ResultEpisode>) {
@@ -1423,6 +1436,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     )
                 }
                 swappedEpisodes = result
+                traceEpisodeIndices("SWAPPED", result)
                 nativeEpisodes(result)
                 Log.i("ElevateMetaTiming",
                     "phase=EPISODES_DONE key=$traceKey mode=TMDB episodes=${result.size} tmdbEpisodes=${tmdbEpisodes.size} totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
