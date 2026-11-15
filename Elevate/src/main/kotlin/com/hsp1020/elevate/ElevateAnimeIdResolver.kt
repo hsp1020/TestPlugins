@@ -229,7 +229,7 @@ internal object ElevateAnimeIdResolver {
                             buildMap<Pair<Int, Int>, Int> {
                                 if (videos != null) for (i in 0 until videos.length()) {
                                     val video = videos.optJSONObject(i) ?: continue
-                                    val season = video.optInt("season").takeIf { it > 0 } ?: continue
+                                    val season = video.optInt("season").takeIf { it >= 0 } ?: continue
                                     val number = video.optInt("episode", video.optInt("number"))
                                         .takeIf { it > 0 } ?: continue
                                     val absolute = video.optInt("absoluteEpisode")
@@ -303,7 +303,8 @@ internal object ElevateAnimeIdResolver {
                                   "phase=AIO_RETRY season=$season host=$host reason=HTTP_OR_PARSE_ERROR elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
                               continue
                           }
-                        if (!root.optBoolean("success")) {
+                        if (!root.optBoolean("success") ||
+                            root.optString("detail") != "OK") {
                             if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
                                 "phase=AIO_RETRY season=$season host=$host reason=API_UNSUCCESSFUL elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
                             continue
@@ -314,15 +315,14 @@ internal object ElevateAnimeIdResolver {
                             continue
                         }
                         val ids = data.optJSONObject("mappings")
-                        if (ids == null) {
-
+                        if (ids == null || ids.length() == 0) {
                             continue
                         }
-                        // Match the exact IMDb identity and season validation in StremioC.
+                        // An OK response ends host retries; mismatched IDs cannot be used.
                         if (ids.optString(field) != id) {
                             if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
-                                "phase=AIO_RETRY season=$season host=$host reason=ID_MISMATCH")
-                            continue
+                                "phase=AIO_ACCEPT_UNUSABLE season=$season host=$host reason=ID_MISMATCH")
+                            break
                         }
                         val ranges = data.optJSONArray("episodeMappings")?.let { entries ->
                             (0 until entries.length()).mapNotNull { index ->
@@ -335,17 +335,18 @@ internal object ElevateAnimeIdResolver {
                                 TmdbRange(tmdbSeason, start, end)
                             }
                         }.orEmpty()
-                        if (field == "imdbId" && season != null && season > 1) {
-                            val mappedSeason = ElevateWatchHistoryRules.preferredSeason(
+                        val mappedSeason = if (field == "imdbId" && season != null && season > 1)
+                            ElevateWatchHistoryRules.preferredSeason(
                                 listOf("imdb", "tvdb", "trakt", "tmdb").map { source ->
                                     data.optJSONObject(source)?.optInt("seasonNumber")
                                         ?.takeIf { it > 0 }
-                                })
-                            if (mappedSeason != season && !(allowSplitSeasons && ranges.isNotEmpty())) {
-                                if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
-                                    "phase=AIO_REJECT season=$season mappedSeason=$mappedSeason reason=SEASON_MISMATCH_NO_RANGES host=$host")
-                                continue
-                            }
+                                }) else null
+                        val seasonMismatch = field == "imdbId" && season != null &&
+                            season > 1 && mappedSeason != season
+                        if (seasonMismatch) {
+                            if (!allowSplitSeasons) break
+                            android.util.Log.i("MetaEpisodeMap",
+                                "phase=AIO_SEASON_UNRESOLVED season=$season mappedSeason=$mappedSeason ranges=${ranges.size} host=$host")
                         }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()
@@ -356,8 +357,9 @@ internal object ElevateAnimeIdResolver {
                         val hasTrackingIds = positive("simklId") != null ||
                             positive("thetvdbId") != null
                         if (!hasAnimeIds && !(allowTrackerOnly && hasTrackingIds)) {
-
-                            continue
+                            if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                                "phase=AIO_ACCEPT_UNUSABLE season=$season host=$host reason=NO_ANIME_IDS")
+                            break
                         }
                         val episodeInfo = listOf("imdb", "tvdb", "trakt", "tmdb")
                             .mapNotNull(data::optJSONObject).firstOrNull {
@@ -371,10 +373,14 @@ internal object ElevateAnimeIdResolver {
                             episodeInfo?.optInt("fromEpisode")?.takeIf { it > 0 },
                             positive("simklId"), positive("thetvdbId"),
                             data.optJSONObject("tvdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
-                            data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
+                            data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf {
+                                it > 0 && !seasonMismatch
+                            },
                             data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("imdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
-                            data.optJSONObject("tmdb")?.optInt("fromEpisode")?.takeIf { it > 0 },
+                            data.optJSONObject("tmdb")?.optInt("fromEpisode")?.takeIf {
+                                it > 0 && !seasonMismatch
+                            },
                             ranges
                         )
                         if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",

@@ -1092,9 +1092,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }.distinct()
                 val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
                     else null
+                // StremioC already exposes Season S as its sole named season.
+                val specialSeason = if (completeAio) 0 else
+                    (nativeResponse as? TvSeriesLoadResponse)?.seasonNames
+                        ?.singleOrNull()?.season?.takeIf {
+                            original?.syncData?.get("metadata_swap_allowed") == "true"
+                        }
                 val numbersBySeason = if (completeAio)
                     source.videos.mapNotNull { v ->
-                        val season = v.season?.takeIf { it > 0 } ?: return@mapNotNull null
+                        val season = v.season?.takeIf { it >= 0 } ?: return@mapNotNull null
                         val number = v.number?.takeIf { it > 0 } ?: return@mapNotNull null
                         season to number
                     }.groupBy({ it.first }, { it.second })
@@ -1166,6 +1172,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 } }
                         }.toSet() else emptySet()
                     val requests = seasons.flatMap { sourceSeason ->
+                        val isSpecial = sourceSeason == specialSeason
                         val titleSeason = ids.original?.substringBefore(':') in
                             setOf("kitsu", "mal", "anilist") &&
                             seasons.size == 1 && sourceSeason == 1
@@ -1173,22 +1180,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             titleSeason || it.matchesSeason(sourceSeason)
                         }
                         val mapping = direct ?: seasonMappings[sourceSeason]
-                        val id = mapping?.tmdb?.takeIf { mapping.tmdbSeason != null ||
-                            mapping.tmdbRanges.isNotEmpty() }
-                            ?: detailId
+                        val id = if (isSpecial) detailId else
+                            mapping?.tmdb?.takeIf { mapping.tmdbSeason != null ||
+                                mapping.tmdbRanges.isNotEmpty() } ?: detailId
                         if (id == null) {
                             if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
                                 "phase=TMDB_SEASON_SKIP appSeason=$sourceSeason reason=NO_TMDB_ID")
                             return@flatMap emptyList<Triple<Int, Int, String>>()
                         }
-                        val requested = mapping?.tmdbSeason ?: sourceSeason
+                        val requested = if (isSpecial) 0 else mapping?.tmdbSeason ?: sourceSeason
                         val known = if (id == detailId) source.tmdbSeasons else emptyMap()
                         val only = known.keys.filter { it > 0 }.singleOrNull()
-                        val actual = if (anime && known.isNotEmpty() &&
+                        val actual = if (!isSpecial && anime && known.isNotEmpty() &&
                             requested !in known && only != null) only else requested
                         val absolutes = numbersBySeason[sourceSeason].orEmpty()
                             .mapNotNull { absoluteByEpisode[sourceSeason to it] }
-                        val ranges = mapping?.tmdbRanges.orEmpty()
+                        val ranges = if (isSpecial) emptyList() else mapping?.tmdbRanges.orEmpty()
                         val mappedSeasons = ranges.filter { range ->
                             absolutes.any { it >= range.start &&
                                 (range.end == null || it <= range.end) }
@@ -1198,8 +1205,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             absolutes.all { n -> ranges.any { r ->
                                 n >= r.start && (r.end == null || n <= r.end)
                             } }
-                        val targets = if (fullyMapped && mappedSeasons.isNotEmpty())
-                            mappedSeasons else (mappedSeasons + actual).distinct()
+                        val targets = if (isSpecial) listOf(0)
+                            else if (fullyMapped && mappedSeasons.isNotEmpty())
+                                mappedSeasons else (mappedSeasons + actual).distinct()
                         targets.filter { known.isEmpty() || it in known }.map {
                             Triple(sourceSeason, it, id)
                         }
@@ -1247,6 +1255,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val titleKitsu = mutableMapOf<String, Map<Int, Int>>()
                     for (appSeason in seasons.sorted()) {
                         if (appSeason in completeSourceSeasons) continue
+                        val isSpecial = appSeason == specialSeason
                         val targets = responses.filter { it.first == appSeason }
                             .associate { it.second to it.third }
                         val mapping = directMapping?.takeIf {
@@ -1268,7 +1277,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     n >= it.start && (it.end == null || n <= it.end)
                                 }
                             }
-                            val aioTarget = range?.let { it.season to absolute!! }
+                            val aioTarget = if (isSpecial) 0 to number else
+                                range?.let { it.season to absolute!! }
                                 ?: mapping?.tmdbSeason?.let {
                                     it to ((mapping.tmdbFromEpisode ?: 1) + number - 1)
                                 }
@@ -1288,7 +1298,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     imdbKitsu = ElevateAnimeIdResolver.kitsuImdbAbsolutes(imdb)
                                     imdbKitsuLoaded = true
                                 }
-                                kitsuAbsolute = (if (imdb != null) imdbKitsu[key] else null)
+                                kitsuAbsolute = (if (imdb != null)
+                                    imdbKitsu[if (isSpecial) 0 to number else key] else null)
                                     ?: if (seasons.size == 1 && kitsuId != null) {
                                         if (!titleKitsu.containsKey(kitsuId))
                                             titleKitsu[kitsuId] =
@@ -1325,7 +1336,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 }
                             }
                             if (appSeason >= 21) Log.i("MetaEpisodeMap",
-                                "phase=TMDB_MAP app=S$appSeason:E$number absolute=$absolute" +
+                                "phase=TMDB_MAP app=S$appSeason:E$number special=$isSpecial absolute=$absolute" +
                                     " aio=$aioTarget dateDiff=$dateDiff aioRejected30d=$dateRejected" +
                                     " kitsuAbsolute=$kitsuAbsolute kitsu=$kitsuKey" +
                                     " airdateCandidates=${airDateCandidates.size} selected=$mapped" +
