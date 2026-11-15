@@ -84,13 +84,49 @@ internal class ElevateSkipController(private val application: Application) :
         suppressCoreSkip()
         if (fragment?.playerView?.player !== mediaPlayer) refresh()
     }
+    // Only check after playback transitions; no permanent 150ms polling.
+    private var guardChecksRemaining = 0
     private val skipGuardTick = object : Runnable {
         override fun run() {
             if (fragment == null || model == null) return
             suppressCoreSkip()
             reconcileSelected()
-            main.postDelayed(this, 150L)
+            if (guardChecksRemaining > 0) {
+                val delay = when (guardChecksRemaining--) {
+                    3 -> 200L
+                    2 -> 800L
+                    else -> 3_000L
+                }
+                main.postDelayed(this, delay)
+            }
         }
+    }
+    private fun armSkipGuard() {
+        if (fragment == null || model == null) return
+        guardChecksRemaining = 3
+        main.removeCallbacks(skipGuardTick)
+        main.post(skipGuardTick)
+    }
+
+    // CloudStream loadLink() can clear the engine's stamps while VM stamps remain
+    // unchanged. Restore them once after the new media item is ready.
+    private var restorePlayerOnReady = false
+    private val restorePlayerStamps = Runnable { reapplyPlayerStamps() }
+    private fun requestPlayerStampRestore() {
+        restorePlayerOnReady = true
+        main.removeCallbacks(restorePlayerStamps)
+        main.post(restorePlayerStamps)
+    }
+    private fun reapplyPlayerStamps() {
+        if (!restorePlayerOnReady || !publishedReady || activeKey == null) return
+        val host = fragment ?: return
+        val vm = model ?: return
+        if (vm.state.instance != activeInstance ||
+            skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode ||
+            mediaPlayer?.playbackState != Media3Player.STATE_READY) return
+        reconcileSelected()
+        if (published.isNotEmpty()) host.player.addTimeStamps(published)
+        restorePlayerOnReady = false
     }
     // Nuvio Mobile-style: hide before the first READY, not during rebuffering.
     private var initialLoadCompleted = false
@@ -100,6 +136,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var job: Job? = null
     private var generation = 0
     private var activeKey: String? = null
+    private var activeDuration = 0L
     private var activeInstance = -1
     private var activeEpisode = -1
     private var custom = emptyList<VideoSkipStamp>()
@@ -216,9 +253,13 @@ internal class ElevateSkipController(private val application: Application) :
     ) { proxy, method, args ->
         when (method.name) {
             "onPlaybackStateChanged", "onIsPlayingChanged" -> {
-
                 suppressCoreSkip()
                 refresh()
+                if (method.name == "onPlaybackStateChanged" &&
+                    mediaPlayer?.playbackState == Media3Player.STATE_READY) {
+                    armSkipGuard()
+                    if (restorePlayerOnReady) main.post(restorePlayerStamps)
+                }
                 skipButtonTimer?.refreshVisibility()
                 null
             }
@@ -238,8 +279,11 @@ internal class ElevateSkipController(private val application: Application) :
                 null
             }
             "onMediaItemTransition", "onTimelineChanged", "onPlaybackParametersChanged" -> {
-
                 suppressCoreSkip()
+                if (method.name != "onPlaybackParametersChanged") {
+                    armSkipGuard()
+                    requestPlayerStampRestore()
+                }
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -339,9 +383,7 @@ internal class ElevateSkipController(private val application: Application) :
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
         suppressCoreSkip()
-
-        main.removeCallbacks(skipGuardTick)
-        main.post(skipGuardTick)
+        armSkipGuard()
         skipButtonTimer = ElevateSkipButtonTimer(candidate, vm,
             { stamp -> suppressNativeSkipButton(stamp) }
         ).also { it.attach() }
@@ -357,6 +399,7 @@ internal class ElevateSkipController(private val application: Application) :
         val linksObserver = Observer<VideoLive<Set<VideoLink>>> {
 
             suppressCoreSkip()
+            armSkipGuard()
             refresh()
             retryPlayerAttach()
         }
@@ -372,6 +415,9 @@ internal class ElevateSkipController(private val application: Application) :
 
     private fun detach() {
         main.removeCallbacks(skipGuardTick)
+        main.removeCallbacks(restorePlayerStamps)
+        guardChecksRemaining = 0
+        restorePlayerOnReady = false
         // First unsubscribe: restoring native stamps must not trigger our own observer.
         unobserve?.invoke()
         unobserve = null
@@ -397,6 +443,7 @@ internal class ElevateSkipController(private val application: Application) :
         model = null
         fragment = null
         activeKey = null
+        activeDuration = 0L
         activeEpisode = -1
         activeInstance = -1
         custom = emptyList()
@@ -440,10 +487,13 @@ internal class ElevateSkipController(private val application: Application) :
         }
         val playerChanged = nextPlayer !== mediaPlayer
         if (playerChanged) {
-
             mediaPlayer?.removeListener(playerListener)
             mediaPlayer = nextPlayer
             nextPlayer?.addListener(playerListener)
+            if (nextPlayer != null) {
+                armSkipGuard()
+                requestPlayerStampRestore()
+            }
         }
         if (nextPlayer?.playbackState == Media3Player.STATE_READY) initialLoadCompleted = true
         skipButtonTimer?.attach()
@@ -468,7 +518,8 @@ internal class ElevateSkipController(private val application: Application) :
                     trace else null) else null
         val key = state.instance.toString() + ":" + episodeId + ":" +
             (identity?.key ?: "download:${offline?.parentId}:$duration")
-        if (activeKey == key) {
+        if (activeKey == key &&
+            ElevateSkipRepository.sameRuntime(activeDuration, duration)) {
             reconcileSelected()
             // A new/reloaded Media3 player can begin inside an already known skip.
             if (nextPlayer?.isPlaying == true) tryAutoSkip()
@@ -483,6 +534,7 @@ internal class ElevateSkipController(private val application: Application) :
         activeInstance = state.instance
         activeEpisode = episodeId
         activeKey = key
+        activeDuration = duration
         // Prevent a native interval from being shown while Elevate fetches.
         if (vm.state.stamps.isNotEmpty()) {
             vm.modifyState {
@@ -535,7 +587,7 @@ internal class ElevateSkipController(private val application: Application) :
         if (combined == vm.state.stamps) {
             published = combined
             publishedReady = true
-
+            if (restorePlayerOnReady) main.post(restorePlayerStamps)
             return
         }
         vm.modifyState {
@@ -548,6 +600,7 @@ internal class ElevateSkipController(private val application: Application) :
         published = combined
         publishedReady = vm.state.instance == instance &&
             skipPlaybackId(vm.state.generatorState?.meta) == episode
+        if (restorePlayerOnReady) main.post(restorePlayerStamps)
 
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
@@ -1076,7 +1129,7 @@ internal object ElevateSkipRepository {
     ) {
         val key: String
             get() = listOf(imdb, tmdb, mal, anilist, kitsu, simkl, original,
-                season, episode, anime, movie, duration).joinToString("|")
+                season, episode, anime, movie).joinToString("|")
     }
     private data class OfflineIds(
         val imdb: String?, val tmdb: String?, val mal: String?,
@@ -1086,7 +1139,13 @@ internal object ElevateSkipRepository {
     // Bounded cache stores identifiers only, never full provider responses.
     private val offlineIds = LinkedHashMap<String, Timed<OfflineIds?>>(24)
     private data class Timed<T>(val data: T, val until: Long)
-    private val resultCache = ConcurrentHashMap<String, Timed<List<VideoSkipStamp>>>()
+    private data class CachedStamps(
+        val data: List<VideoSkipStamp>, val until: Long, val duration: Long
+    )
+    private val resultCache = ConcurrentHashMap<String, CachedStamps>()
+    // Prevent reuse across genuinely different cuts or releases.
+    internal fun sameRuntime(a: Long, b: Long): Boolean =
+        a > 0L && b > 0L && kotlin.math.abs(a - b) <= 1_000L
 
     private fun JSONObject.nonEmpty(key: String): String? =
         optString(key).trim().takeUnless { it.isEmpty() || it == "null" }
@@ -1571,7 +1630,9 @@ internal object ElevateSkipRepository {
 
             if (offline != null) return@withContext offline
         }
-        resultCache[i.key]?.takeIf { it.until > now }?.let {
+        resultCache[i.key]?.takeIf {
+            it.until > now && sameRuntime(it.duration, i.duration)
+        }?.let {
 
             return@withContext it.data
         }
@@ -1626,7 +1687,8 @@ internal object ElevateSkipRepository {
             }
         } ?: emptyList<VideoSkipStamp>()
         if (resultCache.size >= 400) resultCache.clear()
-        resultCache[i.key] = Timed(result, now + if (result.isEmpty()) MISS else DAY)
+        resultCache[i.key] = CachedStamps(result,
+            now + if (result.isEmpty()) MISS else DAY, i.duration)
         if (result.isNotEmpty()) {
             CloudStreamApp.context?.let {
                 ElevateOfflineMedia.putStamps(it, i, result)
