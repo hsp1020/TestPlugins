@@ -510,16 +510,16 @@ internal class ElevateSkipController(private val application: Application) :
         val duration = if (playerDuration != null && episodeDuration != null &&
             playerDuration < 60_000L && episodeDuration > playerDuration) {
             episodeDuration
-        } else playerDuration ?: episodeDuration ?: return
+        } else playerDuration ?: episodeDuration ?: 0L
         val trace = ""
         val identity = if (episode != null && response != null)
             ElevateSkipRepository.identity(response, episode, duration,
                 if (state.instance != activeInstance || episodeId != activeEpisode)
                     trace else null) else null
         val key = state.instance.toString() + ":" + episodeId + ":" +
-            (identity?.key ?: "download:${offline?.parentId}:$duration")
+            (identity?.key ?: "download:${offline?.parentId}:${offline?.season}:${offline?.episode}")
         if (activeKey == key &&
-            ElevateSkipRepository.sameRuntime(activeDuration, duration)) {
+            !ElevateSkipRepository.needsDurationUpdate(activeDuration, duration)) {
             reconcileSelected()
             // A new/reloaded Media3 player can begin inside an already known skip.
             if (nextPlayer?.isPlaying == true) tryAutoSkip()
@@ -1139,13 +1139,17 @@ internal object ElevateSkipRepository {
     // Bounded cache stores identifiers only, never full provider responses.
     private val offlineIds = LinkedHashMap<String, Timed<OfflineIds?>>(24)
     private data class Timed<T>(val data: T, val until: Long)
+    private data class ReleaseStamps(val duration: Long, val data: List<VideoSkipStamp>)
     private data class CachedStamps(
-        val data: List<VideoSkipStamp>, val until: Long, val duration: Long
+        val intro: List<VideoSkipStamp>, val ani: List<VideoSkipStamp>,
+        val anime: List<VideoSkipStamp>, val theIntroIdentity: Identity?,
+        val releases: List<ReleaseStamps>, val until: Long
     )
     private val resultCache = ConcurrentHashMap<String, CachedStamps>()
-    // Prevent reuse across genuinely different cuts or releases.
-    internal fun sameRuntime(a: Long, b: Long): Boolean =
-        a > 0L && b > 0L && kotlin.math.abs(a - b) <= 1_000L
+    private const val RELEASE_DIFFERENCE_MS = 60_000L
+    private fun sameRelease(a: Long, b: Long): Boolean =
+        a == b || (a > 0L && b > 0L && kotlin.math.abs(a - b) < RELEASE_DIFFERENCE_MS)
+    internal fun needsDurationUpdate(a: Long, b: Long): Boolean = !sameRelease(a, b)
 
     private fun JSONObject.nonEmpty(key: String): String? =
         optString(key).trim().takeUnless { it.isEmpty() || it == "null" }
@@ -1304,7 +1308,7 @@ internal object ElevateSkipRepository {
     }
     private fun valid(stamp: SkipStamp, duration: Long): Boolean =
         stamp.startMs >= 0 && stamp.endMs > stamp.startMs &&
-            stamp.startMs < duration && stamp.endMs <= duration
+            (duration <= 0L || stamp.startMs < duration && stamp.endMs <= duration)
 
     /** Nuvio: first segment per category, in provider priority order. */
     private fun choose(vararg groups: List<VideoSkipStamp>): List<VideoSkipStamp> {
@@ -1317,14 +1321,31 @@ internal object ElevateSkipRepository {
 
     fun merge(elevate: List<VideoSkipStamp>): List<VideoSkipStamp> = choose(elevate)
 
-    private fun stamps(source: String, intervals: List<SkipStamp>, i: Identity): List<VideoSkipStamp> =
-        intervals.filter { valid(it, i.duration) }.map { stamp ->
-            // A substantial tail after an ending may contain a post-credit scene.
-            // Do not allow the native next-episode action to skip that tail.
-            val trailing = i.duration - stamp.endMs
-            VideoSkipStamp(stamp, !i.movie && trailing in 0L..5_000L,
-                "Elevate/" + source)
+    // Store raw provider endpoints separately from the current player's duration.
+    // Long.MAX_VALUE is a private open-ended marker and never reaches the player.
+    private fun stamps(source: String, intervals: List<SkipStamp>): List<VideoSkipStamp> =
+        intervals.filter { valid(it, 0L) }.map {
+            VideoSkipStamp(it, false, "Elevate/" + source)
         }
+
+    private fun project(source: List<VideoSkipStamp>, i: Identity): List<VideoSkipStamp> =
+        source.mapNotNull { raw ->
+            val stamp = raw.timestamp
+            val end = if (stamp.endMs == Long.MAX_VALUE) i.duration else stamp.endMs
+            val adjusted = SkipStamp(stamp.type, stamp.startMs, end)
+            if (!valid(adjusted, i.duration)) null else {
+                // Do not allow next-episode skipping over a possible post-credit scene.
+                val trailing = i.duration - end
+                VideoSkipStamp(adjusted, !i.movie && i.duration > 0L &&
+                    trailing in 0L..5_000L, raw.source)
+            }
+        }
+
+    private fun selected(cached: CachedStamps, i: Identity): List<VideoSkipStamp> {
+        val release = cached.releases.firstOrNull { sameRelease(it.duration, i.duration) }
+        return choose(project(cached.intro, i), project(cached.ani, i),
+            project(cached.anime, i), project(release?.data.orEmpty(), i))
+    }
 
     private fun JSONObject.segment(name: String, type: SkipType): SkipStamp? {
         val obj = node(name) ?: return null
@@ -1364,7 +1385,7 @@ internal object ElevateSkipRepository {
             if (i.movie) null else root.segment("intro", SkipType.Opening),
             if (i.movie) null else root.segment("recap", SkipType.Recap),
             credits
-        ), i)
+        ))
 
         return result
     }
@@ -1381,9 +1402,10 @@ internal object ElevateSkipRepository {
         }
         val suffix = if (i.movie) "" else "&season=" + i.season +
             "&episode=" + i.episode
+        val durationParam = if (i.duration > 0L) "&duration_ms=" + i.duration else ""
 
-        val root = request("https://api.theintrodb.org/v4/media?" + idParam + suffix,
-            trace, "TheIntroDB")
+        val root = request("https://api.theintrodb.org/v4/media?" + idParam + suffix +
+            durationParam, trace, "TheIntroDB")
             ?: run {
 
                 return emptyList()
@@ -1403,12 +1425,14 @@ internal object ElevateSkipRepository {
                 val stamp = items.optJSONObject(n) ?: continue
                 // v4: null start means start of media; null end means end of media.
                 val start = if (stamp.isNull("start_ms")) 0L else stamp.optLong("start_ms", -1L)
-                val end = if (stamp.isNull("end_ms")) i.duration
-                    else stamp.optLong("end_ms", -1L)
+                val missingEnd = stamp.isNull("end_ms")
+                // Only credits/preview may extend to the end of the media.
+                if (missingEnd && key != "credits" && key != "preview") continue
+                val end = if (missingEnd) Long.MAX_VALUE else stamp.optLong("end_ms", -1L)
                 if (start >= 0L && end > start) intervals.add(SkipStamp(type, start, end))
             }
         }
-        val result = stamps("TheIntroDB", intervals, i)
+        val result = stamps("TheIntroDB", intervals)
 
         return result
     }
@@ -1431,8 +1455,7 @@ internal object ElevateSkipRepository {
             return emptyList()
         }
         val url = "https://api.aniskip.com/v2/skip-times/" + mal + "/" + episode +
-            "?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed&episodeLength=" +
-            i.duration / 1000L
+            "?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed&episodeLength=0"
         val root = request(url, trace, "AniSkip") ?: run {
 
             return emptyList()
@@ -1461,7 +1484,7 @@ internal object ElevateSkipRepository {
             val end = (part.optDouble("endTime") * 1000.0).toLong()
             intervals.add(SkipStamp(type, start, end))
         }
-        val result = stamps("AniSkip", intervals, i)
+        val result = stamps("AniSkip", intervals)
 
         return result
     }
@@ -1520,7 +1543,7 @@ internal object ElevateSkipRepository {
         for (s in 0 until shows.length()) {
             val showId = shows.optJSONObject(s)?.nonEmpty("id") ?: continue
             val episodes = query("episodes", "{ findEpisodesByShowId(showId: \"" + showId +
-                "\") { season number absoluteNumber timestamps { at type { name } } } }")
+                "\") { season number absoluteNumber baseDuration timestamps { at type { name } } } }")
                 ?.optJSONArray("findEpisodesByShowId")
             if (episodes == null) {
 
@@ -1579,10 +1602,16 @@ internal object ElevateSkipRepository {
                     val start = (mark.optDouble("at") * 1000.0).toLong()
                     val end = if (m + 1 < sorted.size) {
                         (sorted[m + 1].optDouble("at") * 1000.0).toLong()
-                    } else i.duration
+                    } else {
+                        val baseDuration = ep.optDouble("baseDuration", Double.NaN)
+                        val ending = type == SkipType.Ending || type == SkipType.MixedEnding
+                        if (!ending || baseDuration.isFinite() &&
+                            mark.optDouble("at") < baseDuration / 2) continue
+                        Long.MAX_VALUE
+                    }
                     segments.add(SkipStamp(type, start, end))
                 }
-                val result = stamps("AnimeSkip", segments, i)
+                val result = stamps("AnimeSkip", segments)
                 val kinds = result.map { category(it.timestamp.type) }.distinct().size
 
                 if (result.isNotEmpty() && (rank > bestRank ||
@@ -1616,29 +1645,33 @@ internal object ElevateSkipRepository {
     suspend fun fetch(
         i: Identity, preferLocal: Boolean = false,
         trace: String = ""
-    ): List<VideoSkipStamp> =
-        withContext(Dispatchers.IO) {
-
-        if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) {
-
+    ): List<VideoSkipStamp> = withContext(Dispatchers.IO) {
+        if (i.duration < 0L || i.duration > 24L * 60L * 60L * 1000L)
             return@withContext emptyList()
-        }
         val now = System.currentTimeMillis()
         if (preferLocal) {
-            val ctx = CloudStreamApp.context
-            val offline = ctx?.let { ElevateOfflineMedia.stamps(it, i) }
-
-            if (offline != null) return@withContext offline
+            CloudStreamApp.context?.let { ElevateOfflineMedia.stamps(it, i) }
+                ?.let { return@withContext it }
         }
-        resultCache[i.key]?.takeIf {
-            it.until > now && sameRuntime(it.duration, i.duration)
-        }?.let {
-
-            return@withContext it.data
+        resultCache[i.key]?.takeIf { it.until > now }?.let { cached ->
+            val release = cached.releases.firstOrNull { sameRelease(it.duration, i.duration) }
+            val current = if (cached.theIntroIdentity != null && release == null) {
+                // A different runtime invalidates TheIntroDB only, not the other providers.
+                val stamps = provider(trace, "TheIntroDB") {
+                    theIntroDB(cached.theIntroIdentity.copy(duration = i.duration), trace)
+                }
+                cached.copy(releases = (cached.releases +
+                    ReleaseStamps(i.duration, stamps)).takeLast(4))
+                    .also { resultCache[i.key] = it }
+            } else cached
+            val result = selected(current, i)
+            if (preferLocal && result.isNotEmpty() && i.duration > 0L)
+                CloudStreamApp.context?.let { ElevateOfflineMedia.putStamps(it, i, result) }
+            return@withContext result
         }
 
         val needsSimkl = i.simkl != null && (!i.anime || i.imdb == null && i.tmdb == null)
-        val result = withTimeoutOrNull(if (needsSimkl) 25_000L else 19_000L) {
+        val fetched = withTimeoutOrNull(if (needsSimkl) 25_000L else 19_000L) {
             val target = if (needsSimkl) {
                 val ids = ElevateMediaIdentity.enrichSimkl(
                     ElevateMediaIdentity.Ids(i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu, i.simkl),
@@ -1650,28 +1683,17 @@ internal object ElevateSkipRepository {
                     anime = i.anime || ids.animeIds || ids.simklAnime
                 )
             } else i
-
             coroutineScope {
                 val mapping = async {
                     try {
-                        val found = withTimeoutOrNull(8_000L) { mapped(target, trace) }
-
-                        found
+                        withTimeoutOrNull(8_000L) { mapped(target, trace) }
                     } catch (ex: CancellationException) { throw ex }
-                      catch (ex: Exception) {
-
-                          null
-                      }
+                      catch (_: Exception) { null }
                 }
                 val intro = async {
-                    val mappedIdentity = introDbIdentity(target, mapping.await())
-
-                    provider(trace, "IntroDb") { introDb(mappedIdentity, trace) }
-                }
-                val theIntro = async {
-                    val mappedIdentity = theIntroDbIdentity(target, mapping.await())
-
-                    provider(trace, "TheIntroDB") { theIntroDB(mappedIdentity, trace) }
+                    provider(trace, "IntroDb") {
+                        introDb(introDbIdentity(target, mapping.await()), trace)
+                    }
                 }
                 val ani = async {
                     provider(trace, "AniSkip") { aniSkip(target, mapping.await(), trace) }
@@ -1679,23 +1701,22 @@ internal object ElevateSkipRepository {
                 val anime = async {
                     provider(trace, "AnimeSkip") { animeSkip(target, mapping.await(), trace) }
                 }
-                val groups = listOf(intro.await(), ani.await(), anime.await(), theIntro.await())
-
-                val selected = choose(*groups.toTypedArray())
-
-                selected
+                val releaseIdentity = theIntroDbIdentity(target, mapping.await())
+                    .takeIf { it.tmdb != null || it.imdb != null }
+                val theIntro = async {
+                    if (releaseIdentity == null) emptyList() else
+                        provider(trace, "TheIntroDB") { theIntroDB(releaseIdentity, trace) }
+                }
+                CachedStamps(intro.await(), ani.await(), anime.await(), releaseIdentity,
+                    if (releaseIdentity == null) emptyList()
+                    else listOf(ReleaseStamps(i.duration, theIntro.await())), 0L)
             }
-        } ?: emptyList<VideoSkipStamp>()
+        } ?: CachedStamps(emptyList(), emptyList(), emptyList(), null, emptyList(), 0L)
+        val result = selected(fetched, i)
         if (resultCache.size >= 400) resultCache.clear()
-        resultCache[i.key] = CachedStamps(result,
-            now + if (result.isEmpty()) MISS else DAY, i.duration)
-        if (result.isNotEmpty()) {
-            CloudStreamApp.context?.let {
-                ElevateOfflineMedia.putStamps(it, i, result)
-
-            }
-        }
-
+        resultCache[i.key] = fetched.copy(until = now + if (result.isEmpty()) MISS else DAY)
+        if (result.isNotEmpty() && i.duration > 0L)
+            CloudStreamApp.context?.let { ElevateOfflineMedia.putStamps(it, i, result) }
         result
     }
 }
