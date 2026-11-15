@@ -137,6 +137,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var generation = 0
     private var activeKey: String? = null
     private var activeDuration = 0L
+    private var activeIdentity: ElevateSkipRepository.Identity? = null
     private var activeInstance = -1
     private var activeEpisode = -1
     private var custom = emptyList<VideoSkipStamp>()
@@ -444,6 +445,7 @@ internal class ElevateSkipController(private val application: Application) :
         fragment = null
         activeKey = null
         activeDuration = 0L
+        activeIdentity = null
         activeEpisode = -1
         activeInstance = -1
         custom = emptyList()
@@ -518,9 +520,26 @@ internal class ElevateSkipController(private val application: Application) :
                     trace else null) else null
         val key = state.instance.toString() + ":" + episodeId + ":" +
             (identity?.key ?: "download:${offline?.parentId}:${offline?.season}:${offline?.episode}")
-        if (activeKey == key &&
-            !ElevateSkipRepository.needsDurationUpdate(activeDuration, duration)) {
+        if (activeKey == key) {
             reconcileSelected()
+            // Keep the other providers and the visible skip controls untouched.
+            // Only TheIntroDB has release-specific results.
+            if (publishedReady && ElevateSkipRepository.needsDurationUpdate(activeDuration, duration)) {
+                activeDuration = duration
+                activeIdentity?.let { current ->
+                    generation++
+                    job?.cancel()
+                    val serial = generation
+                    job = scope.launch {
+                        val updated = ElevateSkipRepository.fetchTheIntroDbRelease(
+                            current.copy(duration = duration), trace) ?: return@launch
+                        if (serial != generation || activeKey != key) return@launch
+                        custom = ElevateSkipRepository.merge(
+                            custom.filterNot { it.source == "Elevate/TheIntroDB" } + updated)
+                        publish()
+                    }
+                }
+            }
             // A new/reloaded Media3 player can begin inside an already known skip.
             if (nextPlayer?.isPlaying == true) tryAutoSkip()
             scheduleAutoSkip()
@@ -535,6 +554,7 @@ internal class ElevateSkipController(private val application: Application) :
         activeEpisode = episodeId
         activeKey = key
         activeDuration = duration
+        activeIdentity = null
         // Prevent a native interval from being shown while Elevate fetches.
         if (vm.state.stamps.isNotEmpty()) {
             vm.modifyState {
@@ -572,8 +592,12 @@ internal class ElevateSkipController(private val application: Application) :
                 return@launch
             }
 
+            activeIdentity = target
             custom = result
             publish()
+            // The stream's real duration may have appeared during the initial lookup.
+            // Recheck without clearing stamps or reloading the three common providers.
+            main.post { refresh() }
         }
     }
 
@@ -1641,6 +1665,22 @@ internal object ElevateSkipRepository {
 
               emptyList()
           }
+
+    // For a different runtime, re-query only TheIntroDB. Never refetch the
+    // other providers or replace their already-published intervals.
+    suspend fun fetchTheIntroDbRelease(i: Identity, trace: String = ""): List<VideoSkipStamp>? =
+        withContext(Dispatchers.IO) {
+            val cached = resultCache[i.key] ?: return@withContext null
+            val identity = cached.theIntroIdentity ?: return@withContext null
+            val release = cached.releases.firstOrNull { sameRelease(it.duration, i.duration) }
+                ?: ReleaseStamps(i.duration, provider(trace, "TheIntroDB") {
+                    theIntroDB(identity.copy(duration = i.duration), trace)
+                }).also { added ->
+                    resultCache[i.key] = cached.copy(
+                        releases = (cached.releases + added).takeLast(4))
+                }
+            project(release.data, i)
+        }
 
     suspend fun fetch(
         i: Identity, preferLocal: Boolean = false,
