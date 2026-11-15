@@ -3,6 +3,11 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.view.ViewTreeObserver
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
+import com.lagradost.cloudstream3.utils.AppContextUtils.loadResult
 import android.net.Uri
 import android.os.Bundle
 import androidx.fragment.app.Fragment
@@ -69,6 +74,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         )
     }
 
+    private data class AddonLink(val name: String, val category: String, val url: String)
+
     private data class AioVideo(
         val season: Int?, val number: Int?,
         val meta: EpisodeMeta, val id: String?, val imdbId: String?,
@@ -87,7 +94,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         val videos: List<AioVideo> = emptyList(),
         val originalLanguage: String? = null,
         val tmdbAnimation: Boolean = false,
-        val tmdbSeasons: Map<Int, Int> = emptyMap()
+        val tmdbSeasons: Map<Int, Int> = emptyMap(),
+        val links: List<AddonLink> = emptyList()
     ) {
         fun withFallback(other: Metadata?): Metadata {
             if (other == null) return this
@@ -107,7 +115,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 logoForeign = (logo ?: other.logo) != null &&
                     (other.logo == null || other.logoForeign),
                 originalTitle = originalTitle ?: other.originalTitle,
-                englishTitle = englishTitle ?: other.englishTitle
+                englishTitle = englishTitle ?: other.englishTitle,
+                originalLanguage = originalLanguage ?: other.originalLanguage,
+                tmdbAnimation = tmdbAnimation || other.tmdbAnimation,
+                tmdbSeasons = tmdbSeasons.ifEmpty { other.tmdbSeasons },
+                links = links.ifEmpty { other.links }
             )
         }
 
@@ -127,6 +139,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
             }.toString()
             people?.let { sync["tmdb_people"] = it }
+            originalLanguage?.takeIf { it.matches(Regex("[a-zA-Z]{2,3}")) && !it.equals("und", true) }
+                ?.let { sync["original_language"] = it.lowercase(Locale.ROOT) }
             originalTitle?.let { sync["metadata_swap_original_title"] = it }
             englishTitle?.let { sync["metadata_swap_english_title"] = it }
             return original.copy(
@@ -205,7 +219,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
     private fun addonVideos(meta: JSONObject): List<AioVideo> {
         val array = meta.optJSONArray("videos") ?: return emptyList()
-        return (0 until array.length()).mapNotNull { i ->
+        val parsed = (0 until array.length()).mapNotNull { i ->
             val ep = array.optJSONObject(i) ?: return@mapNotNull null
             val season = ep.optInt("season").takeIf { ep.has("season") && !ep.isNull("season") }
             val number = ep.optInt("episode", ep.optInt("number"))
@@ -216,24 +230,63 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 ep.optInt("imdbEpisode").takeIf { it > 0 },
                 ep.optJSONArray("streams")?.takeIf { it.length() > 0 })
         }
+        // Number missing/zero episodes after the last regular episode in each season.
+        return parsed.groupBy { it.season ?: 0 }.flatMap { (season, videos) ->
+            val regular = videos.filter { (it.number ?: 0) > 0 }.sortedBy { it.number }
+            var next = regular.maxOfOrNull { it.number ?: 0 } ?: 0
+            val unnamed = videos.filter { (it.number ?: 0) <= 0 }
+                .sortedBy { it.meta.name.orEmpty() }
+                .map { it.copy(number = ++next) }
+            (regular + unnamed).map { it.copy(season = season) }
+        }
+    }
+
+    private fun addonLinks(meta: JSONObject): List<AddonLink> {
+        val values = meta.optJSONArray("links") ?: return emptyList()
+        return (0 until values.length()).mapNotNull { index ->
+            val item = values.optJSONObject(index) ?: return@mapNotNull null
+            val category = item.string("category") ?: return@mapNotNull null
+            if (!category.equals("prequel", true) && !category.equals("sequel", true) &&
+                !category.equals("genres", true)) return@mapNotNull null
+            val url = item.string("url")?.takeIf { it.startsWith("stremio:///") }
+                ?: return@mapNotNull null
+            AddonLink(item.string("name") ?: return@mapNotNull null, category, url)
+        }.distinctBy { it.category to it.url }
     }
 
     private fun addonActors(meta: JSONObject): Pair<List<ActorData>?, String?> {
         val extra = meta.optJSONObject("app_extras") ?: return null to null
         val rows = ArrayList<ActorData>()
         val refs = JSONArray()
-        for ((field, role) in listOf("directors" to "Director", "writers" to "Writer",
-            "cast" to "")) {
+        val crew = linkedMapOf<String, Pair<JSONObject, MutableList<String>>>()
+        for ((field, job) in listOf("directors" to "Director", "writers" to "Writer")) {
             val people = extra.optJSONArray(field) ?: continue
             for (i in 0 until people.length()) {
-                val obj = people.optJSONObject(i) ?: continue
-                val name = obj.string("name") ?: continue
-                val photo = obj.string("photo")
-                rows += ActorData(Actor(name, photo),
-                    roleString = if (role.isNotEmpty()) role else obj.string("character"))
+                val person = people.optJSONObject(i) ?: continue
+                val name = person.string("name") ?: continue
+                val id = person.optInt("tmdbId").takeIf { it > 0 }
+                val key = id?.let { "id:$it" } ?: name.trim().lowercase(Locale.ROOT)
+                crew.getOrPut(key) { person to mutableListOf() }.second.add(job)
+            }
+        }
+        for ((_, value) in crew) {
+            val person = value.first
+            val name = person.string("name") ?: continue
+            rows += ActorData(Actor(name, person.string("photo")),
+                roleString = value.second.distinct().joinToString(", "))
+            refs.put(JSONObject().put("name", name)
+                .put("id", person.optInt("tmdbId").takeIf { it > 0 } ?: JSONObject.NULL)
+                .put("crew", true))
+        }
+        extra.optJSONArray("cast")?.let { cast ->
+            for (i in 0 until cast.length()) {
+                val person = cast.optJSONObject(i) ?: continue
+                val name = person.string("name") ?: continue
+                rows += ActorData(Actor(name, person.string("photo")),
+                    roleString = person.string("character"))
                 refs.put(JSONObject().put("name", name)
-                    .put("id", obj.optInt("tmdbId").takeIf { it > 0 } ?: JSONObject.NULL)
-                    .put("crew", role.isNotEmpty()))
+                    .put("id", person.optInt("tmdbId").takeIf { it > 0 } ?: JSONObject.NULL)
+                    .put("crew", false))
             }
         }
         return rows.takeIf { it.isNotEmpty() } to refs.takeIf { it.length() > 0 }?.toString()
@@ -419,8 +472,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
             meta.optJSONObject("_providerArt")?.string("logo") == null) return null
         val year = meta.string("year", "releaseInfo", "released")?.take(4)
             ?.takeIf { it.length == 4 && it.all(Char::isDigit) }
-        val rating = meta.string("imdbRating", "rating")?.toDoubleOrNull()
-            ?.takeIf { it in 0.0..10.0 && it > 0 }
+        val rating = sequenceOf(meta.string("imdbRating"), meta.string("rating"))
+            .mapNotNull { it?.toDoubleOrNull()?.takeIf { v -> v.isFinite() && v > 0 && v <= 10 } }
+            .firstOrNull()
         val extra = meta.optJSONObject("app_extras")
         val locale = getCurrentLocale(application).replace('_', '-')
             .substringAfter('-', "US").uppercase(Locale.ROOT)
@@ -450,12 +504,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     (season to number) to video.meta else null
             }.toMap(), actors, people, source = "AIO",
             originalTitle = meta.string("original_title", "originalTitle"),
-            englishTitle = meta.string("english_title", "englishTitle"), videos = videos)
+            englishTitle = meta.string("english_title", "englishTitle"), videos = videos,
+            originalLanguage = meta.string("original_language")
+                ?: meta.optJSONObject("_providerArt")?.string("originalLanguage"),
+            links = addonLinks(meta))
     }
 
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val seasonRequests = Semaphore(35)
+    private val seasonRequests = Semaphore(10)
     private val screens = mutableMapOf<Fragment, Screen>()
     private var host: FragmentActivity? = null
     private val responseField = runCatching {
@@ -566,6 +623,75 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private var detailLocale: String = ""
         private var job: Job? = null
         private var episodeJob: Job? = null
+        private val relationChips = mutableListOf<Chip>()
+        private var linksWatching = false
+        private val linksLayoutListener = ViewTreeObserver.OnGlobalLayoutListener { bindLinks() }
+
+        private fun clearLinks() {
+            if (linksWatching) {
+                fragment.view?.viewTreeObserver?.takeIf { it.isAlive }
+                    ?.removeOnGlobalLayoutListener(linksLayoutListener)
+                linksWatching = false
+            }
+            relationChips.forEach { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+            relationChips.clear()
+        }
+
+        private fun activateLinks() {
+            if (metadata?.source != "AIO" || metadata?.links.isNullOrEmpty()) return
+            fragment.view?.viewTreeObserver?.addOnGlobalLayoutListener(linksLayoutListener)
+            linksWatching = true
+            fragment.view?.post { bindLinks() }
+        }
+
+        private fun followLink(link: AddonLink) {
+            val uri = Uri.parse(link.url)
+            val parts = uri.pathSegments
+            val pageUrl = original?.url.orEmpty()
+            if (link.category.equals("genres", true)) {
+                runCatching {
+                    fragment.startActivity(Intent(Intent.ACTION_VIEW, uri)
+                        .addCategory(Intent.CATEGORY_BROWSABLE))
+                }
+            } else if (parts.size == 3 && parts[0] == "detail" &&
+                parts[1] in setOf("movie", "series")) {
+                val provider = nativeResponse?.apiName?.takeIf { it.isNotBlank() }
+                if (provider != null && pageUrl.contains("/meta/")) {
+                    val url = pageUrl.substringBefore("/meta/") +
+                        "/meta/${parts[1]}/${Uri.encode(parts[2])}.json"
+                    fragment.activity?.loadResult(url, provider, link.name)
+                } else runCatching {
+                    fragment.startActivity(Intent(Intent.ACTION_VIEW, uri)
+                        .addCategory(Intent.CATEGORY_BROWSABLE))
+                }
+            }
+        }
+
+        private fun bindLinks() {
+            val links = metadata?.takeIf { it.source == "AIO" }?.links.orEmpty()
+            val group = fragment.view?.findViewById<ChipGroup>(R.id.result_tag) ?: return
+            if (links.isEmpty()) return
+            // Keep the host's existing genre chips and click handlers untouched.
+            val shortcuts = links.filter { it.category.equals("prequel", true) ||
+                it.category.equals("sequel", true) }.take(12) +
+                links.filter { it.category.equals("genres", true) }.take(8)
+            if (relationChips.size != shortcuts.size ||
+                relationChips.any { it.parent !== group }) {
+                relationChips.forEach { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+                relationChips.clear()
+                for (link in shortcuts) {
+                    val chip = Chip(group.context).apply {
+                        text = "${link.category.replaceFirstChar { it.uppercase() }} · ${link.name}"
+                        isCheckable = false
+                        isFocusable = true
+                        setOnClickListener { followLink(link) }
+                    }
+                    group.addView(chip)
+                    relationChips.add(chip)
+                }
+            }
+        }
+
         private var serial = 0
         private val observer = Observer<Resource<ResultData>?> { state ->
             when (state) {
@@ -578,6 +704,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     originalEpisodes = null
                     swappedEpisodes = null
                     metadata = null
+                    clearLinks()
                     pendingPage = null
                     nativeResponse = null
                     nativeSeries = null
@@ -685,6 +812,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             original = page
             swapped = null
             metadata = null
+            clearLinks()
             detailId = null
             nativeResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
             pendingPage = null
@@ -781,6 +909,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 swapped = current.toPage(page, movie, includeActors)
                 pendingPage = null
                 swapped?.let { nativePage(model, it) }
+                activateLinks()
                 suppressNativeTrailers()
                 updateEpisodes()
             }
@@ -861,8 +990,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private fun updateEpisodes() {
             val source = metadata ?: return
             val baseRef = originalEpisodes
-            val completeAio = source.source == "AIO" &&
+            val completeAio = source.source == "AIO" && source.videos.isNotEmpty() &&
                 original?.syncData?.get("metadata_swap_allowed") == "true"
+            if (source.source == "AIO" && source.videos.isEmpty()) {
+                originalEpisodes?.let(::nativeEpisodes)
+                return
+            }
             if (!completeAio && baseRef == null) return
             val base = baseRef.orEmpty()
             val generation = serial
@@ -870,10 +1003,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             episodeJob = scope.launch {
                 val ids = ElevateMediaIdentity.collect(nativeResponse,
                     extraSync = original?.syncData, urls = listOfNotNull(original?.url))
-                val anime = source.source == "TMDB" &&
-                    (ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids) ||
-                        (source.originalLanguage.equals("ja", true) &&
-                            source.tmdbAnimation))
+                val anime = ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids) ||
+                    (source.originalLanguage.equals("ja", true) && source.tmdbAnimation)
                 val animeLookup = if (anime) {
                     val direct = ids.original?.let { raw ->
                         val kind = raw.substringBefore(':')
@@ -914,14 +1045,19 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     if (season <= 1) return null
                     var preceding = 0
                     for (previous in 1 until season) {
-                        val numbers = originalBySeason[previous]?.mapNotNull { it.episode }
-                            ?.filter { it > 0 }?.distinct()?.sorted() ?: return null
+                        val numbers = (if (completeAio)
+                        source.videos.filter { it.season == previous }.mapNotNull { it.number }
+                            .filter { it > 0 }.distinct().sorted()
+                    else originalBySeason[previous]?.mapNotNull { it.episode }
+                        ?.filter { it > 0 }?.distinct()?.sorted()) ?: return null
                         if (numbers.isEmpty() || numbers.first() != 1 ||
                             numbers.last() != numbers.size) return null
                         preceding += numbers.size
                     }
-                    val last = base.filter { it.seasonIndex == season }
-                        .maxOfOrNull { it.episode } ?: return null
+                    val last = (if (completeAio)
+                        source.videos.filter { it.season == season }.maxOfOrNull { it.number ?: 0 }
+                    else base.filter { it.seasonIndex == season }.maxOfOrNull { it.episode })
+                        ?: return null
                     return (preceding + 1).takeIf { preceding + last <= tmdbCount }
                 }
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
@@ -976,8 +1112,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     }
                                 }.toMap()
                                 if (completeAio) {
-                                    for ((number, info) in byNumber)
-                                        found[actualSeason to number] = info
+                                    for (video in source.videos.filter { it.season == sourceSeason }) {
+                                        val number = video.number ?: continue
+                                        byNumber[start + number - 1]?.let { info ->
+                                            found[sourceSeason to number] = info
+                                        }
+                                    }
                                 } else {
                                     base.filter {
                                         it.seasonIndex == sourceSeason &&
@@ -1066,6 +1206,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
         }
 
         fun stop(restoreOriginal: Boolean = false) {
+            clearLinks()
             job?.cancel()
             episodeJob?.cancel()
             serial++
@@ -1320,7 +1461,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         "genres", "genre", "year", "releaseInfo", "released", "imdbRating",
                         "rating", "runtime", "status", "contentRating", "certification",
                         "app_extras", "trailers", "trailerStreams", "_providerArt",
-                        "original_title", "originalTitle", "english_title", "englishTitle")) {
+                        "original_title", "originalTitle", "english_title", "englishTitle",
+                        "original_language", "links")) {
                         if (data.has(field)) slim.put(field, data.get(field))
                     }
                     data.optJSONArray("videos")?.let { videos ->

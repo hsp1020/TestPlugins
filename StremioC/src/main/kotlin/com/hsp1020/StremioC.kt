@@ -1200,7 +1200,7 @@ open class StremioC(
             }
         }
 
-        val networkSemaphore = Semaphore(35)
+        val networkSemaphore = Semaphore(10)
 
         // Bound only the expensive extractor callback / integrated provider
         // invocations. Metadata and link discovery remain concurrent so the
@@ -4319,7 +4319,9 @@ open class StremioC(
         val fetchedVoteAverage: Double? = null,
         val fetchedLogoFallback: Boolean = false,
         val fetchedGenreIds: List<Int> = emptyList(),
-        val fetchedBackdrop: String? = null
+        val fetchedBackdrop: String? = null,
+        val fetchedPoster: String? = null,
+        val fetchedGenres: List<String> = emptyList()
     )
 
     private data class ProviderArtInfo(
@@ -4345,7 +4347,8 @@ open class StremioC(
     private data class AioActorRow(val data: ActorData, val id: Int?, val crew: Boolean)
 
     private data class CatalogEntry(
-        @JsonProperty("name") val name: String? = null, 
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("title") val title: String? = null,
         @JsonProperty("id") val id: String? = null, 
         @JsonProperty("year") val year: String? = null,
         @JsonProperty("status") val status: String? = null,
@@ -4354,11 +4357,17 @@ open class StremioC(
         @JsonProperty("_malId") val malIdExt: String? = null,
         @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
         @JsonProperty("poster") val poster: String? = null, 
-        @JsonProperty("background") val background: String? = null, 
+        @JsonProperty("background") val background: String? = null,
+        @JsonProperty("backdrop") val backdrop: String? = null,
         @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("description") val description: String? = null, 
+        @JsonProperty("logoUrl") val logoUrl: String? = null,
+        @JsonProperty("description") val description: String? = null,
+        @JsonProperty("overview") val overview: String? = null, 
         @JsonProperty("runtime") val runtime: String? = null,
-        @JsonProperty("imdbRating") val imdbRating: String? = null, 
+        @JsonProperty("imdbRating") val imdbRating: String? = null,
+        @JsonProperty("rating") val rating: String? = null,
+        @JsonProperty("contentRating") val contentRating: String? = null,
+        @JsonProperty("certification") val certification: String? = null,
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("original_language") val original_language: String? = null,
         @JsonProperty("_providerArt") val providerArt: ProviderArtInfo? = null,
@@ -4424,11 +4433,8 @@ open class StremioC(
                 tmdbId = this.moviedb_id?.toString() ?: this.tmdbIdExt
             )
 
-            val baseName = if (!name.isNullOrBlank()) {
-                name
-            } else {
-                id ?: ""
-            }
+            val baseName = name?.takeIf { it.isNotBlank() }
+                ?: title?.takeIf { it.isNotBlank() } ?: (id ?: "")
 
             val finalName = baseName
 
@@ -4625,9 +4631,7 @@ open class StremioC(
             val langCode = StremioTmdb.language()
 
             coroutineScope {
-                val shouldFocusEpisodes = tmdbMediaType == "tv" &&
-                    ((stremioType == "series" && targetVideos.isNullOrEmpty()) ||
-                        (stremioType != "movie" && stremioType != "series"))
+                val shouldFocusEpisodes = tmdbMediaType == "tv"
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -4824,7 +4828,10 @@ open class StremioC(
                 selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
                 detailRes.genres.orEmpty().mapNotNull { it.id },
                 detailRes.backdropPath?.takeIf(String::isNotBlank)
-                    ?.let { "https://image.tmdb.org/t/p/w1280$it" }
+                    ?.let { "https://image.tmdb.org/t/p/w1280$it" },
+                detailRes.posterPath?.takeIf(String::isNotBlank)
+                    ?.let { "https://image.tmdb.org/t/p/w780$it" },
+                detailRes.genres.orEmpty().mapNotNull { it.name?.takeIf(String::isNotBlank) }
             )
         }
 
@@ -5024,8 +5031,11 @@ open class StremioC(
             var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
-            val originalName = detailedEntry.name ?: this@CatalogEntry.name
-            val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
+            val originalName = sequenceOf(detailedEntry.name, detailedEntry.title,
+                this@CatalogEntry.name, this@CatalogEntry.title)
+                .firstOrNull { !it.isNullOrBlank() }
+            var finalGenre = listOfNotNull(detailedEntry.genre, detailedEntry.genres,
+                this@CatalogEntry.genre, this@CatalogEntry.genres).firstOrNull { it.isNotEmpty() }
             // Skip unsupported SVG URLs, including an SVG wrapped by an art proxy.
             fun isSvgLogo(url: String): Boolean {
                 val parsed = url.toHttpUrlOrNull() ?: return url.substringBefore('?')
@@ -5036,8 +5046,8 @@ open class StremioC(
             }
             // Prefer the active addon's meta.logo regardless of which addon supplies it.
             val addonLogo = detailedEntry.logo?.takeIf { it.isNotBlank() && !isSvgLogo(it) }
-            val fallbackAddonLogo = sequenceOf(detailedEntry.providerArt?.logo,
-                this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
+            val fallbackAddonLogo = sequenceOf(detailedEntry.logoUrl, detailedEntry.providerArt?.logo,
+                this@CatalogEntry.logo, this@CatalogEntry.logoUrl, this@CatalogEntry.providerArt?.logo)
                 .firstOrNull { !it.isNullOrBlank() && !isSvgLogo(it) }
             val genreTargets = (detailedEntry.links.orEmpty() + this@CatalogEntry.links.orEmpty())
                 .mapNotNull { link ->
@@ -5061,11 +5071,12 @@ open class StremioC(
                     }.getOrNull()
                     target?.let { name to it }
                 }.toMap()
-            val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
-            val addonBackground = sequenceOf(detailedEntry.background, this@CatalogEntry.background)
+            var finalPoster = sequenceOf(detailedEntry.poster, this@CatalogEntry.poster)
                 .firstOrNull { !it.isNullOrBlank() }
-            val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
-            val finalType = detailedEntry.type ?: this@CatalogEntry.type
+            val addonBackground = sequenceOf(detailedEntry.background, detailedEntry.backdrop,
+                this@CatalogEntry.background, this@CatalogEntry.backdrop)
+                .firstOrNull { !it.isNullOrBlank() }
+                        val finalType = detailedEntry.type ?: this@CatalogEntry.type
             val nativeActors = aioActorRows(detailedEntry.appExtras)
                 .ifEmpty { aioActorRows(this@CatalogEntry.appExtras) }
 
@@ -5154,10 +5165,13 @@ open class StremioC(
                 }
             }
 
+            if (finalPoster == null) finalPoster = tmdbData?.fetchedPoster
+            if (finalGenre.isNullOrEmpty()) finalGenre = tmdbData?.fetchedGenres
             val finalBackground = addonBackground ?: tmdbData?.fetchedBackdrop
             val finalName = originalName?.takeIf { it.isNotBlank() }
                 ?: tmdbData?.fetchedTitle?.takeIf { it.isNotBlank() } ?: "Unknown Content"
-            val finalAddonDescription = sequenceOf(detailedEntry.description, this@CatalogEntry.description)
+            val finalAddonDescription = sequenceOf(detailedEntry.description, detailedEntry.overview,
+                this@CatalogEntry.description, this@CatalogEntry.overview)
                 .firstOrNull { !it.isNullOrBlank() }
             var finalDescription = if (fullMetadataSync)
                 finalAddonDescription ?: tmdbData?.fetchedOverview?.takeIf { it.isNotBlank() }
@@ -5266,6 +5280,9 @@ open class StremioC(
                 ?: sequenceOf(detailedEntry.appExtras, this@CatalogEntry.appExtras)
                     .mapNotNull { it?.certifications?.get("US")?.trim()?.takeIf(String::isNotBlank) }
                     .firstOrNull()
+                ?: sequenceOf(detailedEntry.contentRating, detailedEntry.certification,
+                    this@CatalogEntry.contentRating, this@CatalogEntry.certification)
+                    .firstOrNull { !it.isNullOrBlank() }
                 ?: tmdbData?.fetchedAgeRating
             val finalShowStatus = sequenceOf(detailedEntry.status, this@CatalogEntry.status)
                 .mapNotNull { status -> when (status?.trim()?.lowercase()) {
@@ -5273,8 +5290,11 @@ open class StremioC(
                     "returning series", "in production" -> ShowStatus.Ongoing
                     else -> null
                 } }.firstOrNull() ?: tmdbData?.fetchedStatus
-            val finalRatingValue = finalImdbRating?.takeIf { it.isNotBlank() && it != "null" } 
-                                   ?: tmdbData?.fetchedVoteAverage?.toString()
+            val finalRatingValue = sequenceOf(detailedEntry.imdbRating, this@CatalogEntry.imdbRating,
+                detailedEntry.rating, this@CatalogEntry.rating)
+                .mapNotNull { it?.trim()?.toDoubleOrNull()?.takeIf { n -> n.isFinite() && n > 0 && n <= 10 } }
+                .firstOrNull()?.toString()
+                ?: tmdbData?.fetchedVoteAverage?.takeIf { it.isFinite() && it > 0 && it <= 10 }?.toString()
 
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null ||
                 this@CatalogEntry.kitsuIdExt != null || finalKitsuId != null
@@ -5471,6 +5491,7 @@ open class StremioC(
         @JsonProperty("firstAired") val firstAired: String? = null,
         @JsonProperty("released") val released: String? = null,
         @JsonProperty("runtime") val runtime: String? = null,
+        @JsonProperty("rating") val rating: JsonNode? = null,
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null,
         @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
@@ -5561,6 +5582,10 @@ open class StremioC(
                 this.episode = displayEpisode
                 this.runTime = stremioRuntimeMinutes(this@Video.runtime)
                     ?: tmdbEp?.runtime?.takeIf { it > 0 }
+                val episodeRating = this@Video.rating?.asText()?.toDoubleOrNull()
+                    ?.takeIf { it.isFinite() && it > 0 && it <= 10 }
+                    ?: tmdbEp?.voteAverage?.takeIf { it.isFinite() && it > 0 && it <= 10 }
+                episodeRating?.let { this.score = Score.from10(it) }
 
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
@@ -5955,7 +5980,8 @@ private data class TmdbTranslations(@JsonProperty("translations") val translatio
 private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
 private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
 
-private data class TmdbGenre(@JsonProperty("id") val id: Int? = null)
+private data class TmdbGenre(@JsonProperty("id") val id: Int? = null,
+    @JsonProperty("name") val name: String? = null)
 
 private data class TmdbDetailResponse(
     @JsonProperty("id") val id: Int? = null,
