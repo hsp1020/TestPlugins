@@ -79,7 +79,7 @@ internal enum class ElevateFeature(
     PLAYER_PANEL("Playback & Subtitles", "Unified Player Panel",
         "Open Sources, Audio, Subtitles and Episodes in one right-side panel without pausing playback."),
     COMPACT_PLAYER_CONTROLS("Playback & Subtitles", "Compact Player Controls",
-        "Use 54x48dp icon-only buttons with 12dp gaps on phones and tablets when player button names are hidden."),
+        "Show compact icon-only player controls when player button names are hidden."),
     SUBTITLE_REFRESH("Playback & Subtitles", "Subtitle Refresh",
         "Enable manual and long-press automatic refresh for external text subtitles across providers."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",

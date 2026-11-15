@@ -5096,9 +5096,12 @@ open class StremioC(
                         ?: video.absoluteEpisode?.takeIf { it > 0 }
                     val kitsuMatches = if (directKey == null) kitsuAbsolute?.let { n ->
                         episodeTmdbMeta.keys.filter { key ->
+                            val targetDay = day(episodeTmdbMeta[key]?.airDate)
                             key.endsWith("_$n") &&
                                 key.startsWith("0_") == isSpecial &&
-                                key != (if (rejectedAio) aioCandidate else null)
+                                key != (if (rejectedAio) aioCandidate else null) &&
+                                (originalDay == null || targetDay == null ||
+                                    kotlin.math.abs(originalDay - targetDay) < 30L)
                         }
                     }.orEmpty() else emptyList()
                     val absoluteKey = kitsuMatches.singleOrNull()?.takeUnless { it in usedTmdb }

@@ -796,6 +796,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         return@Observer
                     }
                     originalEpisodes = list
+                    if (pendingPage != null || metadata != null) {
+                        val masked = list.map { it.copy(poster = null) }
+                        swappedEpisodes = masked
+                        nativeEpisodes(masked)
+                    }
                     updateEpisodes()
                 }
                 else -> Unit
@@ -1311,8 +1316,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                         if (episodes.containsKey(n)) listOf(season to n)
                                         else emptyList()
                                     }
-                                }.orEmpty().filter { it !in used &&
-                                    !(dateRejected && it == aioTarget) }
+                                }.orEmpty().filter { candidate ->
+                                    val targetDay = dayOf(targets[candidate.first]?.get(candidate.second)?.date)
+                                    candidate !in used && !(dateRejected && candidate == aioTarget) &&
+                                        (originalDay == null || targetDay == null ||
+                                            kotlin.math.abs(originalDay - targetDay) < 30L)
+                                }
                                 kitsuKey = candidates.singleOrNull()
                             }
                             val airDateCandidates = if (aioKey == null && kitsuKey == null &&
