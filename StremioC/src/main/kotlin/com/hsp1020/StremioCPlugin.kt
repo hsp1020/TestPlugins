@@ -2,11 +2,6 @@
 package com.hsp1020
 
 import android.content.Context
-import android.content.BroadcastReceiver
-import android.content.Intent
-import android.content.IntentFilter
-import android.net.Uri
-import androidx.core.content.ContextCompat
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
@@ -56,8 +51,6 @@ class StremioCPlugin : Plugin() {
     private var isUnloaded = false
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
-    private var genreReceiver: BroadcastReceiver? = null
-    private var genreContext: Context? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
     private val registeredProviders = mutableListOf<StremioC>()
@@ -90,7 +83,6 @@ class StremioCPlugin : Plugin() {
         val appContext = context.applicationContext
         StremioC.initializeActorImage(appContext, resources)
         NativeCoilDispatcher.configure(appContext)
-        registerGenreReceiver(appContext)
 
         val subtitlePrefs = appContext.getSharedPrefs()
         val subtitleLanguage = subtitlePrefs.getString(SUBTITLE_AUTO_SELECT_KEY, null)?.trim()
@@ -233,55 +225,6 @@ class StremioCPlugin : Plugin() {
         }
     }
 
-    private fun genreTarget(url: String?): CatalogShortcutTarget? {
-        val uri = runCatching { Uri.parse(url ?: return null) }.getOrNull() ?: return null
-        val parts = uri.pathSegments
-        if (uri.scheme != "stremio" || !uri.host.isNullOrEmpty() ||
-            parts.size != 4 || parts[0] != "discover") return null
-        val genre = uri.getQueryParameter("genre")?.takeIf { it.isNotBlank() } ?: return null
-        val manifest = Uri.parse(parts[1])
-        if (manifest.scheme !in setOf("http", "https") || manifest.host.isNullOrBlank() ||
-            manifest.authority.orEmpty().contains("@") ||
-            !manifest.path.orEmpty().endsWith("/manifest.json") ||
-            parts[2].isBlank() || parts[3].isBlank()) return null
-        return CatalogShortcutTarget(parts[1], parts[2], parts[3], genre)
-    }
-
-    private fun registerGenreReceiver(context: Context) {
-        if (genreReceiver != null) return
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (isUnloaded) return
-                val target = genreTarget(intent.getStringExtra("url")) ?: return
-                pluginIoScope.launch {
-                    val manifest = if (target.catalogId == "top")
-                        "https://v3-cinemeta.strem.io/manifest.json" else target.addonUrl
-                    val supported = runCatching {
-                        StremioC(manifest, "StremioC").browseCatalogs().any { catalog ->
-                            catalog.type == target.type && catalog.id == target.catalogId &&
-                                catalog.supportsExtra("genre") &&
-                                catalog.browseGenres().let { options ->
-                                    options.isEmpty() || target.genre in options
-                                }
-                        }
-                    }.getOrDefault(false)
-                    if (!supported || isUnloaded) return@launch
-                    ratingUiHandler.post {
-                        if (isUnloaded) return@post
-                        (CommonActivity.activity as? AppCompatActivity)?.let { host ->
-                            openCatalogBrowser(host, target)
-                        }
-                    }
-                }
-            }
-        }
-        ContextCompat.registerReceiver(context, receiver,
-            IntentFilter("com.hsp1020.stremioc.OPEN_GENRE"),
-            ContextCompat.RECEIVER_NOT_EXPORTED)
-        genreContext = context
-        genreReceiver = receiver
-    }
-
     private fun openCatalogBrowser(
         host: AppCompatActivity,
         target: CatalogShortcutTarget? = null,
@@ -315,11 +258,6 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun beforeUnload() {
-        genreReceiver?.let { receiver ->
-            runCatching { genreContext?.unregisterReceiver(receiver) }
-        }
-        genreReceiver = null
-        genreContext = null
         isUnloaded = true
         lastHomeProviderSignature = null
         reloadGeneration++

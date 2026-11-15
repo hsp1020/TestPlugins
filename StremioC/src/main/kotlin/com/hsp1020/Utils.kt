@@ -82,6 +82,8 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Observer
+import androidx.lifecycle.lifecycleScope
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
@@ -399,29 +401,92 @@ internal class RatingPlotImageHook(
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
             )) return
-        val apiName = f.arguments?.getString("apiName") ?: return
-        if (apiName != "StremioC" && !APIHolder.allProviders.any {
-                it is StremioC && it.name.equals(apiName, ignoreCase = true)
-            }) return
+        val apiName = f.arguments?.getString("apiName")
+        val isNative = apiName == "StremioC" || APIHolder.allProviders.any {
+            it is StremioC && it.name.equals(apiName, ignoreCase = true)
+        }
+        if (!isNative && root.findViewById<ChipGroup>(R.id.result_tag) == null) return
         val resId = root.resources.getIdentifier("result_description", "id", root.context.packageName)
-        if (resId == 0) return
-        val view = root.findViewById<TextView>(resId) ?: return
-        watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also {
+        val view = resId.takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
+        if (isNative && view == null) return
+        watchers[f] = Watcher(view ?: TextView(root.context), root,
+            f.arguments?.getString("url"), f, isNative).also {
             it.start()
         }
     }
 
-    private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
+    private inner class Watcher(
+        private val view: TextView, private val root: View,
+        private val detailUrl: String?, private val fragment: Fragment,
+        private val isNative: Boolean
+    ) : TextWatcher {
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
+        private var fallbackTargets = emptyMap<String, CatalogShortcutTarget>()
+        private var genreJob: Job? = null
+        private var genrePageKey: Pair<String, List<String>>? = null
+        private var currentPageUrl: String? = detailUrl
+
+        private suspend fun supportedGenres(genres: List<String>): Map<String, CatalogShortcutTarget> {
+            val found = linkedMapOf<String, CatalogShortcutTarget>()
+            val manifestPrefs = app.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+            for (link in SettingsRepository.loadLinks(prefs).distinctBy { it.link }) {
+                if (!link.enabled || link.link.isBlank() ||
+                    !StremioC.isCatalogAddonEnabled(link.link)) continue
+                val cached = stremioReadManifest(manifestPrefs, link.link)
+                val catalogs = cached?.let {
+                    runCatching { parseJson<StremioC.Manifest>(it).catalogs }.getOrNull()
+                } ?: try {
+                    StremioC(link.link, link.name).browseCatalogs()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) { emptyList() }
+                for (catalog in catalogs) {
+                    val type = catalog.type?.takeIf(String::isNotBlank) ?: continue
+                    val id = catalog.id?.takeIf(String::isNotBlank) ?: continue
+                    if (!catalog.supportsExtra("genre")) continue
+                    val options = catalog.browseGenres()
+                    for (name in genres) {
+                        if (name in found) continue
+                        val genre = options.firstOrNull { it.equals(name, ignoreCase = true) }
+                            ?: continue
+                        found[name] = CatalogShortcutTarget(link.link, type, id, genre)
+                    }
+                }
+                if (found.size == genres.size) break
+            }
+            return found
+        }
+
+        private fun refreshGenres(page: ResultData) {
+            currentPageUrl = page.url
+            val names = page.tags.orEmpty().filter(String::isNotBlank).distinct()
+            val key = page.url to names
+            if (genrePageKey == key) return
+            genrePageKey = key
+            genreJob?.cancel()
+            fallbackTargets = emptyMap()
+            bindGenreClicks()
+            val exact = StremioC.genreCatalogsByUrl[page.url].orEmpty()
+            val missing = names.filter { it !in exact }
+            if (missing.isEmpty()) return
+            genreJob = fragment.viewLifecycleOwner.lifecycleScope.launch {
+                val resolved = withContext(Dispatchers.IO) { supportedGenres(missing) }
+                if (genrePageKey == key && fragment.isAdded) {
+                    fallbackTargets = resolved
+                    bindGenreClicks()
+                }
+            }
+        }
 
         private fun bindGenreClicks() {
             val group = genreGroup ?: return
-            val targets = detailUrl?.let { StremioC.genreCatalogsByUrl[it] }.orEmpty()
+            val targets = currentPageUrl?.let { StremioC.genreCatalogsByUrl[it] }.orEmpty()
             val children = (0 until group.childCount).map(group::getChildAt)
             boundGenreChips.keys.retainAll(children)
             children.forEach { chip ->
-                val target = targets[(chip as? TextView)?.text?.toString()]
+                val name = (chip as? TextView)?.text?.toString()
+                val target = targets[name] ?: fallbackTargets[name]
                 if (boundGenreChips[chip] == target) return@forEach
                 if (target == null) {
                     if (boundGenreChips.remove(chip) != null) {
@@ -432,9 +497,7 @@ internal class RatingPlotImageHook(
                     }
                 } else {
                     (chip as? Chip)?.let(::applyEpisodeChipFeedback)
-                    chip.setOnClickListener {
-                        openCatalog(target, null)
-                    }
+                    chip.setOnClickListener { openCatalog(target, null) }
                     chip.isFocusable = true
                     boundGenreChips[chip] = target
                 }
@@ -460,18 +523,22 @@ internal class RatingPlotImageHook(
             }
             model.page.observe(fragment.viewLifecycleOwner) { value ->
                 val page = (value as? Resource.Success<ResultData>)?.value ?: return@observe
-                StremioC.latestRecommendationFor(page.url)?.let(::applyRecommendation)
+                if (isNative) StremioC.latestRecommendationFor(page.url)?.let(::applyRecommendation)
+                refreshGenres(page)
             }
-            StremioC.recommendationUpdates.observe(fragment.viewLifecycleOwner) { update ->
-                update?.let(::applyRecommendation)
+            if (isNative) {
+                StremioC.recommendationUpdates.observe(fragment.viewLifecycleOwner) { update ->
+                    update?.let(::applyRecommendation)
+                }
+                view.addTextChangedListener(this)
             }
-            view.addTextChangedListener(this)
             if (genreGroup != null)
                 root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
             detailLayout.onGlobalLayout()
         }
         fun detach() {
-            view.removeTextChangedListener(this)
+            genreJob?.cancel()
+            if (isNative) view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(detailLayout)
             boundGenreChips.keys.forEach { chip ->
                 chip.setOnClickListener(null)

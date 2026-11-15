@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.content.Intent
 import androidx.navigation.NavOptions
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import android.view.ViewTreeObserver
@@ -17,6 +16,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.Observer
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -251,8 +251,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         return (0 until values.length()).mapNotNull { index ->
             val item = values.optJSONObject(index) ?: return@mapNotNull null
             val category = item.string("category") ?: return@mapNotNull null
-            if (!category.equals("prequel", true) && !category.equals("sequel", true) &&
-                !category.equals("genres", true)) return@mapNotNull null
+            if (!category.equals("prequel", true) && !category.equals("sequel", true))
+                return@mapNotNull null
             val url = item.string("url")?.takeIf { it.startsWith("stremio:///") }
                 ?: return@mapNotNull null
             AddonLink(item.string("name") ?: return@mapNotNull null, category, url)
@@ -652,42 +652,57 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private fun followLink(link: AddonLink) {
             val uri = Uri.parse(link.url)
             val parts = uri.pathSegments
-            if (uri.scheme != "stremio" || !uri.host.isNullOrEmpty()) return
-            if (link.category.equals("genres", true)) {
-                if (parts.size != 4 || parts[0] != "discover" ||
-                    uri.getQueryParameter("genre") != link.name) return
-                // StremioC validates supported catalogs; no receiver means no action.
-                application.sendBroadcast(Intent("com.hsp1020.stremioc.OPEN_GENRE")
-                    .setPackage(application.packageName).putExtra("url", link.url))
-                return
-            }
-            if (parts.size != 3 || parts[0] != "detail" ||
+            if (uri.scheme != "stremio" || !uri.host.isNullOrEmpty() ||
+                parts.size != 3 || parts[0] != "detail" ||
                 parts[1] !in setOf("movie", "series")) return
-            val pageUrl = original?.url.orEmpty()
-            val provider = model.currentRepo?.api
-            val linkedId = parts[2]
-            val supported = provider?.javaClass?.name == "com.hsp1020.StremioC" &&
-                pageUrl.contains("/meta/") &&
-                linkedId.substringBefore(':') in setOf("kitsu", "mal") &&
-                linkedId.substringAfter(':', "").toIntOrNull()?.let { it > 0 } == true
-            if (supported && provider != null) {
-                val url = pageUrl.substringBefore("/meta/") +
-                    "/meta/${parts[1]}/${Uri.encode(linkedId)}.json"
-                fragment.activity?.loadResult(url, provider.name, link.name)
-                return
+
+            // Confirm the provider can load the target rather than guessing from its class.
+            fragment.viewLifecycleOwner.lifecycleScope.launch {
+                val provider = model.currentRepo?.api
+                val pageUrl = original?.url.orEmpty()
+                val base = pageUrl.substringBefore("/meta/", "").trimEnd('/')
+                val linkedId = parts[2]
+                val source = linkedId.substringBefore(':')
+                val animeId = linkedId.substringAfter(':', "").toLongOrNull()
+                    ?.takeIf { it > 0L }
+                val canProbe = provider != null && pageUrl.contains("/meta/") &&
+                    base.isNotEmpty() && source in setOf("kitsu", "mal", "anilist") &&
+                    animeId != null
+                val verified = if (canProbe && provider != null) withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(9_000L) {
+                        suspend fun tryId(id: String): String? {
+                            val url = "${base}/meta/${parts[1]}/${Uri.encode(id)}.json"
+                            val loaded = try { provider.load(url) }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (_: Exception) { null }
+                            return url.takeIf { loaded != null }
+                        }
+                        tryId(linkedId) ?: ElevateAnimeIdResolver.resolve(source, animeId.toString())
+                            ?.let { mapped ->
+                                listOfNotNull(mapped.imdb, mapped.tmdb?.let { "tmdb:$it" })
+                                    .firstNotNullOfOrNull { tryId(it) }
+                            }
+                    }
+                } else null
+                if (!fragment.isAdded) return@launch
+                if (verified != null && provider != null) {
+                    fragment.activity?.loadResult(verified, provider.name, link.name)
+                    return@launch
+                }
+
+                // Actor-information fallback: unsupported routes open native global search.
+                val activity = fragment.activity ?: return@launch
+                val searchId = activity.resources.getIdentifier(
+                    "navigation_search", "id", activity.packageName)
+                if (searchId == 0) return@launch
+                val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
+                val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
+                activity.navigate(searchId, Bundle().apply {
+                    putString("search_query", link.name)
+                    putBoolean("global_detail_search", true)
+                }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                    .setPopEnterAnim(enter).setPopExitAnim(exit).build())
             }
-            // Match ElevateActorInformation's unsupported-provider fallback.
-            val activity = fragment.activity ?: return
-            val searchId = activity.resources.getIdentifier(
-                "navigation_search", "id", activity.packageName)
-            if (searchId == 0) return
-            val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
-            val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
-            activity.navigate(searchId, Bundle().apply {
-                putString("search_query", link.name)
-                putBoolean("global_detail_search", true)
-            }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
-                .setPopEnterAnim(enter).setPopExitAnim(exit).build())
         }
 
         private fun bindLinks() {
@@ -695,9 +710,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val group = fragment.view?.findViewById<ChipGroup>(R.id.result_tag) ?: return
             if (links.isEmpty()) return
             // Keep the host's existing genre chips and click handlers untouched.
-            val shortcuts = links.filter { it.category.equals("prequel", true) ||
-                it.category.equals("sequel", true) }.take(12) +
-                links.filter { it.category.equals("genres", true) }.take(8)
+            val shortcuts = links.take(12)
             if (relationChips.size != shortcuts.size ||
                 relationChips.any { it.parent !== group }) {
                 relationChips.forEach { (it.parent as? android.view.ViewGroup)?.removeView(it) }
