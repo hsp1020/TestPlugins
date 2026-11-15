@@ -298,12 +298,17 @@ internal class ElevateSkipController(private val application: Application) :
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
-        skipButtonTimer = ElevateSkipButtonTimer(candidate, vm) { stamp ->
-            suppressNativeSkipButton(stamp)
-        }.also { it.attach() }
+        skipButtonTimer = ElevateSkipButtonTimer(candidate, vm,
+            { stamp -> suppressNativeSkipButton(stamp) }, { published }
+        ).also { it.attach() }
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
             if (event != null && event.instance == vm.state.instance) {
                 val incoming = event.value
+                if (incoming != published) ElevateSkipTrace.log(
+                    "${activeInstance}:${activeEpisode}", "STAMPS_OBSERVED",
+                    "incoming=${ElevateSkipTrace.stamps(incoming)} " +
+                        "published=${ElevateSkipTrace.stamps(published)} " +
+                        "state=${ElevateSkipTrace.stamps(vm.state.stamps)}")
                 // Our own LiveData notification is not a native result.
                 if (incoming != published || incoming.none { it.source.startsWith("Elevate/") }) {
                     if (incoming.none { it.source.startsWith("Elevate/") }) {
@@ -501,6 +506,9 @@ internal class ElevateSkipController(private val application: Application) :
             }
         }
         published = combined
+        ElevateSkipTrace.log("$instance:$episode", "PUBLISH_APPLIED",
+            "matches=${vm.state.stamps == combined} " +
+                "actual=${ElevateSkipTrace.stamps(vm.state.stamps)}")
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
         if (autoEnabled()) {
@@ -714,7 +722,8 @@ internal object ElevateSkipPreferences {
 internal class ElevateSkipButtonTimer(
     private val fragment: GeneratorPlayer,
     private val model: PlayerGeneratorViewModel,
-    private val shouldHide: (com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp?) -> Boolean
+    private val shouldHide: (com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp?) -> Boolean,
+    private val selectedStamps: () -> List<VideoSkipStamp>
 ) {
     private val main = Handler(Looper.getMainLooper())
     private var button: View? = null
@@ -745,6 +754,12 @@ internal class ElevateSkipButtonTimer(
     private fun markManualSkip() {
         val stamp = currentInterval() ?: return
         if (shouldHide(stamp)) return
+        val selected = selectedStamps()
+        ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
+            "MANUAL_SKIP_STATE",
+            "matches=${model.state.stamps == selected} " +
+                "state=${ElevateSkipTrace.stamps(model.state.stamps)} " +
+                "selected=${ElevateSkipTrace.stamps(selected)}")
         ElevateSkipTrace.log("${model.state.instance}:${skipPlaybackId(model.state.generatorState?.meta)}",
             "MANUAL_SKIP_CLICK", "source=${stamp.source} type=${stamp.timestamp.type} " +
                 "intervalMs=${stamp.timestamp.startMs}-${stamp.timestamp.endMs}")
@@ -1207,6 +1222,22 @@ internal object ElevateSkipRepository {
         return result
     }
 
+    // Provider season numbering is independent of the original Stremio episode numbering.
+    private fun introDbIdentity(i: Identity, mapping: ElevateAnimeIdResolver.EpisodeMapping?): Identity {
+        if (!i.anime || i.movie || mapping == null || mapping.imdb == null ||
+            mapping.imdb != i.imdb || mapping.imdbSeason == null) return i
+        return i.copy(season = mapping.imdbSeason, episode = mapping.episode)
+    }
+
+    private fun theIntroDbIdentity(i: Identity, mapping: ElevateAnimeIdResolver.EpisodeMapping?): Identity {
+        if (i.tmdb == null) return introDbIdentity(i, mapping)
+        if (!i.anime || i.movie || mapping == null || mapping.tmdb == null ||
+            mapping.tmdb != i.tmdb || mapping.tmdbSeason == null) return i
+        val mappedEpisode = (mapping.tmdbFromEpisode ?: 1).toLong() + mapping.episode - 1L
+        if (mappedEpisode !in 1L..Int.MAX_VALUE.toLong()) return i
+        return i.copy(season = mapping.tmdbSeason, episode = mappedEpisode.toInt())
+    }
+
     private fun category(type: SkipType): String = when (type) {
         SkipType.Opening, SkipType.Intro, SkipType.MixedOpening -> "opening"
         SkipType.Ending, SkipType.Credits, SkipType.MixedEnding -> "ending"
@@ -1623,9 +1654,20 @@ internal object ElevateSkipRepository {
                           null
                       }
                 }
-                val intro = async { provider(trace, "IntroDb") { introDb(target, trace) } }
+                val intro = async {
+                    val mappedIdentity = introDbIdentity(target, mapping.await())
+                    ElevateSkipTrace.log(trace, "INTRODB_MAPPING",
+                        "inputSeason=${target.season} inputEpisode=${target.episode} " +
+                            "season=${mappedIdentity.season} episode=${mappedIdentity.episode}")
+                    provider(trace, "IntroDb") { introDb(mappedIdentity, trace) }
+                }
                 val theIntro = async {
-                    provider(trace, "TheIntroDB") { theIntroDB(target, trace) }
+                    val mappedIdentity = theIntroDbIdentity(target, mapping.await())
+                    ElevateSkipTrace.log(trace, "THEINTRODB_MAPPING",
+                        "id=${if (target.tmdb != null) "tmdb" else "imdb"} " +
+                            "inputSeason=${target.season} inputEpisode=${target.episode} " +
+                            "season=${mappedIdentity.season} episode=${mappedIdentity.episode}")
+                    provider(trace, "TheIntroDB") { theIntroDB(mappedIdentity, trace) }
                 }
                 val ani = async {
                     provider(trace, "AniSkip") { aniSkip(target, mapping.await(), trace) }

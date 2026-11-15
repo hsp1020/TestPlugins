@@ -85,6 +85,9 @@ internal object ElevateOfflineMedia {
         val raw = prefs(ctx).getString("stamps:${key(i)}", null) ?: return null
         return runCatching {
             val j = JSONObject(raw)
+            // Old anime entries may contain IMDb/TMDb skips from the wrong season.
+            if (i.anime && (i.imdb != null || i.tmdb != null) &&
+                j.optInt("skipMappingVersion") != 2) return null
             val sourceDuration = j.getLong("duration")
             // Skip points from a substantially different release/runtime are unsafe.
             if (i.duration <= 0L || kotlin.math.abs(sourceDuration - i.duration) >
@@ -116,7 +119,8 @@ internal object ElevateOfflineMedia {
         }
         val p = prefs(ctx)
         val editor = p.edit().putString("stamps:${key(i)}",
-            JSONObject().put("duration", i.duration).put("items", items).toString())
+            JSONObject().put("skipMappingVersion", 2)
+                .put("duration", i.duration).put("items", items).toString())
         // Bound retained episodes; the in-memory API cache remains unchanged.
         val old = p.all.keys.filter { it.startsWith("stamps:") }
         if (old.size >= 240) old.take(old.size - 200).forEach(editor::remove)

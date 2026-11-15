@@ -28,7 +28,10 @@ internal object ElevateAnimeIdResolver {
                 listOf(imdbSeason, tvdbSeason, tmdbSeason, traktSeason))
     }
     internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int,
-        val kitsu: String? = null, val season: Int? = null)
+        val kitsu: String? = null, val season: Int? = null,
+        val imdb: String? = null, val tmdb: String? = null,
+        val imdbSeason: Int? = null, val tmdbSeason: Int? = null,
+        val tmdbFromEpisode: Int? = null)
 
     private val hosts = listOf(
         "aiostreams.elfhosted.com", "aiostreams.fortheweak.cloud",
@@ -134,7 +137,9 @@ internal object ElevateAnimeIdResolver {
             return null
         }
         val result = EpisodeMapping(mapped.mal, mapped.anilist, local, mapped.kitsu,
-            mapped.imdbSeason ?: mapped.tvdbSeason ?: mapped.tmdbSeason)
+            mapped.imdbSeason ?: mapped.tvdbSeason ?: mapped.tmdbSeason,
+            mapped.imdb, mapped.tmdb, mapped.imdbSeason, mapped.tmdbSeason,
+            mapped.tmdbFromEpisode)
         if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_RESULT",
             "mapping=$mapped selectedLocalEpisode=$local localEpisodeSource=" +
                 "${if (field == "imdbId" && mapped.fromEpisode != null) "AIOStreams.fromEpisode" else "inputEpisode"} " +
