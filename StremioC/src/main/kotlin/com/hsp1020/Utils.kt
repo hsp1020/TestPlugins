@@ -82,8 +82,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Observer
-import androidx.lifecycle.lifecycleScope
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
@@ -422,61 +420,11 @@ internal class RatingPlotImageHook(
     ) : TextWatcher {
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
-        private var fallbackTargets = emptyMap<String, CatalogShortcutTarget>()
-        private var genreJob: Job? = null
-        private var genrePageKey: Pair<String, List<String>>? = null
         private var currentPageUrl: String? = detailUrl
-
-        private suspend fun supportedGenres(genres: List<String>): Map<String, CatalogShortcutTarget> {
-            val found = linkedMapOf<String, CatalogShortcutTarget>()
-            val manifestPrefs = app.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-            for (link in SettingsRepository.loadLinks(prefs).distinctBy { it.link }) {
-                if (!link.enabled || link.link.isBlank() ||
-                    !StremioC.isCatalogAddonEnabled(link.link)) continue
-                val cached = stremioReadManifest(manifestPrefs, link.link)
-                val catalogs = cached?.let {
-                    runCatching { parseJson<StremioC.Manifest>(it).catalogs }.getOrNull()
-                } ?: try {
-                    StremioC(link.link, link.name).browseCatalogs()
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) { emptyList() }
-                for (catalog in catalogs) {
-                    val type = catalog.type?.takeIf(String::isNotBlank) ?: continue
-                    val id = catalog.id?.takeIf(String::isNotBlank) ?: continue
-                    if (!catalog.supportsExtra("genre")) continue
-                    val options = catalog.browseGenres()
-                    for (name in genres) {
-                        if (name in found) continue
-                        val genre = options.firstOrNull { it.equals(name, ignoreCase = true) }
-                            ?: continue
-                        found[name] = CatalogShortcutTarget(link.link, type, id, genre)
-                    }
-                }
-                if (found.size == genres.size) break
-            }
-            return found
-        }
 
         private fun refreshGenres(page: ResultData) {
             currentPageUrl = page.url
-            val names = page.tags.orEmpty().filter(String::isNotBlank).distinct()
-            val key = page.url to names
-            if (genrePageKey == key) return
-            genrePageKey = key
-            genreJob?.cancel()
-            fallbackTargets = emptyMap()
             bindGenreClicks()
-            val exact = StremioC.genreCatalogsByUrl[page.url].orEmpty()
-            val missing = names.filter { it !in exact }
-            if (missing.isEmpty()) return
-            genreJob = fragment.viewLifecycleOwner.lifecycleScope.launch {
-                val resolved = withContext(Dispatchers.IO) { supportedGenres(missing) }
-                if (genrePageKey == key && fragment.isAdded) {
-                    fallbackTargets = resolved
-                    bindGenreClicks()
-                }
-            }
         }
 
         private fun bindGenreClicks() {
@@ -486,7 +434,7 @@ internal class RatingPlotImageHook(
             boundGenreChips.keys.retainAll(children)
             children.forEach { chip ->
                 val name = (chip as? TextView)?.text?.toString()
-                val target = targets[name] ?: fallbackTargets[name]
+                val target = targets[name]
                 if (boundGenreChips[chip] == target) return@forEach
                 if (target == null) {
                     if (boundGenreChips.remove(chip) != null) {
@@ -537,7 +485,6 @@ internal class RatingPlotImageHook(
             detailLayout.onGlobalLayout()
         }
         fun detach() {
-            genreJob?.cancel()
             if (isNative) view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(detailLayout)
             boundGenreChips.keys.forEach { chip ->
