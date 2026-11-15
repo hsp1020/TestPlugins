@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import androidx.navigation.NavOptions
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import android.view.ViewTreeObserver
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
@@ -231,14 +233,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 ep.optJSONArray("streams")?.takeIf { it.length() > 0 })
         }
         // Number missing/zero episodes after the last regular episode in each season.
-        return parsed.groupBy { it.season ?: 0 }.flatMap { (season, videos) ->
+        val grouped = parsed.groupBy { it.season ?: 0 }
+        val lastSeason = (grouped.keys.filter { it > 0 }.maxOrNull() ?: 0) + 1
+        return grouped.flatMap { (season, videos) ->
             val regular = videos.filter { (it.number ?: 0) > 0 }.sortedBy { it.number }
             var next = regular.maxOfOrNull { it.number ?: 0 } ?: 0
             val unnamed = videos.filter { (it.number ?: 0) <= 0 }
                 .sortedBy { it.meta.name.orEmpty() }
                 .map { it.copy(number = ++next) }
             (regular + unnamed).map { it.copy(season = season) }
-        }
+        }.sortedWith(compareBy({ if (it.season == 0) lastSeason else it.season ?: 0 },
+            { it.number ?: 0 }))
     }
 
     private fun addonLinks(meta: JSONObject): List<AddonLink> {
@@ -647,24 +652,42 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private fun followLink(link: AddonLink) {
             val uri = Uri.parse(link.url)
             val parts = uri.pathSegments
-            val pageUrl = original?.url.orEmpty()
+            if (uri.scheme != "stremio" || !uri.host.isNullOrEmpty()) return
             if (link.category.equals("genres", true)) {
-                runCatching {
-                    fragment.startActivity(Intent(Intent.ACTION_VIEW, uri)
-                        .addCategory(Intent.CATEGORY_BROWSABLE))
-                }
-            } else if (parts.size == 3 && parts[0] == "detail" &&
-                parts[1] in setOf("movie", "series")) {
-                val provider = nativeResponse?.apiName?.takeIf { it.isNotBlank() }
-                if (provider != null && pageUrl.contains("/meta/")) {
-                    val url = pageUrl.substringBefore("/meta/") +
-                        "/meta/${parts[1]}/${Uri.encode(parts[2])}.json"
-                    fragment.activity?.loadResult(url, provider, link.name)
-                } else runCatching {
-                    fragment.startActivity(Intent(Intent.ACTION_VIEW, uri)
-                        .addCategory(Intent.CATEGORY_BROWSABLE))
-                }
+                if (parts.size != 4 || parts[0] != "discover" ||
+                    uri.getQueryParameter("genre") != link.name) return
+                // StremioC validates supported catalogs; no receiver means no action.
+                application.sendBroadcast(Intent("com.hsp1020.stremioc.OPEN_GENRE")
+                    .setPackage(application.packageName).putExtra("url", link.url))
+                return
             }
+            if (parts.size != 3 || parts[0] != "detail" ||
+                parts[1] !in setOf("movie", "series")) return
+            val pageUrl = original?.url.orEmpty()
+            val provider = model.currentRepo?.api
+            val linkedId = parts[2]
+            val supported = provider?.javaClass?.name == "com.hsp1020.StremioC" &&
+                pageUrl.contains("/meta/") &&
+                linkedId.substringBefore(':') in setOf("kitsu", "mal") &&
+                linkedId.substringAfter(':', "").toIntOrNull()?.let { it > 0 } == true
+            if (supported && provider != null) {
+                val url = pageUrl.substringBefore("/meta/") +
+                    "/meta/${parts[1]}/${Uri.encode(linkedId)}.json"
+                fragment.activity?.loadResult(url, provider.name, link.name)
+                return
+            }
+            // Match ElevateActorInformation's unsupported-provider fallback.
+            val activity = fragment.activity ?: return
+            val searchId = activity.resources.getIdentifier(
+                "navigation_search", "id", activity.packageName)
+            if (searchId == 0) return
+            val enter = activity.resources.getIdentifier("enter_anim", "anim", activity.packageName)
+            val exit = activity.resources.getIdentifier("exit_anim", "anim", activity.packageName)
+            activity.navigate(searchId, Bundle().apply {
+                putString("search_query", link.name)
+                putBoolean("global_detail_search", true)
+            }, NavOptions.Builder().setEnterAnim(enter).setExitAnim(exit)
+                .setPopEnterAnim(enter).setPopExitAnim(exit).build())
         }
 
         private fun bindLinks() {
@@ -966,7 +989,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 episode.runTime = info.runTime
                 episode
             }
-            val names = source.videos.mapNotNull { it.season }.distinct().map { season ->
+            val names = source.videos.mapNotNull { it.season }.distinct()
+                .sortedBy { if (it == 0) specialSeason ?: 0 else it }.map { season ->
                 if (season == 0) SeasonData(specialSeason ?: 0,
                     "${fragment.getString(R.string.season)} S")
                 else SeasonData(season, displaySeason = season)
@@ -1063,8 +1087,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
                     val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                     val responses = seasons.mapNotNull { sourceSeason ->
-                        val mapping = seasonMappings[sourceSeason]
-                            ?: directMapping?.takeIf { it.matchesSeason(sourceSeason) }
+                        // A Kitsu/MAL/AniList title represents one anime season even when
+                        // the provider numbers its local episodes as season 1.
+                        val titleSeason = ids.original?.substringBefore(':') in
+                            setOf("kitsu", "mal", "anilist") &&
+                            seasons.size == 1 && sourceSeason == 1
+                        val matchingDirect = directMapping?.takeIf {
+                            titleSeason || it.matchesSeason(sourceSeason)
+                        }
+                        val mapping = matchingDirect ?: seasonMappings[sourceSeason]
                         val id = if (animeLookup != null && mapping == null) null
                             else mapping?.tmdb?.takeIf { mapping.tmdbSeason != null } ?: detailId
                         if (id == null) return@mapNotNull null
