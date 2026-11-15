@@ -90,38 +90,80 @@ internal object ElevateAnimeIdResolver {
     /** Same AIOStreams flight/cache as title and season mapping, with episode offset retained. */
     suspend fun resolveEpisode(
         imdb: String?, mal: String?, anilist: String?, kitsu: String?,
-        season: Int?, episode: Int
+        season: Int?, episode: Int, trace: String? = null
     ): EpisodeMapping? {
-        if (episode <= 0) return null
+        if (episode <= 0) {
+            if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_SKIP",
+                "reason=invalidEpisode inputEpisode=$episode")
+            return null
+        }
         val (field, raw) = when {
             imdb != null -> "imdbId" to imdb
             mal != null -> "malId" to mal
             anilist != null -> "anilistId" to anilist
             kitsu != null -> "kitsuId" to kitsu
-            else -> return null
+            else -> {
+                if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_SKIP",
+                    "reason=noIds inputSeason=$season inputEpisode=$episode")
+                return null
+            }
         }
         val id = if (field == "imdbId")
-            raw.takeIf { it.matches(Regex("tt[0-9]+")) } ?: return null
-        else raw.toLongOrNull()?.takeIf { it > 0L }?.toString() ?: return null
-        val mapped = resolveByField(field, id, if (field == "imdbId") season else null)
-            ?: return null
+            raw.takeIf { it.matches(Regex("tt[0-9]+")) }
+        else raw.toLongOrNull()?.takeIf { it > 0L }?.toString()
+        if (id == null) {
+            if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_SKIP",
+                "reason=invalidId selectedField=$field raw=$raw")
+            return null
+        }
+        if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_REQUEST",
+            "selectedField=$field selectedId=$id inputSeason=$season inputEpisode=$episode " +
+                "requestSeason=${if (field == "imdbId") season else null}")
+        val mapped = resolveByField(field, id, if (field == "imdbId") season else null, trace = trace)
+        if (mapped == null) {
+            if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_RESULT",
+                "mapping=null selectedField=$field id=$id")
+            return null
+        }
         val local = if (field == "imdbId" && mapped.fromEpisode != null)
-            (episode - mapped.fromEpisode + 1).takeIf { it > 0 } ?: return null
+            (episode - mapped.fromEpisode + 1).takeIf { it > 0 }
         else episode
-        return EpisodeMapping(mapped.mal, mapped.anilist, local, mapped.kitsu,
+        if (local == null) {
+            if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_RESULT",
+                "invalidLocalEpisode=true inputEpisode=$episode fromEpisode=${mapped.fromEpisode}")
+            return null
+        }
+        val result = EpisodeMapping(mapped.mal, mapped.anilist, local, mapped.kitsu,
             mapped.imdbSeason ?: mapped.tvdbSeason ?: mapped.tmdbSeason)
+        if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_RESULT",
+            "mapping=$mapped selectedLocalEpisode=$local localEpisodeSource=" +
+                "${if (field == "imdbId" && mapped.fromEpisode != null) "AIOStreams.fromEpisode" else "inputEpisode"} " +
+                "chosenSeason=${result.season} chosenSeasonSource=imdb>tvdb>tmdb result=$result")
+        return result
     }
 
     /** Kitsu Stremio metadata exposes per-episode absoluteEpisode; never infer offsets. */
-    suspend fun kitsuAbsoluteEpisodes(rawId: String?): Map<Int, Int> {
+    suspend fun kitsuAbsoluteEpisodes(
+        rawId: String?, trace: String? = null
+    ): Map<Int, Int> {
         val id = rawId?.removePrefix("kitsu:")?.substringBefore(':')
-            ?.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return emptyMap()
+            ?.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: run {
+                if (trace != null) ElevateSkipTrace.log(trace, "KITSU_ABSOLUTE_SKIP",
+                    "reason=missingOrInvalidKitsuId rawId=$rawId")
+                return emptyMap()
+            }
         val now = System.currentTimeMillis()
         synchronized(kitsuCache) {
             kitsuCache[id]?.takeIf {
                 now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
-            }?.let { return it.second }
+            }?.let {
+                if (trace != null) ElevateSkipTrace.log(trace, "KITSU_ABSOLUTE_CACHE",
+                    "id=$id hit=true count=${it.second.size}")
+                return it.second
+            }
         }
+        if (trace != null) ElevateSkipTrace.log(trace, "KITSU_ABSOLUTE_CACHE",
+            "id=$id hit=false requesting=true")
         val flight = synchronized(kitsuCache) {
             kitsuFlights[id] ?: scope.async(start = CoroutineStart.LAZY) {
                 val result = try {
@@ -140,9 +182,17 @@ internal object ElevateAnimeIdResolver {
                                 }
                             }
                         }
-                    } ?: emptyMap()
+                    } ?: run {
+                        if (trace != null) ElevateSkipTrace.log(trace, "KITSU_FETCH_TIMEOUT",
+                            "id=$id limitMs=10000")
+                        emptyMap()
+                    }
                 } catch (e: CancellationException) { throw e }
-                  catch (_: Exception) { emptyMap() }
+                  catch (ex: Exception) {
+                      if (trace != null) ElevateSkipTrace.log(trace, "KITSU_FETCH_ERROR",
+                          "id=$id exception=${ex.javaClass.simpleName} message=${ex.message?.take(160)}")
+                      emptyMap()
+                  }
                 synchronized(kitsuCache) {
                     kitsuCache[id] = System.currentTimeMillis() to result
                 }
@@ -157,11 +207,15 @@ internal object ElevateAnimeIdResolver {
             }
         }
         flight.start()
-        return flight.await()
+        val result = flight.await()
+        if (trace != null) ElevateSkipTrace.log(trace, "KITSU_ABSOLUTE_RESULT",
+            "id=$id count=${result.size} episodes=${result.entries.joinToString(limit = 30)}")
+        return result
     }
 
     private suspend fun resolveByField(
-        field: String, id: String, season: Int?, allowTrackerOnly: Boolean = false
+        field: String, id: String, season: Int?, allowTrackerOnly: Boolean = false,
+        trace: String? = null
     ): Mapping? {
         val key = field + ":" + id + (season?.let { ":$it" } ?: "") +
             (if (allowTrackerOnly) ":watch-history" else "")
@@ -169,13 +223,21 @@ internal object ElevateAnimeIdResolver {
         synchronized(cache) {
             cache[key]?.takeIf {
                 now - it.first < if (it.second == null) 300_000L else 86_400_000L
-            }?.let { return it.second }
+            }?.let {
+                if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_CACHE",
+                    "key=$key hit=true mapping=${it.second}")
+                return it.second
+            }
         }
         val flight = synchronized(cache) {
             cache[key]?.takeIf {
                 System.currentTimeMillis() - it.first in 0 until
                     if (it.second == null) 300_000L else 86_400_000L
-            }?.let { return it.second }
+            }?.let {
+                if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_CACHE",
+                    "key=$key hit=true secondCheck=true mapping=${it.second}")
+                return it.second
+            }
             flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 val found = try {
             withTimeoutOrNull(15_000L) {
@@ -184,22 +246,50 @@ internal object ElevateAnimeIdResolver {
                     for (host in hosts) {
                         val url = "https://" + host + "/api/v1/anime?idType=" + field +
                             "&idValue=" + id + (season?.let { "&season=$it" } ?: "")
+                        if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REQUEST",
+                            "host=$host field=$field id=$id season=$season")
                         val root = try {
                             JSONObject(app.get(url, timeout = 5L).text)
                         } catch (e: CancellationException) { throw e }
-                          catch (_: Exception) { continue }
-                        if (!root.optBoolean("success")) continue
-                        val data = root.optJSONObject("data") ?: continue
-                        val ids = data.optJSONObject("mappings") ?: continue
+                          catch (ex: Exception) {
+                              if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_ERROR",
+                                  "host=$host exception=${ex.javaClass.simpleName}")
+                              continue
+                          }
+                        if (!root.optBoolean("success")) {
+                            if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                "host=$host reason=successFalse")
+                            continue
+                        }
+                        val data = root.optJSONObject("data")
+                        if (data == null) {
+                            if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                "host=$host reason=missingData")
+                            continue
+                        }
+                        val ids = data.optJSONObject("mappings")
+                        if (ids == null) {
+                            if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                "host=$host reason=missingMappings")
+                            continue
+                        }
                         // Match the exact IMDb identity and season validation in StremioC.
-                        if (ids.optString(field) != id) continue
+                        if (ids.optString(field) != id) {
+                            if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                "host=$host reason=identityMismatch got=${ids.optString(field)}")
+                            continue
+                        }
                         if (field == "imdbId" && season != null && season > 1) {
                             val mappedSeason = ElevateWatchHistoryRules.preferredSeason(
                                 listOf("imdb", "tvdb", "trakt", "tmdb").map { source ->
                                     data.optJSONObject(source)?.optInt("seasonNumber")
                                         ?.takeIf { it > 0 }
                                 })
-                            if (mappedSeason != season) continue
+                            if (mappedSeason != season) {
+                                if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                    "host=$host reason=seasonMismatch requested=$season got=$mappedSeason")
+                                continue
+                            }
                         }
                         fun positive(name: String): String? = ids.optString(name)
                             .toLongOrNull()?.takeIf { it > 0L }?.toString()
@@ -209,12 +299,24 @@ internal object ElevateAnimeIdResolver {
                         val hasAnimeIds = kitsu != null || mal != null || anilist != null
                         val hasTrackingIds = positive("simklId") != null ||
                             positive("thetvdbId") != null
-                        if (!hasAnimeIds && !(allowTrackerOnly && hasTrackingIds))
+                        if (!hasAnimeIds && !(allowTrackerOnly && hasTrackingIds)) {
+                            if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_REJECT",
+                                "host=$host reason=noAnimeIds")
                             continue
+                        }
                         val episodeInfo = listOf("imdb", "tvdb", "trakt", "tmdb")
                             .mapNotNull(data::optJSONObject).firstOrNull {
                                 season == null || it.optInt("seasonNumber") == season
                             }
+                        if (trace != null) ElevateSkipTrace.log(trace, "AIO_HOST_MATCH",
+                            "host=$host requestSeason=$season kitsu=$kitsu mal=$mal anilist=$anilist " +
+                                "selectedFromEpisode=${episodeInfo?.optInt("fromEpisode")} " +
+                                "imdbSeason=${data.optJSONObject("imdb")?.optInt("seasonNumber")} " +
+                                "imdbFromEpisode=${data.optJSONObject("imdb")?.optInt("fromEpisode")} " +
+                                "tvdbSeason=${data.optJSONObject("tvdb")?.optInt("seasonNumber")} " +
+                                "tvdbFromEpisode=${data.optJSONObject("tvdb")?.optInt("fromEpisode")} " +
+                                "tmdbSeason=${data.optJSONObject("tmdb")?.optInt("seasonNumber")} " +
+                                "tmdbFromEpisode=${data.optJSONObject("tmdb")?.optInt("fromEpisode")}")
                         result = Mapping(
                             kitsu, mal, anilist,
                             ids.optString("imdbId").takeIf { it.matches(Regex("tt[0-9]+")) },
@@ -243,7 +345,12 @@ internal object ElevateAnimeIdResolver {
                 }
             }
         }
+        if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_CACHE",
+            "key=$key hit=false inflightOrNetwork=true")
         flight.start()
-        return flight.await()
+        val result = flight.await()
+        if (trace != null) ElevateSkipTrace.log(trace, "AIO_RESOLVE_DONE",
+            "key=$key mapping=$result")
+        return result
     }
 }
