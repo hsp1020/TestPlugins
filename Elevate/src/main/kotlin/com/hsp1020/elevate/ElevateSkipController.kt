@@ -1225,6 +1225,7 @@ internal object ElevateSkipRepository {
             runCatching { JSONObject(it).nonEmpty("clientId") }.getOrNull()
         } ?: return emptyList()
         val episode = mapped?.episode ?: i.episode
+        val season = mapped?.season ?: i.season
         suspend fun query(graphql: String): JSONObject? =
             try {
                 JSONObject(app.post("https://api.anime-skip.com/graphql",
@@ -1235,15 +1236,42 @@ internal object ElevateSkipRepository {
               catch (_: Exception) { null }
         val shows = query("{ findShowsByExternalId(service: ANILIST, serviceId: \"" +
             anilist + "\") { id } }")?.optJSONArray("findShowsByExternalId") ?: return emptyList()
+        var best = emptyList<VideoSkipStamp>()
+        var bestRank = -1
+        var bestKinds = -1
+        var bestCount = -1
+        var absolute: Int? = null
+        var absoluteFetched = false
         for (s in 0 until shows.length()) {
             val showId = shows.optJSONObject(s)?.nonEmpty("id") ?: continue
             val episodes = query("{ findEpisodesByShowId(showId: \"" + showId +
                 "\") { season number absoluteNumber timestamps { at type { name } } } }")
                 ?.optJSONArray("findEpisodesByShowId") ?: continue
+            val availableSeasons = (0 until episodes.length()).mapNotNull { index ->
+                episodes.optJSONObject(index)?.optString("season")?.toIntOrNull()
+            }.distinct()
             for (n in 0 until episodes.length()) {
                 val ep = episodes.optJSONObject(n) ?: continue
-                if (ep.optString("number").toIntOrNull() != episode &&
-                    ep.optString("absoluteNumber").toIntOrNull() != episode) continue
+                val epSeason = ep.optString("season").toIntOrNull()
+                val number = ep.optString("number").toIntOrNull()
+                val absoluteNumber = ep.optString("absoluteNumber").toIntOrNull()
+                val seasonLocalShow = availableSeasons.size == 1 &&
+                    epSeason == availableSeasons[0] && mapped?.anilist == anilist
+                val matchingSeason = if (season != null) epSeason == season ||
+                    seasonLocalShow else availableSeasons.size == 1 &&
+                    epSeason == availableSeasons[0]
+                if (!matchingSeason) continue
+                var rank = if (number == episode) 2 else -1
+                if (rank < 0 && (number != null || absoluteNumber != null)) {
+                    if (!absoluteFetched) {
+                        absoluteFetched = true
+                        absolute = ElevateAnimeIdResolver.kitsuAbsoluteEpisodes(
+                            mapped?.kitsu ?: i.kitsu)[episode]
+                    }
+                    if (absolute != null && (number == absolute || absoluteNumber == absolute))
+                        rank = if (matchingSeason) 1 else 0
+                }
+                if (rank < 0) continue
                 val marks = ep.optJSONArray("timestamps") ?: continue
                 val sorted = (0 until marks.length()).mapNotNull { marks.optJSONObject(it) }
                     .sortedBy { it.optDouble("at", Double.MAX_VALUE) }
@@ -1266,10 +1294,18 @@ internal object ElevateSkipRepository {
                     segments.add(SkipStamp(type, start, end))
                 }
                 val result = stamps("AnimeSkip", segments, i)
-                if (result.isNotEmpty()) return result
+                val kinds = result.map { category(it.timestamp.type) }.distinct().size
+                if (result.isNotEmpty() && (rank > bestRank ||
+                    rank == bestRank && (kinds > bestKinds ||
+                        kinds == bestKinds && result.size > bestCount))) {
+                    best = result
+                    bestRank = rank
+                    bestKinds = kinds
+                    bestCount = result.size
+                }
             }
         }
-        return emptyList()
+        return best
     }
 
     private suspend fun provider(block: suspend () -> List<VideoSkipStamp>): List<VideoSkipStamp> =

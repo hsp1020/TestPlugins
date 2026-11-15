@@ -27,13 +27,19 @@ internal object ElevateAnimeIdResolver {
             ElevateWatchHistoryRules.consistentSeason(season,
                 listOf(imdbSeason, tvdbSeason, tmdbSeason, traktSeason))
     }
-    internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int)
+    internal data class EpisodeMapping(val mal: String?, val anilist: String?, val episode: Int,
+        val kitsu: String? = null, val season: Int? = null)
 
     private val hosts = listOf(
         "aiostreams.elfhosted.com", "aiostreams.fortheweak.cloud",
         "aiostreamsfortheweebsstable.midnightignite.me",
         "aio.atbphosting.com", "aiostreams.stremio.ru", "aiostreams.viren070.me"
     )
+    private val kitsuCache = object : LinkedHashMap<String, Pair<Long, Map<Int, Int>>>(24, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, Map<Int, Int>>>) =
+            size > 48
+    }
+    private val kitsuFlights = mutableMapOf<String, Deferred<Map<Int, Int>>>()
     private val limiter = Semaphore(3)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val flights = mutableMapOf<String, Deferred<Mapping?>>()
@@ -102,7 +108,56 @@ internal object ElevateAnimeIdResolver {
         val local = if (field == "imdbId" && mapped.fromEpisode != null)
             (episode - mapped.fromEpisode + 1).takeIf { it > 0 } ?: return null
         else episode
-        return EpisodeMapping(mapped.mal, mapped.anilist, local)
+        return EpisodeMapping(mapped.mal, mapped.anilist, local, mapped.kitsu,
+            mapped.imdbSeason ?: mapped.tvdbSeason ?: mapped.tmdbSeason)
+    }
+
+    /** Kitsu Stremio metadata exposes per-episode absoluteEpisode; never infer offsets. */
+    suspend fun kitsuAbsoluteEpisodes(rawId: String?): Map<Int, Int> {
+        val id = rawId?.removePrefix("kitsu:")?.substringBefore(':')
+            ?.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return emptyMap()
+        val now = System.currentTimeMillis()
+        synchronized(kitsuCache) {
+            kitsuCache[id]?.takeIf {
+                now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
+            }?.let { return it.second }
+        }
+        val flight = synchronized(kitsuCache) {
+            kitsuFlights[id] ?: scope.async(start = CoroutineStart.LAZY) {
+                val result = try {
+                    withTimeoutOrNull(10_000L) {
+                        limiter.withPermit {
+                            val text = app.get("https://anime-kitsu.strem.fun/meta/series/kitsu:" +
+                                id + ".json", timeout = 8L).text
+                            val videos = JSONObject(text).optJSONObject("meta")?.optJSONArray("videos")
+                            buildMap<Int, Int> {
+                                if (videos != null) for (n in 0 until videos.length()) {
+                                    val video = videos.optJSONObject(n) ?: continue
+                                    val local = video.optInt("episode").takeIf { it > 0 } ?: continue
+                                    val absolute = video.optInt("absoluteEpisode").takeIf { it > 0 }
+                                        ?: continue
+                                    put(local, absolute)
+                                }
+                            }
+                        }
+                    } ?: emptyMap()
+                } catch (e: CancellationException) { throw e }
+                  catch (_: Exception) { emptyMap() }
+                synchronized(kitsuCache) {
+                    kitsuCache[id] = System.currentTimeMillis() to result
+                }
+                result
+            }.also { task ->
+                kitsuFlights[id] = task
+                task.invokeOnCompletion {
+                    synchronized(kitsuCache) {
+                        if (kitsuFlights[id] === task) kitsuFlights.remove(id)
+                    }
+                }
+            }
+        }
+        flight.start()
+        return flight.await()
     }
 
     private suspend fun resolveByField(

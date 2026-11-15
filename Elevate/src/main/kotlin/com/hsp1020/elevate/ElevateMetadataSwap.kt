@@ -1074,29 +1074,6 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
                     }
                 } else emptyMap()
-                // Only infer absolute episode offsets when TMDB has one numbered season
-                // and the provider's earlier episode numbering is complete and contiguous.
-                val originalBySeason = (nativeResponse as? TvSeriesLoadResponse)
-                    ?.episodes.orEmpty().groupBy { it.season }
-                fun cumulativeStart(season: Int, tmdbCount: Int): Int? {
-                    if (season <= 1) return null
-                    var preceding = 0
-                    for (previous in 1 until season) {
-                        val numbers = (if (completeAio)
-                        source.videos.filter { it.season == previous }.mapNotNull { it.number }
-                            .filter { it > 0 }.distinct().sorted()
-                    else originalBySeason[previous]?.mapNotNull { it.episode }
-                        ?.filter { it > 0 }?.distinct()?.sorted()) ?: return null
-                        if (numbers.isEmpty() || numbers.first() != 1 ||
-                            numbers.last() != numbers.size) return null
-                        preceding += numbers.size
-                    }
-                    val last = (if (completeAio)
-                        source.videos.filter { it.season == season }.maxOfOrNull { it.number ?: 0 }
-                    else base.filter { it.seasonIndex == season }.maxOfOrNull { it.episode })
-                        ?: return null
-                    return (preceding + 1).takeIf { preceding + last <= tmdbCount }
-                }
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
                     val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
                     val responses = seasons.mapNotNull { sourceSeason ->
@@ -1109,25 +1086,23 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             titleSeason || it.matchesSeason(sourceSeason)
                         }
                         val mapping = matchingDirect ?: seasonMappings[sourceSeason]
-                        val id = if (animeLookup != null && mapping == null) null
+                        val kitsuId = mapping?.kitsu ?: ids.kitsu
+                            ?: ids.original?.takeIf { it.startsWith("kitsu:") }
+                                ?.substringAfter(':')?.substringBefore(':')
+                        val id = if (animeLookup != null && mapping == null &&
+                            kitsuId == null) null
                             else mapping?.tmdb?.takeIf { mapping.tmdbSeason != null } ?: detailId
                         if (id == null) return@mapNotNull null
                         val requestedSeason = mapping?.tmdbSeason ?: sourceSeason
                         val known = if (id == detailId) source.tmdbSeasons else emptyMap()
                         val onlySeason = known.keys.filter { it > 0 }.singleOrNull()
-                        val actualSeason = if (anime && sourceSeason > 1 &&
-                            mapping?.tmdbFromEpisode == null &&
+                        val actualSeason = if (anime &&
                             known.isNotEmpty() && requestedSeason !in known &&
                             onlySeason != null) onlySeason else requestedSeason
                         if (known.isNotEmpty() && actualSeason !in known)
                             return@mapNotNull null
-                        val start = when {
-                            mapping?.tmdbFromEpisode != null &&
-                                actualSeason == requestedSeason -> mapping.tmdbFromEpisode
-                            anime && sourceSeason > 1 && actualSeason == onlySeason ->
-                                cumulativeStart(sourceSeason, known[actualSeason] ?: return@mapNotNull null)
-                            else -> 1
-                        } ?: return@mapNotNull null
+                        val start = mapping?.tmdbFromEpisode
+                            ?.takeIf { actualSeason == requestedSeason } ?: 1
                         async(Dispatchers.IO) {
                             if (source.source == "AIO" && (if (completeAio)
                                 aioBySeason[sourceSeason].orEmpty().map { it.value }
@@ -1155,21 +1130,27 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                             ?.let { it to ep.episodeMeta(true) }
                                     }
                                 }.toMap()
-                                if (completeAio) {
-                                    for (video in source.videos.filter { it.season == sourceSeason }) {
-                                        val number = video.number ?: continue
-                                        byNumber[start + number - 1]?.let { info ->
-                                            found[sourceSeason to number] = info
-                                        }
-                                    }
-                                } else {
-                                    base.filter {
-                                        it.seasonIndex == sourceSeason &&
-                                            it.season == sourceSeason && it.episode > 0
-                                    }.forEach { episode ->
-                                        byNumber[start + episode.episode - 1]?.let { info ->
-                                            found[sourceSeason to episode.episode] = info
-                                        }
+                                val localNumbers = if (completeAio)
+                                    source.videos.filter { it.season == sourceSeason }
+                                        .mapNotNull { it.number?.takeIf { num -> num > 0 } }
+                                else base.filter {
+                                    it.seasonIndex == sourceSeason &&
+                                        it.season == sourceSeason && it.episode > 0
+                                }.map { it.episode }
+                                val noMapping = anime && mapping == null && kitsuId != null
+                                val needsFallback = anime && (noMapping || localNumbers.any {
+                                    actualSeason != requestedSeason ||
+                                        byNumber[start + it - 1] == null
+                                })
+                                val absolutes = if (needsFallback)
+                                    ElevateAnimeIdResolver.kitsuAbsoluteEpisodes(kitsuId)
+                                else emptyMap()
+                                for (number in localNumbers) {
+                                    val direct = if (!noMapping && actualSeason == requestedSeason)
+                                        byNumber[start + number - 1] else null
+                                    val fallback = absolutes[number]?.let { byNumber[it] }
+                                    (direct ?: fallback)?.let { info ->
+                                        found[sourceSeason to number] = info
                                     }
                                 }
                             }
