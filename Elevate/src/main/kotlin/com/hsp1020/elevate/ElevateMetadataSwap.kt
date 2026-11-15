@@ -83,7 +83,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
     private data class AioVideo(
         val season: Int?, val number: Int?,
         val meta: EpisodeMeta, val id: String?, val imdbId: String?,
-        val imdbSeason: Int?, val imdbEpisode: Int?, val streams: JSONArray?
+        val imdbSeason: Int?, val imdbEpisode: Int?, val streams: JSONArray?,
+        val absoluteEpisode: Int? = null
     )
 
     private data class Metadata(
@@ -232,7 +233,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             AioVideo(season, number, ep.episodeMeta(false), ep.string("id"),
                 ep.string("imdb_id"), ep.optInt("imdbSeason").takeIf { it > 0 },
                 ep.optInt("imdbEpisode").takeIf { it > 0 },
-                ep.optJSONArray("streams")?.takeIf { it.length() > 0 })
+                ep.optJSONArray("streams")?.takeIf { it.length() > 0 },
+                ep.optInt("absoluteEpisode").takeIf { it > 0 })
         }
         // Number missing/zero episodes after the last regular episode in each season.
         val grouped = parsed.groupBy { it.season ?: 0 }
@@ -1090,66 +1092,123 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }.distinct()
                 val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
                     else null
-                // Reuse the existing AIOStreams season resolver, not a second API client.
+                val numbersBySeason = if (completeAio)
+                    source.videos.mapNotNull { v ->
+                        val season = v.season?.takeIf { it > 0 } ?: return@mapNotNull null
+                        val number = v.number?.takeIf { it > 0 } ?: return@mapNotNull null
+                        season to number
+                    }.groupBy({ it.first }, { it.second })
+                else base.mapNotNull { ep ->
+                    val season = ep.seasonIndex?.takeIf { it > 0 && it == ep.season }
+                        ?: return@mapNotNull null
+                    ep.episode.takeIf { it > 0 }?.let { season to it }
+                }.groupBy({ it.first }, { it.second })
+                val absoluteByEpisode = mutableMapOf<Pair<Int, Int>, Int>()
+                if (completeAio) source.videos.forEach { video ->
+                    val season = video.season
+                    val number = video.number
+                    val absolute = video.absoluteEpisode
+                    if (season != null && number != null && absolute != null && absolute > 0)
+                        absoluteByEpisode[season to number] = absolute
+                }
+                var previous = 0
+                var expectedSeason = 1
+                for (season in numbersBySeason.keys.sorted()) {
+                    val numbers = numbersBySeason[season].orEmpty().distinct().sorted()
+                    if (season != expectedSeason || numbers.isEmpty() ||
+                        numbers != (1..numbers.size).toList()) break
+                    for (number in numbers)
+                        absoluteByEpisode.putIfAbsent(season to number, previous + number)
+                    previous += numbers.size
+                    expectedSeason++
+                }
                 val mappingStarted = SystemClock.elapsedRealtime()
-                val seasonMappings = if (imdb != null) withContext(Dispatchers.IO) {
-                    seasons.associateWith { season ->
-                        ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
-                    }
-                } else emptyMap()
+                val seasonMappings = if (imdb != null && seasons.isNotEmpty())
+                    withContext(Dispatchers.IO) {
+                        val firstSeason = seasons.first()
+                        val first = ElevateAnimeIdResolver.resolveImdbSeason(imdb, firstSeason)
+                        seasons.associateWith { season ->
+                            if (season == firstSeason) first else first?.takeIf { item ->
+                                val absolute = numbersBySeason[season].orEmpty()
+                                    .mapNotNull { absoluteByEpisode[season to it] }
+                                absolute.isNotEmpty() && absolute.size == numbersBySeason[season]?.size &&
+                                    absolute.all { n -> item.tmdbRanges.any { r ->
+                                        n >= r.start && (r.end == null || n <= r.end)
+                                    } }
+                            } ?: ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
+                        }
+                    } else emptyMap()
                 Log.i("ElevateMetaTiming",
-                    "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.size} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
+                    "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.values.count { it != null }} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
                 val seasonStarted = SystemClock.elapsedRealtime()
                 val activeSeasonRequests = java.util.concurrent.atomic.AtomicInteger(0)
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
-                    val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
-                    val responses = seasons.mapNotNull { sourceSeason ->
-                        // A Kitsu/MAL/AniList title represents one anime season even when
-                        // the provider numbers its local episodes as season 1.
+                    val dateParser = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).apply {
+                        isLenient = false
+                        timeZone = TimeZone.getTimeZone("UTC")
+                    }
+                    val nativeDate = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
+                    fun dayOf(raw: String?): Long? = raw?.take(10)?.let {
+                        runCatching { dateParser.parse(it)?.time?.div(86_400_000L) }.getOrNull()
+                    }
+                    val completeSourceSeasons = if (source.source == "AIO")
+                        seasons.filter { appSeason ->
+                            (if (completeAio) source.videos.filter {
+                                it.season == appSeason
+                            }.map { it.meta }
+                            else base.filter { it.seasonIndex == appSeason &&
+                                it.season == appSeason && it.episode > 0 }
+                                .mapNotNull { source.episodes[appSeason to it.episode] })
+                                .let { list -> list.isNotEmpty() && list.all {
+                                    it.name != null && it.description != null &&
+                                    it.poster != null && it.date != null &&
+                                    it.runTime != null && it.rating != null
+                                } }
+                        }.toSet() else emptySet()
+                    val requests = seasons.flatMap { sourceSeason ->
                         val titleSeason = ids.original?.substringBefore(':') in
                             setOf("kitsu", "mal", "anilist") &&
                             seasons.size == 1 && sourceSeason == 1
-                        val matchingDirect = directMapping?.takeIf {
+                        val direct = directMapping?.takeIf {
                             titleSeason || it.matchesSeason(sourceSeason)
                         }
-                        val mapping = matchingDirect ?: seasonMappings[sourceSeason]
-                        val kitsuId = mapping?.kitsu ?: ids.kitsu
-                            ?: ids.original?.takeIf { it.startsWith("kitsu:") }
-                                ?.substringAfter(':')?.substringBefore(':')
-                        val id = if (animeLookup != null && mapping == null &&
-                            kitsuId == null) null
-                            else mapping?.tmdb?.takeIf { mapping.tmdbSeason != null } ?: detailId
+                        val mapping = direct ?: seasonMappings[sourceSeason]
+                        val id = mapping?.tmdb?.takeIf { mapping.tmdbSeason != null ||
+                            mapping.tmdbRanges.isNotEmpty() }
+                            ?: detailId
                         if (id == null) {
                             if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
                                 "phase=TMDB_SEASON_SKIP appSeason=$sourceSeason reason=NO_TMDB_ID")
-                            return@mapNotNull null
+                            return@flatMap emptyList<Triple<Int, Int, String>>()
                         }
-                        val requestedSeason = mapping?.tmdbSeason ?: sourceSeason
+                        val requested = mapping?.tmdbSeason ?: sourceSeason
                         val known = if (id == detailId) source.tmdbSeasons else emptyMap()
-                        val onlySeason = known.keys.filter { it > 0 }.singleOrNull()
-                        val actualSeason = if (anime &&
-                            known.isNotEmpty() && requestedSeason !in known &&
-                            onlySeason != null) onlySeason else requestedSeason
-                        if (known.isNotEmpty() && actualSeason !in known) {
-                            if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
-                                "phase=TMDB_SEASON_SKIP appSeason=$sourceSeason tmdb=$id:$actualSeason reason=NOT_IN_DETAIL_SEASONS")
-                            return@mapNotNull null
+                        val only = known.keys.filter { it > 0 }.singleOrNull()
+                        val actual = if (anime && known.isNotEmpty() &&
+                            requested !in known && only != null) only else requested
+                        val absolutes = numbersBySeason[sourceSeason].orEmpty()
+                            .mapNotNull { absoluteByEpisode[sourceSeason to it] }
+                        val ranges = mapping?.tmdbRanges.orEmpty()
+                        val mappedSeasons = ranges.filter { range ->
+                            absolutes.any { it >= range.start &&
+                                (range.end == null || it <= range.end) }
+                        }.map { it.season }.distinct()
+                        val fullyMapped = absolutes.isNotEmpty() &&
+                            absolutes.size == numbersBySeason[sourceSeason]?.size &&
+                            absolutes.all { n -> ranges.any { r ->
+                                n >= r.start && (r.end == null || n <= r.end)
+                            } }
+                        val targets = if (fullyMapped && mappedSeasons.isNotEmpty())
+                            mappedSeasons else (mappedSeasons + actual).distinct()
+                        targets.filter { known.isEmpty() || it in known }.map {
+                            Triple(sourceSeason, it, id)
                         }
-                        val start = mapping?.tmdbFromEpisode
-                            ?.takeIf { actualSeason == requestedSeason } ?: 1
+                    }.distinct()
+                    val responses = requests.map { (appSeason, targetSeason, id) ->
                         async(Dispatchers.IO) {
-                            if (source.source == "AIO" && (if (completeAio)
-                                aioBySeason[sourceSeason].orEmpty().map { it.value }
-                            else base.filter {
-                                it.seasonIndex == sourceSeason && it.season == sourceSeason &&
-                                    it.episode > 0
-                            }.mapNotNull { source.episodes[sourceSeason to it.episode] }).let { values ->
-                                values.isNotEmpty() && values.all { info ->
-                                    info.name != null && info.description != null &&
-                                        info.poster != null && info.date != null &&
-                                        info.runTime != null && info.rating != null
-                                }
-                            }) return@async emptyMap<Pair<Int, Int>, EpisodeMeta>()
+                            if (appSeason in completeSourceSeasons)
+                                return@async Triple(appSeason, targetSeason,
+                                    emptyMap<Int, EpisodeMeta>())
                             val queuedAt = SystemClock.elapsedRealtime()
                             var queueMs = -1L
                             var concurrency = 0
@@ -1157,70 +1216,124 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 seasonRequests.withPermit {
                                     queueMs = SystemClock.elapsedRealtime() - queuedAt
                                     concurrency = activeSeasonRequests.incrementAndGet()
-                                    try {
-                                        ElevateTmdbMetadata.season(id, actualSeason, detailLocale)
-                                    } finally {
-                                        activeSeasonRequests.decrementAndGet()
-                                    }
+                                    try { ElevateTmdbMetadata.season(id, targetSeason, detailLocale) }
+                                    finally { activeSeasonRequests.decrementAndGet() }
                                 }
                             }
-                            Log.i("ElevateMetaTiming",
-                                "phase=SEASON_WAIT id=$id season=$actualSeason sourceSeason=$sourceSeason queueMs=$queueMs concurrent=$concurrency elapsedMs=${SystemClock.elapsedRealtime() - queuedAt} success=${response != null}")
-                            if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
-                                "phase=TMDB_SEASON appSeason=$sourceSeason tmdb=$id:$actualSeason requestedSeason=$requestedSeason" +
-                                    " offset=$start mapping=${mapping != null} kitsu=${kitsuId != null}" +
-                                    " apiEpisodes=${response?.optJSONArray("episodes")?.length() ?: -1}")
-                            val found = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+                            Log.i("ElevateMetaTiming", "phase=SEASON_WAIT id=$id season=$targetSeason sourceSeason=$appSeason queueMs=$queueMs concurrent=$concurrency elapsedMs=${SystemClock.elapsedRealtime() - queuedAt} success=${response != null}")
                             val values = response?.optJSONArray("episodes")
-                            if (values == null && sourceSeason >= 21) Log.i("MetaEpisodeMap",
-                                "phase=TMDB_SEASON_EMPTY appSeason=$sourceSeason tmdb=$id:$actualSeason reason=${if (response == null) "NO_RESPONSE" else "MISSING_EPISODES"}")
-                            if (values != null) {
-                                val byNumber = (0 until values.length()).mapNotNull { index ->
+                            if (appSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_SEASON appSeason=$appSeason tmdb=$id:$targetSeason" +
+                                " apiEpisodes=${values?.length() ?: -1}" +
+                                " reason=${if (response == null) "NO_RESPONSE" else if (values == null) "MISSING_EPISODES" else "OK"}")
+                            val byNumber = if (values == null) emptyMap()
+                                else (0 until values.length()).mapNotNull { index ->
                                     values.optJSONObject(index)?.let { ep ->
                                         ep.optInt("episode_number").takeIf { it > 0 }
                                             ?.let { it to ep.episodeMeta(true) }
                                     }
                                 }.toMap()
-                                if (sourceSeason >= 21) for ((tmdbEpisode, fields) in byNumber) {
-                                    Log.i("MetaEpisodeMap",
-                                        "phase=TMDB_SOURCE tmdb=S$actualSeason:E$tmdbEpisode appSeason=$sourceSeason" +
-                                            " thumb=${!fields.poster.isNullOrBlank()} plot=${!fields.description.isNullOrBlank()}" +
-                                            " rating=${fields.rating} airDate=${fields.date}")
-                                }
-                                val localNumbers = if (completeAio)
-                                    source.videos.filter { it.season == sourceSeason }
-                                        .mapNotNull { it.number?.takeIf { num -> num > 0 } }
-                                else base.filter {
-                                    it.seasonIndex == sourceSeason &&
-                                        it.season == sourceSeason && it.episode > 0
-                                }.map { it.episode }
-                                val noMapping = anime && mapping == null && kitsuId != null
-                                val needsFallback = anime && (noMapping || localNumbers.any {
-                                    actualSeason != requestedSeason ||
-                                        byNumber[start + it - 1] == null
-                                })
-                                val absolutes = if (needsFallback)
-                                    ElevateAnimeIdResolver.kitsuAbsoluteEpisodes(kitsuId)
-                                else emptyMap()
-                                for (number in localNumbers) {
-                                    val direct = if (!noMapping && actualSeason == requestedSeason)
-                                        byNumber[start + number - 1] else null
-                                    val fallback = absolutes[number]?.let { byNumber[it] }
-                                    val info = direct ?: fallback
-                                    if (sourceSeason >= 21) Log.i("MetaEpisodeMap",
-                                        "phase=TMDB_MAP app=S$sourceSeason:E$number tmdb=S$actualSeason:E${if (direct != null) start + number - 1 else absolutes[number] ?: start + number - 1}" +
-                                            " via=${if (direct != null) "DIRECT" else if (fallback != null) "KITSU_ABSOLUTE" else "MISS"}" +
-                                            " directCandidate=${start + number - 1} absoluteCandidate=${absolutes[number]}" +
-                                            " noMapping=$noMapping seasonMatch=${actualSeason == requestedSeason}" +
-                                            " found=${info != null} thumb=${!info?.poster.isNullOrBlank()}" +
-                                            " plot=${!info?.description.isNullOrBlank()} rating=${info?.rating} airDate=${info?.date}")
-                                    if (info != null) found[sourceSeason to number] = info
-                                }
-                            }
-                            found
+                            if (appSeason >= 21) for ((n, fields) in byNumber) Log.i(
+                                "MetaEpisodeMap", "phase=TMDB_SOURCE tmdb=S$targetSeason:E$n appSeason=$appSeason" +
+                                    " thumb=${!fields.poster.isNullOrBlank()} plot=${!fields.description.isNullOrBlank()}" +
+                                    " rating=${fields.rating} airDate=${fields.date}")
+                            Triple(appSeason, targetSeason, byNumber)
                         }
                     }.awaitAll()
-                    for (items in responses) result.putAll(items)
+                    val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+                    val used = mutableSetOf<Pair<Int, Int>>()
+                    var imdbKitsuLoaded = false
+                    var imdbKitsu = emptyMap<Pair<Int, Int>, Int>()
+                    val titleKitsu = mutableMapOf<String, Map<Int, Int>>()
+                    for (appSeason in seasons.sorted()) {
+                        if (appSeason in completeSourceSeasons) continue
+                        val targets = responses.filter { it.first == appSeason }
+                            .associate { it.second to it.third }
+                        val mapping = directMapping?.takeIf {
+                            seasons.size == 1 && appSeason == 1
+                        } ?: seasonMappings[appSeason]
+                        val kitsuId = mapping?.kitsu ?: ids.kitsu
+                        for (number in numbersBySeason[appSeason].orEmpty().distinct().sorted()) {
+                            val key = appSeason to number
+                            val sourceDate = if (completeAio)
+                                source.videos.firstOrNull { it.season == appSeason &&
+                                    it.number == number }?.meta?.date
+                            else base.firstOrNull { it.seasonIndex == appSeason &&
+                                it.season == appSeason && it.episode == number }
+                                ?.airDate?.let { nativeDate.format(java.util.Date(it)) }
+                            val originalDay = dayOf(sourceDate)
+                            val absolute = absoluteByEpisode[key]
+                            val range = absolute?.let { n ->
+                                mapping?.tmdbRanges?.singleOrNull {
+                                    n >= it.start && (it.end == null || n <= it.end)
+                                }
+                            }
+                            val aioTarget = range?.let { it.season to absolute!! }
+                                ?: mapping?.tmdbSeason?.let {
+                                    it to ((mapping.tmdbFromEpisode ?: 1) + number - 1)
+                                }
+                                ?: if (!anime) appSeason to number else null
+                            val aioData = aioTarget?.let { targets[it.first]?.get(it.second) }
+                            val dateDiff = originalDay?.let { date ->
+                                dayOf(aioData?.date)?.let { kotlin.math.abs(date - it) }
+                            }
+                            val dateRejected = anime && dateDiff != null && dateDiff >= 30L
+                            val aioKey = aioTarget?.takeIf {
+                                aioData != null && !dateRejected && it !in used
+                            }
+                            var kitsuAbsolute: Int? = null
+                            var kitsuKey: Pair<Int, Int>? = null
+                            if (aioKey == null && anime) {
+                                if (imdb != null && !imdbKitsuLoaded) {
+                                    imdbKitsu = ElevateAnimeIdResolver.kitsuImdbAbsolutes(imdb)
+                                    imdbKitsuLoaded = true
+                                }
+                                kitsuAbsolute = (if (imdb != null) imdbKitsu[key] else null)
+                                    ?: if (seasons.size == 1 && kitsuId != null) {
+                                        if (!titleKitsu.containsKey(kitsuId))
+                                            titleKitsu[kitsuId] =
+                                                ElevateAnimeIdResolver.kitsuAbsoluteEpisodes(kitsuId)
+                                        titleKitsu[kitsuId]?.get(number)
+                                    } else null
+                                val candidates = kitsuAbsolute?.let { n ->
+                                    targets.flatMap { (season, episodes) ->
+                                        if (episodes.containsKey(n)) listOf(season to n)
+                                        else emptyList()
+                                    }
+                                }.orEmpty().filter { it !in used &&
+                                    !(dateRejected && it == aioTarget) }
+                                kitsuKey = candidates.singleOrNull()
+                            }
+                            val airDateCandidates = if (aioKey == null && kitsuKey == null &&
+                                originalDay != null && anime) targets.flatMap { (season, eps) ->
+                                eps.mapNotNull { (n, value) ->
+                                    val candidate = season to n
+                                    val tmdbDay = dayOf(value.date)
+                                    if (tmdbDay != null &&
+                                        kotlin.math.abs(originalDay - tmdbDay) <= 1L)
+                                        candidate else null
+                                }
+                            }.distinct() else emptyList()
+                            val airDateKey = airDateCandidates.singleOrNull()
+                                ?.takeUnless { it in used }
+                            val mapped = aioKey ?: kitsuKey ?: airDateKey
+                            if (mapped != null) {
+                                val data = targets[mapped.first]?.get(mapped.second)
+                                if (data != null) {
+                                    used.add(mapped)
+                                    result[key] = data
+                                }
+                            }
+                            if (appSeason >= 21) Log.i("MetaEpisodeMap",
+                                "phase=TMDB_MAP app=S$appSeason:E$number absolute=$absolute" +
+                                    " aio=$aioTarget dateDiff=$dateDiff aioRejected30d=$dateRejected" +
+                                    " kitsuAbsolute=$kitsuAbsolute kitsu=$kitsuKey" +
+                                    " airdateCandidates=${airDateCandidates.size} selected=$mapped" +
+                                    " via=${if (aioKey != null) "AIO" else if (kitsuKey != null) "KITSU" else if (airDateKey != null) "AIRDATE" else "MISS"}" +
+                                    " reason=${if (mapped != null) "MATCH" else if (dateRejected) "AIRDATE_30D" else if (aioData == null) "AIO_MISSING" else "AMBIGUOUS_OR_DUPLICATE"}" +
+                                    " sourceDate=$sourceDate tmdbDate=${mapped?.let { targets[it.first]?.get(it.second)?.date }}")
+                        }
+                    }
                     result
                 }
                 Log.i("ElevateMetaTiming",

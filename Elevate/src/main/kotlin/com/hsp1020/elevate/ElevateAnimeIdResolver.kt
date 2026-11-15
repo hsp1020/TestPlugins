@@ -15,13 +15,15 @@ import org.json.JSONObject
 
 /** Shared AIOStreams title ID mapping; no dependency on the StremioC plugin. */
 internal object ElevateAnimeIdResolver {
+    internal data class TmdbRange(val season: Int, val start: Int, val end: Int?)
     internal data class Mapping(
         val kitsu: String?, val mal: String?, val anilist: String?,
         val imdb: String?, val tmdb: String?, val fromEpisode: Int? = null,
         val simkl: String? = null, val tvdb: String? = null,
         val tvdbSeason: Int? = null, val tmdbSeason: Int? = null,
         val traktSeason: Int? = null,
-        val imdbSeason: Int? = null, val tmdbFromEpisode: Int? = null
+        val imdbSeason: Int? = null, val tmdbFromEpisode: Int? = null,
+        val tmdbRanges: List<TmdbRange> = emptyList()
     ) {
         fun matchesSeason(season: Int): Boolean =
             ElevateWatchHistoryRules.consistentSeason(season,
@@ -43,6 +45,8 @@ internal object ElevateAnimeIdResolver {
             size > 48
     }
     private val kitsuFlights = mutableMapOf<String, Deferred<Map<Int, Int>>>()
+    private val imdbKitsuFlights = mutableMapOf<String, Deferred<Map<Pair<Int, Int>, Int>>>()
+    private val imdbKitsuCache = mutableMapOf<String, Pair<Long, Map<Pair<Int, Int>, Int>>>()
     private val limiter = Semaphore(3)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val flights = mutableMapOf<String, Deferred<Mapping?>>()
@@ -87,7 +91,7 @@ internal object ElevateAnimeIdResolver {
     suspend fun resolveImdbSeason(rawId: String, season: Int): Mapping? {
         val id = rawId.takeIf { it.matches(Regex("tt[0-9]+")) } ?: return null
         if (season <= 0) return null
-        return resolveByField("imdbId", id, season)
+        return resolveByField("imdbId", id, season, allowSplitSeasons = true)
     }
 
     /** Same AIOStreams flight/cache as title and season mapping, with episode offset retained. */
@@ -203,12 +207,64 @@ internal object ElevateAnimeIdResolver {
         return result
     }
 
+    /** IMDb-form Kitsu metadata preserves the addon season/episode alongside absoluteEpisode. */
+    suspend fun kitsuImdbAbsolutes(imdb: String): Map<Pair<Int, Int>, Int> {
+        if (!imdb.matches(Regex("tt[0-9]+"))) return emptyMap()
+        val now = System.currentTimeMillis()
+        synchronized(imdbKitsuCache) {
+            imdbKitsuCache[imdb]?.takeIf {
+                !ElevateMetadataCacheDiagnostics.enabled() &&
+                    now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
+            }?.let { return it.second }
+        }
+        val flight = synchronized(imdbKitsuCache) {
+            imdbKitsuFlights[imdb] ?: scope.async(start = CoroutineStart.LAZY) {
+                val result = try {
+                    withTimeoutOrNull(10_000L) {
+                        limiter.withPermit {
+                            val raw = app.get("https://anime-kitsu.strem.fun/meta/series/$imdb.json",
+                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                timeout = 8L).text
+                            val videos = JSONObject(raw).optJSONObject("meta")?.optJSONArray("videos")
+                            buildMap<Pair<Int, Int>, Int> {
+                                if (videos != null) for (i in 0 until videos.length()) {
+                                    val video = videos.optJSONObject(i) ?: continue
+                                    val season = video.optInt("season").takeIf { it > 0 } ?: continue
+                                    val number = video.optInt("episode", video.optInt("number"))
+                                        .takeIf { it > 0 } ?: continue
+                                    val absolute = video.optInt("absoluteEpisode")
+                                        .takeIf { it > 0 } ?: continue
+                                    put(season to number, absolute)
+                                }
+                            }
+                        }
+                    } ?: emptyMap()
+                } catch (e: CancellationException) { throw e }
+                  catch (_: Exception) { emptyMap() }
+                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(imdbKitsuCache) {
+                    imdbKitsuCache[imdb] = System.currentTimeMillis() to result
+                }
+                result
+            }.also { task ->
+                imdbKitsuFlights[imdb] = task
+                task.invokeOnCompletion {
+                    synchronized(imdbKitsuCache) {
+                        if (imdbKitsuFlights[imdb] === task) imdbKitsuFlights.remove(imdb)
+                    }
+                }
+            }
+        }
+        flight.start()
+        return flight.await()
+    }
+
     private suspend fun resolveByField(
         field: String, id: String, season: Int?, allowTrackerOnly: Boolean = false,
-        trace: String? = null
+        trace: String? = null, allowSplitSeasons: Boolean = false
     ): Mapping? {
         val key = field + ":" + id + (season?.let { ":$it" } ?: "") +
-            (if (allowTrackerOnly) ":watch-history" else "")
+            (if (allowTrackerOnly) ":watch-history" else "") +
+            (if (allowSplitSeasons) ":episode-mapping" else "")
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.takeIf {
@@ -236,17 +292,20 @@ internal object ElevateAnimeIdResolver {
                         val url = "https://" + host + "/api/v1/anime?idType=" + field +
                             "&idValue=" + id + (season?.let { "&season=$it" } ?: "")
 
+                        val requestedAt = android.os.SystemClock.elapsedRealtime()
                         val root = try {
                             JSONObject(app.get(url,
                                 headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
                                 timeout = 5L).text)
                         } catch (e: CancellationException) { throw e }
                           catch (ex: Exception) {
-
+                              if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                                  "phase=AIO_RETRY season=$season host=$host reason=HTTP_OR_PARSE_ERROR elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
                               continue
                           }
                         if (!root.optBoolean("success")) {
-
+                            if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                                "phase=AIO_RETRY season=$season host=$host reason=API_UNSUCCESSFUL elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
                             continue
                         }
                         val data = root.optJSONObject("data")
@@ -261,17 +320,30 @@ internal object ElevateAnimeIdResolver {
                         }
                         // Match the exact IMDb identity and season validation in StremioC.
                         if (ids.optString(field) != id) {
-
+                            if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                                "phase=AIO_RETRY season=$season host=$host reason=ID_MISMATCH")
                             continue
                         }
+                        val ranges = data.optJSONArray("episodeMappings")?.let { entries ->
+                            (0 until entries.length()).mapNotNull { index ->
+                                val row = entries.optJSONObject(index) ?: return@mapNotNull null
+                                val tmdbSeason = row.optInt("tmdbSeason").takeIf { it > 0 }
+                                    ?: return@mapNotNull null
+                                val start = row.optInt("start").takeIf { it > 0 }
+                                    ?: return@mapNotNull null
+                                val end = row.optInt("end").takeIf { it >= start }
+                                TmdbRange(tmdbSeason, start, end)
+                            }
+                        }.orEmpty()
                         if (field == "imdbId" && season != null && season > 1) {
                             val mappedSeason = ElevateWatchHistoryRules.preferredSeason(
                                 listOf("imdb", "tvdb", "trakt", "tmdb").map { source ->
                                     data.optJSONObject(source)?.optInt("seasonNumber")
                                         ?.takeIf { it > 0 }
                                 })
-                            if (mappedSeason != season) {
-
+                            if (mappedSeason != season && !(allowSplitSeasons && ranges.isNotEmpty())) {
+                                if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                                    "phase=AIO_REJECT season=$season mappedSeason=$mappedSeason reason=SEASON_MISMATCH_NO_RANGES host=$host")
                                 continue
                             }
                         }
@@ -302,8 +374,11 @@ internal object ElevateAnimeIdResolver {
                             data.optJSONObject("tmdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("trakt")?.optInt("seasonNumber")?.takeIf { it > 0 },
                             data.optJSONObject("imdb")?.optInt("seasonNumber")?.takeIf { it > 0 },
-                            data.optJSONObject("tmdb")?.optInt("fromEpisode")?.takeIf { it > 0 }
+                            data.optJSONObject("tmdb")?.optInt("fromEpisode")?.takeIf { it > 0 },
+                            ranges
                         )
+                        if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
+                            "phase=AIO_ACCEPT season=$season host=$host ranges=${ranges.size} kitsu=$kitsu elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
                         break
                     }
                     result

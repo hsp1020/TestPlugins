@@ -1585,6 +1585,7 @@ open class StremioC(
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
         private val animeMappingCache = lruCacheMap<String, Pair<AnimeSeasonMapping, Long>>(5000)
         private val kitsuEpisodeCache = lruCacheMap<String, Pair<Map<Int, Int>, Long>>(100)
+        private val kitsuImdbEpisodeCache = lruCacheMap<String, Pair<Map<Pair<Int, Int>, Int>, Long>>(40)
         private val animeNoMappingCache = lruCacheMap<String, Long>(1000)
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(2000)
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
@@ -3419,13 +3420,16 @@ open class StremioC(
         return true
     }
 
+    private data class TmdbEpisodeRange(val season: Int, val start: Int, val end: Int?)
+
     private data class AnimeSeasonMapping(
         val kitsuId: String?, val malId: Int?, val aniListId: Int?, val tmdbId: Int?,
         val simklId: Int? = null, val tvdbId: Int? = null,
         val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?,
         val imdbId: String?, val tvdbSeason: Int?, val imdbSeason: Int?,
         val traktSeason: Int?, val tmdbFromEpisode: Int? = null,
-        val tmdbMediaType: String? = null
+        val tmdbMediaType: String? = null,
+        val tmdbRanges: List<TmdbEpisodeRange> = emptyList()
     )
 
     private suspend fun fetchKitsuAbsoluteEpisodes(rawId: String?): Map<Int, Int> {
@@ -3445,6 +3449,29 @@ open class StremioC(
                 }.toMap()
         }.getOrNull() ?: emptyMap()
         kitsuEpisodeCache[id] = episodes to System.currentTimeMillis()
+        return episodes
+    }
+
+    /** IMDb-form Kitsu metadata preserves the addon episode and its absolute number. */
+    private suspend fun fetchKitsuImdbEpisodes(imdbId: String?): Map<Pair<Int, Int>, Int> {
+        val imdb = imdbId?.takeIf { IMDB_ID_REGEX.matches(it) } ?: return emptyMap()
+        stremioCacheMemoryRead(kitsuImdbEpisodeCache[imdb], METADATA_CACHE_TTL)
+            ?.first?.let { return it }
+        val episodes = runSuspendCatching {
+            val text = fetchSharedAnimeText("https://anime-kitsu.strem.fun/meta/series/$imdb.json")
+            val videos = parseJson<JsonNode>(text).get("meta")?.get("videos")
+            if (videos == null || !videos.isArray) emptyMap() else
+                videos.mapNotNull { row ->
+                    val season = row.get("season").intOrNull()?.takeIf { it > 0 }
+                    val episode = (row.get("episode").intOrNull()
+                        ?: row.get("number").intOrNull())?.takeIf { it > 0 }
+                    val absolute = row.get("absoluteEpisode").intOrNull()?.takeIf { it > 0 }
+                    if (season != null && episode != null && absolute != null)
+                        (season to episode) to absolute else null
+                }.toMap()
+        }.getOrNull() ?: emptyMap()
+        if (!stremioMetadataDiagnosticBypass())
+            kitsuImdbEpisodeCache[imdb] = episodes to System.currentTimeMillis()
         return episodes
     }
 
@@ -3521,6 +3548,7 @@ open class StremioC(
         )
         for (host in hosts) {
             var noMapping = false
+            val requestStarted = SystemClock.elapsedRealtime()
             val outcome = runSuspendCatching {
             val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
@@ -3559,12 +3587,21 @@ open class StremioC(
                 return@runSuspendCatching null
             }
 
+            val tmdbRanges = data.get("episodeMappings")?.takeIf { it.isArray }
+                ?.mapNotNull { row ->
+                    val target = row.get("tmdbSeason").intOrNull()?.takeIf { it > 0 }
+                    val start = row.get("start").intOrNull()?.takeIf { it > 0 }
+                    val end = row.get("end").intOrNull()
+                    if (target != null && start != null && (end == null || end >= start))
+                        TmdbEpisodeRange(target, start, end) else null
+                }.orEmpty()
             if (!byKitsu && !byMal && !byAniList && season != null && season > 1) {
                 val mappedSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
-                if (mappedSeason != season) {
+                if (mappedSeason != season && tmdbRanges.isEmpty()) {
+                    android.util.Log.i("MetaEpisodeMap", "phase=AIO_REJECT season=$season mappedSeason=$mappedSeason reason=SEASON_MISMATCH_NO_RANGES host=$host")
                     return@runSuspendCatching null
                 }
             }
@@ -3598,10 +3635,13 @@ open class StremioC(
                 tvdbSeason = data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
-                tmdbFromEpisode = first
+                tmdbFromEpisode = first,
+                tmdbRanges = tmdbRanges
             )
             }
             val mapping = outcome.getOrNull()
+            if (mapping == null) android.util.Log.i("MetaEpisodeMap",
+                "phase=AIO_RETRY season=$season host=$host reason=${if (noMapping) "NO_MAPPING" else if (outcome.isFailure) "HTTP_OR_PARSE_ERROR" else "UNUSABLE_RESPONSE"} elapsedMs=${SystemClock.elapsedRealtime() - requestStarted}")
             if (noMapping) {
 
                 animeNoMappingCache[query] = System.currentTimeMillis()
@@ -3611,6 +3651,7 @@ open class StremioC(
                 return null
             }
             if (mapping != null) {
+                android.util.Log.i("MetaEpisodeMap", "phase=AIO_ACCEPT season=$season host=$host ranges=${mapping.tmdbRanges.size} kitsu=${mapping.kitsuId} elapsedMs=${SystemClock.elapsedRealtime() - requestStarted}")
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
@@ -4698,6 +4739,13 @@ open class StremioC(
                                 preferred != 1) listOf(preferred, 1)
                             else listOf(preferred)
                         }.distinct()
+                        val absolutes = targetVideos.orEmpty().mapNotNull { it.absoluteEpisode }
+                        requiredSeasons = (requiredSeasons +
+                            animeEpisodeSeasons.values.flatMap { mapping ->
+                                mapping.tmdbRanges.filter { range ->
+                                    absolutes.any { it >= range.start && (range.end == null || it <= range.end) }
+                                }.map { it.season }
+                            }).distinct().filter { it > 0 && (count <= 0 || it <= count) }
                     }
                     android.util.Log.i("MetaLoadTiming",
                         "phase=SEASONS_START id=$tmdbIdStr count=${requiredSeasons.size}")
@@ -4952,6 +5000,34 @@ open class StremioC(
             }
 
             val processedEpisodes = mutableListOf<Episode>()
+            val parser = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply {
+                isLenient = false
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+            fun day(value: String?): Long? = value?.take(10)?.let { stamp ->
+                runCatching { parser.parse(stamp)?.time?.div(86_400_000L) }.getOrNull()
+            }
+            val byAirDate = if (isAnime) episodeTmdbMeta.entries.mapNotNull { (key, ep) ->
+                day(ep.airDate)?.let { date -> date to key }
+            }.groupBy({ it.first }, { it.second }) else emptyMap()
+            val usedTmdb = mutableSetOf<String>()
+            val absoluteByEpisode = mutableMapOf<Pair<Int, Int>, Int>()
+            var total = 0
+            var contiguous = true
+            var nextSeason = 1
+            for (s in videosByDisplaySeason.keys.filter { it > 0 }.sorted()) {
+                val numbered = videosByDisplaySeason[s].orEmpty()
+                    .mapNotNull { (it.episode ?: it.number)?.takeIf { n -> n > 0 } }
+                    .distinct().sorted()
+                if (!contiguous || s != nextSeason ||
+                    numbered.isEmpty() || numbered != (1..numbered.size).toList()) {
+                    contiguous = false
+                    continue
+                }
+                for (n in numbered) absoluteByEpisode[s to n] = total + n
+                total += numbered.size
+                nextSeason++
+            }
 
             for ((displaySeason, seasonVideos) in videosByDisplaySeason) {
                 val normalEpisodes = seasonVideos.filter { (it.episode ?: it.number ?: 0) > 0 }
@@ -5001,21 +5077,43 @@ open class StremioC(
                     val tmdbSeason = mapping?.tmdbSeason
                     val directEpisode = mapping?.tmdbFromEpisode
                         ?.let { it + displayEpisode - 1 } ?: displayEpisode
-                    val directKey = tmdbSeason?.let { season -> 
-                        (season.toString() + "_" + directEpisode).takeIf {
-                            episodeTmdbMeta.containsKey(it)
+                    val originalDay = day(video.firstAired ?: video.released)
+                    val absolute = video.absoluteEpisode?.takeIf { it > 0 }
+                        ?: absoluteByEpisode[displaySeason to displayEpisode]
+                    val range = absolute?.let { n -> mapping?.tmdbRanges
+                        ?.singleOrNull { n >= it.start && (it.end == null || n <= it.end) } }
+                    val aioCandidate = range?.let { "${it.season}_$absolute" }
+                        ?: tmdbSeason?.let { "${it}_$directEpisode" }
+                    val aioEpisode = aioCandidate?.let { episodeTmdbMeta[it] }
+                    val aioDateDiff = originalDay?.let { a ->
+                        day(aioEpisode?.airDate)?.let { kotlin.math.abs(a - it) }
+                    }
+                    val rejectedAio = aioDateDiff != null && aioDateDiff >= 30L
+                    val directKey = aioCandidate?.takeIf {
+                        aioEpisode != null && !rejectedAio && it !in usedTmdb
+                    }
+                    val kitsuAbsolute = kitsuEpisodes[displaySeason]?.get(displayEpisode)
+                        ?: video.absoluteEpisode?.takeIf { it > 0 }
+                    val kitsuMatches = if (directKey == null) kitsuAbsolute?.let { n ->
+                        episodeTmdbMeta.keys.filter { key ->
+                            key.endsWith("_$n") && key != (if (rejectedAio) aioCandidate else null)
                         }
-                    }
-                    val absoluteKey = kitsuEpisodes[displaySeason]?.get(displayEpisode)?.let { absolute ->
-                        ("1_" + absolute).takeIf { episodeTmdbMeta.containsKey(it) }
-                    }
-                    val mappedKey = directKey ?: absoluteKey
+                    }.orEmpty() else emptyList()
+                    val absoluteKey = kitsuMatches.singleOrNull()?.takeUnless { it in usedTmdb }
+                    val dateMatches = if (isAnime && directKey == null && absoluteKey == null &&
+                        originalDay != null) (-1L..1L)
+                            .flatMap { byAirDate[originalDay + it].orEmpty() }.distinct()
+                        else emptyList()
+                    val airDateKey = dateMatches.singleOrNull()?.takeUnless { it in usedTmdb }
+                    val mappedKey = directKey ?: absoluteKey ?: airDateKey
+                    if (mappedKey != null) usedTmdb.add(mappedKey)
                     if (displaySeason >= 21) android.util.Log.i("MetaEpisodeMap",
                         "phase=STREMIOC_REQUEST app=S$displaySeason:E$displayEpisode" +
-                            " mappingTmdbSeason=$tmdbSeason mappingOffset=${mapping?.tmdbFromEpisode}" +
-                            " directCandidate=${tmdbSeason?.let { it.toString() + "_" + directEpisode }}" +
-                            " directKey=$directKey absoluteKey=$absoluteKey mappedKey=$mappedKey" +
-                            " mappedOnly=${mapping != null || kitsuEpisodes.containsKey(displaySeason)}")
+                            " absolute=$absolute aio=$aioCandidate aioDateDiff=$aioDateDiff" +
+                            " aioRejected30d=$rejectedAio kitsuAbsolute=$kitsuAbsolute" +
+                            " kitsuCandidates=${kitsuMatches.size} dateCandidates=${dateMatches.size}" +
+                            " finalTmdb=$mappedKey method=${if (directKey != null) "AIO" else if (absoluteKey != null) "KITSU" else if (airDateKey != null) "AIRDATE" else "FAIL"}" +
+                            " reason=${if (mappedKey != null) "MATCH" else if (rejectedAio) "AIRDATE_30D" else if (aioEpisode == null) "AIO_EPISODE_MISSING" else "AMBIGUOUS_OR_DUPLICATE"}")
                     val ep = video.toEpisode(
                         provider, type, epImdbId, episodeTmdbMeta, 
                         displaySeason, displayEpisode, showTitle, tmdbId, 
@@ -5025,7 +5123,7 @@ open class StremioC(
                         provider.mainUrl,
                         year, 
                         originalAnimeId,
-                        mappedKey, mapping != null || kitsuEpisodes.containsKey(displaySeason)
+                        mappedKey, isAnime || mapping != null || kitsuEpisodes.containsKey(displaySeason)
                     )
                     processedEpisodes.add(ep)
                 }
@@ -5255,9 +5353,22 @@ open class StremioC(
                 (originalAnimeId != null || fetchedKitsuId != null ||
                     detailedEntry.kitsuIdExt != null || this@CatalogEntry.kitsuIdExt != null ||
                     fetchedMalId != null || fetchedAniListId != null)) {
+                var sharedRanges: AnimeSeasonMapping? = null
                 videoSeasons.mapNotNull { season ->
                     val directId = originalAnimeId?.takeIf { videoSeasons.size == 1 }
-                    val mapping = provider.fetchAnimeSeasonMapping(LoadData(
+                    val reusable = sharedRanges?.takeIf { previous ->
+                        val episodes = finalVideos.orEmpty().filter {
+                            it.seasonNumber == season && (it.episode ?: it.number ?: 0) > 0
+                        }
+                        episodes.isNotEmpty() && episodes.all { ep ->
+                            val absolute = ep.absoluteEpisode
+                            absolute != null && previous.tmdbRanges.any { range ->
+                                absolute >= range.start &&
+                                    (range.end == null || absolute <= range.end)
+                            }
+                        }
+                    }
+                    val mapping = (reusable ?: provider.fetchAnimeSeasonMapping(LoadData(
                         id = directId ?: finalImdbId,
                         imdbId = finalImdbId?.takeIf { directId == null },
                         originalAnimeId = directId,
@@ -5265,8 +5376,10 @@ open class StremioC(
                             ?: this@CatalogEntry.kitsuIdExt,
                         malId = fetchedMalId, anilistId = fetchedAniListId,
                         isAnime = true, season = season
-                    ))?.takeIf { it.tmdbId == null ||
+                    )))?.takeIf { it.tmdbId == null ||
                         it.tmdbId.toString() == tmdbIdStr }
+                    if (sharedRanges == null && mapping?.tmdbRanges?.isNotEmpty() == true)
+                        sharedRanges = mapping
                     if (mapping != null) season to mapping else null
                 }.toMap()
             } else emptyMap()
@@ -5544,25 +5657,47 @@ open class StremioC(
 
             } else {
                 val representativeRunTime = stremioRuntimeMinutes(detailedEntry.runtime ?: this@CatalogEntry.runtime)
-                val kitsuEpisodes = videoSeasons.mapNotNull { season ->
-                    val mapped = animeEpisodeSeasons[season]
-                    val fallbackId = mapped?.kitsuId
-                        ?: if (videoSeasons.size == 1)
-                            finalKitsuId?.toString() ?: detailedEntry.kitsuIdExt
-                                ?: this@CatalogEntry.kitsuIdExt else null
-                    if (fallbackId == null) return@mapNotNull null
-                    val needsKitsu = mapped == null || finalVideos.orEmpty().any { video ->
-                        if (video.seasonNumber != season) false else {
-                            val episode = video.episode ?: video.number ?: 0
-                            val target = mapped.tmdbFromEpisode?.let { it + episode - 1 }
-                                ?: episode
-                            episode > 0 && tmdbData?.episodeTmdbMeta
-                                ?.containsKey((mapped.tmdbSeason ?: 0).toString() + "_" + target) != true
+                val dateParser = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply {
+                    isLenient = false
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }
+                val needsKitsu = finalVideos.orEmpty().any { video ->
+                    val season = video.seasonNumber ?: return@any false
+                    val mapping = animeEpisodeSeasons[season]
+                    val absolute = video.absoluteEpisode
+                    val range = absolute?.let { n -> mapping?.tmdbRanges
+                        ?.singleOrNull { n >= it.start && (it.end == null || n <= it.end) } }
+                    val key = range?.let { "${it.season}_$absolute" }
+                        ?: mapping?.tmdbSeason?.let { target ->
+                            val number = (video.episode ?: video.number ?: 1) +
+                                (mapping.tmdbFromEpisode ?: 1) - 1
+                            "${target}_$number"
                         }
+                    val matched = key?.let { tmdbData?.episodeTmdbMeta?.get(it) }
+                    if (matched == null) true else {
+                        val sourceDate = (video.firstAired ?: video.released)?.take(10)
+                        val targetDate = matched.airDate?.take(10)
+                        if (sourceDate == null || targetDate == null) false else
+                            runCatching {
+                                val left = dateParser.parse(sourceDate)?.time
+                                val right = dateParser.parse(targetDate)?.time
+                                left != null && right != null &&
+                                    kotlin.math.abs(left - right) >= 30L * 86_400_000L
+                            }.getOrDefault(false)
                     }
-                    if (!needsKitsu) return@mapNotNull null
-                    val resolved = provider.fetchKitsuAbsoluteEpisodes(fallbackId)
-                    season to resolved
+                }
+                val kitsuImdb = if (needsKitsu) provider.fetchKitsuImdbEpisodes(finalImdbId)
+                    else emptyMap()
+                val kitsuEpisodes = videoSeasons.mapNotNull { season ->
+                    val matched = kitsuImdb.filterKeys { it.first == season }
+                        .mapKeys { it.key.second }
+                    if (matched.isNotEmpty()) season to matched
+                    else if (needsKitsu && videoSeasons.size == 1) {
+                        val fallbackId = animeEpisodeSeasons[season]?.kitsuId
+                            ?: finalKitsuId?.toString() ?: detailedEntry.kitsuIdExt
+                            ?: this@CatalogEntry.kitsuIdExt
+                        fallbackId?.let { season to provider.fetchKitsuAbsoluteEpisodes(it) }
+                    } else null
                 }.toMap()
                 val finalEpisodes = run { processEpisodes(
                     provider, 
@@ -5647,7 +5782,8 @@ open class StremioC(
         @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
         @JsonProperty("imdb_id") val imdb_id: String? = null,
-        @JsonProperty("streams") val streams: JsonNode? = null
+        @JsonProperty("streams") val streams: JsonNode? = null,
+        @JsonProperty("absoluteEpisode") val absoluteEpisode: Int? = null
     ) {
         fun embeddedStreamsJson(): String? = streams?.takeIf { it.isArray && it.size() > 0 }
             ?.let { runCatching { it.toString() }.getOrNull() }
