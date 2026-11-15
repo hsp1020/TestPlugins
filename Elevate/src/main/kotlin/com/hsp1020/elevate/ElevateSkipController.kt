@@ -1162,7 +1162,9 @@ internal object ElevateSkipRepository {
         // AIOStreams maps anime identities; it is not a generic title classifier.
         if (identity.imdb == null && identity.mal == null &&
             identity.anilist == null && identity.kitsu == null) return false
-        val match = withTimeoutOrNull(8_000L) { mapped(identity.copy(anime = true)) }
+        val match = withTimeoutOrNull(8_000L) {
+            mapped(identity.copy(anime = true), "offline-anime-check:${file.id}")
+        }
         return match?.let { it.mal != null || it.anilist != null } == true
     }
 
