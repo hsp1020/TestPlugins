@@ -613,6 +613,17 @@ class ElevateSettingsFragment : DialogFragment() {
         allocationButton("Refresh profiling status") {
             allocationStatus.text = ElevateJavaAllocationProfile.statusText()
         }
+        allocationButton("Delete saved profiling files") {
+            AlertDialog.Builder(ctx)
+                .setTitle("Delete saved profiling files?")
+                .setMessage("Delete all saved Perfetto, HPROF, timing notes and temporary profiling files? This cannot be undone.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete") { _, _ ->
+                    val result = ElevateJavaAllocationProfile.deleteSavedProfiles(ctx.applicationContext)
+                    allocationStatus.text = result
+                    Toast.makeText(ctx, result, Toast.LENGTH_LONG).show()
+                }.show()
+        }
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")
             .setView(scroll)

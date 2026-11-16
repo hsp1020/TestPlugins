@@ -361,6 +361,31 @@ internal object ElevateJavaAllocationProfile {
         }
     }
 
+    /** Remove only saved diagnostic files; never interrupt an active profiling session. */
+    fun deleteSavedProfiles(context: Context): String = synchronized(lock) {
+        if (awaitingResult || dumping || requestTag != null) {
+            return@synchronized "Profiling is active or still saving. Delete after it finishes."
+        }
+        val dir = File(context.applicationContext.filesDir, "elevate-java-allocation-profiles")
+        if (!dir.exists()) return@synchronized "No saved profiling files."
+        val files = dir.listFiles()?.filter { it.isFile }
+            ?: return@synchronized "Could not read saved profiling files."
+        var deleted = 0
+        var freedBytes = 0L
+        var failed = 0
+        for (file in files) {
+            val bytes = file.length()
+            if (file.delete()) {
+                deleted++
+                freedBytes += bytes
+            } else failed++
+        }
+        val message = "Deleted $deleted files (${freedBytes / (1024L * 1024L)} MiB freed)" +
+            if (failed > 0) "; $failed files could not be deleted." else "."
+        state = message
+        message
+    }
+
     fun profiles(context: Context): List<File> =
         File(context.applicationContext.filesDir, "elevate-java-allocation-profiles")
             .listFiles()?.filter {
