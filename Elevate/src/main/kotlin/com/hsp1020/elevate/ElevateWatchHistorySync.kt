@@ -1268,7 +1268,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val multi = maxOf(seasonNumbers.size, responseSeasons.size) > 1
             val probeEpisode = (runCatching { responseField?.get(resultModel) as? TvSeriesLoadResponse }
                 .getOrNull())?.episodes?.firstOrNull {
-                    it.season == sn && it.episode > 0
+                    it.season == sn && (it.episode ?: 0) > 0
                 }?.episode
             Log.i("ElevateSeasonAudit", "feature=HISTORY phase=INPUT season=$sn multi=$multi probe=$probeEpisode" +
                 " imdb=${mediaIds.imdb} localIds=${seasonEpisodeIds[sn]?.keys}")

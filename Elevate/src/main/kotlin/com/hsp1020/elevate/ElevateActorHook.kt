@@ -214,7 +214,7 @@ internal class ElevateActorHook(
         // Independent anime titles can have a different cast for each selected season.
         val selectedEpisodes = if (!movie && selectedSeason != null)
             (response as? TvSeriesLoadResponse)?.episodes?.filter {
-                it.season == selectedSeason && it.episode > 0
+                it.season == selectedSeason && (it.episode ?: 0) > 0
             }.orEmpty() else emptyList()
         val episodeIds = selectedEpisodes.map {
             ElevateMediaIdentity.collect(episodeData = it.data)
@@ -255,7 +255,7 @@ internal class ElevateActorHook(
             }
             val verified = ElevateAnimeIdResolver.verifiedEpisode(imdb,
                 firstIds.imdbSeason ?: selectedSeason,
-                firstIds.imdbEpisode ?: first.episode,
+                firstIds.imdbEpisode ?: first.episode ?: 0,
                 firstIds.original?.takeIf {
                     it.matches(Regex("(?:kitsu|mal|anilist):[0-9]+"))
                 }, "ACTOR")
