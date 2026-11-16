@@ -3571,7 +3571,10 @@ open class StremioC(
         val tmdbMediaType: String? = null,
         val tmdbRanges: List<TmdbEpisodeRange> = emptyList(),
         val tvdbFromEpisode: Int? = null,
-        val tvdbRanges: List<TvdbEpisodeRange> = emptyList()
+        val tvdbRanges: List<TvdbEpisodeRange> = emptyList(),
+        val tvdbAbsoluteOrder: Boolean? = null,
+        val alternateImdbId: String? = null,
+        val alternateImdbFromEpisode: Int? = null
     )
 
     private suspend fun fetchKitsuAbsoluteEpisodes(rawId: String?): Map<Int, Int> {
@@ -3618,7 +3621,7 @@ open class StremioC(
     }
 
     private suspend fun fetchAnimeSeasonMapping(
-        loadData: LoadData, traceId: String? = null
+        loadData: LoadData, traceId: String? = null, tvdbLookupId: Int? = null
     ): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
@@ -3650,6 +3653,9 @@ open class StremioC(
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
         val query = when {
+            tvdbLookupId != null -> "idType=thetvdbId&idValue=$tvdbLookupId" +
+                (if (season != null) "&season=$season" else "") +
+                (if (episode != null) "&episode=$episode" else "")
             byMal -> "idType=malId&idValue=$id"
             byAniList -> "idType=anilistId&idValue=$id"
             byKitsu || (id == kitsuId && imdbId == null) -> "idType=kitsuId&idValue=$id"
@@ -3663,7 +3669,8 @@ open class StremioC(
             "query=$query requested=S$season:E$episode" +
             " byKitsu=$byKitsu byMal=$byMal byAniList=$byAniList" +
             " originalAnimeId=${loadData.originalAnimeId}" +
-            " inputImdb=$imdbId inputKitsu=$kitsuId inputMal=$malLookupId inputAl=$aniListLookupId")
+            " inputImdb=$imdbId inputKitsu=$kitsuId inputMal=$malLookupId inputAl=$aniListLookupId" +
+            " lookupTvdb=$tvdbLookupId")
         val memoryAnime = stremioCacheMemoryRead(animeMappingCache[query], METADATA_CACHE_TTL)
         val cachedAnime = memoryAnime ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
@@ -3739,6 +3746,17 @@ open class StremioC(
                 return@runSuspendCatching null
             }
             if (imdbId != null && resolvedImdb != imdbId) {
+                if (traceId != null) traceSource(traceId, "AIO_ID_REJECT",
+                    "query=$query reason=IMDB_ID_MISMATCH expected=$imdbId got=$resolvedImdb")
+                return@runSuspendCatching null
+            }
+            if (tvdbLookupId != null &&
+                (ids.get("thetvdbId").intOrNull() != tvdbLookupId ||
+                    data.get("tvdb")?.get("seasonNumber").intOrNull() != season)) {
+                if (traceId != null) traceSource(traceId, "AIO_ID_REJECT",
+                    "query=$query reason=TVDB_SEASON_OR_ID_MISMATCH" +
+                    " expectedId=$tvdbLookupId gotId=${ids.get("thetvdbId").intOrNull()}" +
+                    " expectedSeason=$season gotSeason=${data.get("tvdb")?.get("seasonNumber").intOrNull()}")
                 return@runSuspendCatching null
             }
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
@@ -3770,10 +3788,14 @@ open class StremioC(
                     if (target != null && start != null && (end == null || end >= start))
                         TmdbEpisodeRange(target, start, end) else null
                 }.orEmpty()
-            val mappedSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
-                ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
-                ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
-                ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+            val mappedSeason = if (tvdbLookupId != null) {
+                data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+            } else {
+                data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+            }
             val seasonMismatch = !byKitsu && !byMal && !byAniList &&
                 season != null && season > 1 && mappedSeason != season
             if (seasonMismatch) android.util.Log.i("MetaEpisodeMap",
@@ -3814,7 +3836,13 @@ open class StremioC(
                 tmdbRanges = tmdbRanges,
                 tvdbFromEpisode = data.get("tvdb")?.get("fromEpisode").intOrNull()
                     ?.takeIf { it > 0 },
-                tvdbRanges = tvdbRanges
+                tvdbRanges = tvdbRanges,
+                tvdbAbsoluteOrder = data.get("tvdb")?.get("absoluteOrder")
+                    ?.takeUnless { it.isNull }?.asBoolean(),
+                alternateImdbId = data.get("imdb")?.get("id").textOrNull()
+                    ?.takeIf { IMDB_ID_REGEX.matches(it) },
+                alternateImdbFromEpisode = data.get("imdb")?.get("fromEpisode").intOrNull()
+                    ?.takeIf { it > 0 }
             )
             }
             val mapping = outcome.getOrNull()
@@ -3934,8 +3962,70 @@ open class StremioC(
             val first = mapped?.tvdbFromEpisode
             if (first != null) (episode!! - first + 1).takeIf { it > 0 } else absolute
         }
-        val route = AnimeEpisodeRoute(mapped, if (local != null) mapped?.kitsuId else null,
-            local, converted?.second, if (local != null) "AIO_TVDB" else "UNVERIFIED")
+        // The IMDb lookup can select the wrong cour, or return no indexed season.
+        // Resolve that ambiguity by asking AIO for the same TVDB S/E, never by
+        // translating IMDb S17 to an assumed AIO season number.
+        if (local == null && imdb != null && season != null && episode != null) {
+            val tvdbId = mapped?.tvdbId ?: fetchAnimeSeasonMapping(
+                loadData.copy(season = null, episode = null, imdbSeason = null, imdbEpisode = null),
+                traceId
+            )?.tvdbId
+            traceSource(traceId, "AIO_TVDB_FALLBACK",
+                "imdb=$imdb input=S$season:E$episode tvdbId=$tvdbId" +
+                " reason=${if (tvdbId == null) "NO_TVDB_ID" else "NO_VERIFIED_IMDB_EPISODE"}")
+            if (tvdbId != null) {
+                val tvdb = fetchAnimeSeasonMapping(
+                    loadData.copy(imdbSeason = season, imdbEpisode = episode),
+                    traceId, tvdbLookupId = tvdbId
+                )
+                // Local episode numbering is safe only with explicit non-absolute TVDB order.
+                val tvdbEpisode = if (tvdb?.tvdbSeason == season &&
+                    tvdb.tvdbId == tvdbId && tvdb.tvdbAbsoluteOrder == false) {
+                    (episode - (tvdb.tvdbFromEpisode ?: 1) + 1).takeIf { it > 0 }
+                } else null
+                traceSource(traceId, "AIO_TVDB_VERIFY",
+                    "requested=$tvdbId:S$season:E$episode" +
+                    " result=${tvdb?.tvdbId}:S${tvdb?.tvdbSeason}" +
+                    " absoluteOrder=${tvdb?.tvdbAbsoluteOrder}" +
+                    " fromEpisode=${tvdb?.tvdbFromEpisode}" +
+                    " kitsu=${tvdb?.kitsuId} mal=${tvdb?.malId} al=${tvdb?.aniListId}" +
+                    " localE=$tvdbEpisode" +
+                    " status=${if (tvdbEpisode != null && tvdb.kitsuId != null) "MATCH" else "UNVERIFIED"}")
+                val kitsuId = tvdb?.kitsuId
+                if (tvdbEpisode != null && kitsuId != null) {
+                    val lookup = "kitsu:$kitsuId"
+                    val fromKitsu = fetchAnimeSeasonMapping(LoadData(
+                        id = lookup, originalAnimeId = lookup, kitsuId = kitsuId,
+                        season = 1, episode = tvdbEpisode, isAnime = true
+                    ), traceId)
+                    val matches = fromKitsu?.kitsuId == kitsuId &&
+                        fromKitsu.tvdbId == tvdbId &&
+                        fromKitsu.tvdbSeason == season &&
+                        (fromKitsu.aniListId == null || tvdb.aniListId == null ||
+                            fromKitsu.aniListId == tvdb.aniListId) &&
+                        (fromKitsu.malId == null || tvdb.malId == null ||
+                            fromKitsu.malId == tvdb.malId)
+                    val selected = if (matches) fromKitsu!! else tvdb
+                    traceSource(traceId, "AIO_KITSU_RECHECK",
+                        "kitsu=$kitsuId sourceTvdb=$tvdbId:S$season:E$episode" +
+                        " matched=$matches alternateImdb=${fromKitsu?.alternateImdbId}" +
+                        " altSeason=${fromKitsu?.imdbSeason}" +
+                        " altFromEpisode=${fromKitsu?.alternateImdbFromEpisode}" +
+                        " selected=${if (matches) "KITSU" else "TVDB"}")
+                    val route = AnimeEpisodeRoute(selected, kitsuId, tvdbEpisode, null, "AIO_TVDB_LOOKUP")
+                    traceSource(traceId, "ANIME_ID_RESULT",
+                        "via=${route.via} originalImdb=$imdb:S$season:E$episode" +
+                        " kitsu=$kitsuId mal=${selected.malId} al=${selected.aniListId}" +
+                        " localE=$tvdbEpisode altImdb=${selected.alternateImdbId}" +
+                        " altSeason=${selected.imdbSeason}")
+                    return route
+                }
+            }
+        }
+        val verified = local != null
+        val route = AnimeEpisodeRoute(if (verified) mapped else null,
+            if (verified) mapped?.kitsuId else null,
+            local, converted?.second, if (verified) "AIO_TVDB" else "UNVERIFIED")
         traceSource(traceId, "ANIME_ID_RESULT",
             "via=${route.via} imdb=$imdb S$season E$episode range=${converted?.first}" +
             " kitsu=${route.kitsuId} mal=${if (local != null) mapped?.malId else null}" +
