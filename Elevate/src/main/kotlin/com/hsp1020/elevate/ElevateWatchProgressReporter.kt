@@ -137,7 +137,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
                 null, false, null, emptyMap(), null, null, null, file)
         }
         val episode = state.meta as? ResultEpisode ?: run { return null }
-        val collected = ElevateMediaIdentity.collect(response, episode.data)
+        val collected = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
         val ids = collected.asMap().toMutableMap()
         val policy = progressPolicy(response.syncData, episode.data)
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
@@ -202,6 +202,9 @@ internal class ElevateWatchProgressReporter(private val application: Application
         }
 
         if (!approvedRuntime(item, current)) {
+            Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=BLOCK" +
+                " reason=RUNTIME event=$event expectedMs=${item.expectedDurationMs}" +
+                " actualMs=${current?.duration}")
             return
         }
         val target = progressEndpointBase() ?: run {
@@ -586,6 +589,10 @@ internal class ElevateWatchProgressReporter(private val application: Application
         } catch (_: Exception) {
             null
         }
+        val matchedEpisode = (detail as? TvSeriesLoadResponse)?.episodes?.let { episodes ->
+            episodes.firstOrNull { it.season == file.season && it.episode == file.episode }
+                ?: episodes.filter { it.episode == file.episode }.singleOrNull()
+        }
         val episodeData = when (detail) {
             is TvSeriesLoadResponse -> {
                 val episodeNumber = file.episode
@@ -606,10 +613,13 @@ internal class ElevateWatchProgressReporter(private val application: Application
             detail, episodeData, urls = listOf(header.url), episodeFirst = true
         )
         val ids = collected.asMap().toMutableMap()
-        val imdbNumbers = if (collected.imdbSeason != null || collected.imdbEpisode != null)
+        var imdbNumbers = if (collected.imdbSeason != null || collected.imdbEpisode != null)
             collected.imdbSeason to collected.imdbEpisode else null
         if (detail == null || ids.isEmpty()) {
             ElevateSkipRepository.identityDownloaded(header, file, 0L)?.let { mapped ->
+                if (imdbNumbers == null && mapped.imdbSeason != null &&
+                    mapped.imdbEpisode != null)
+                    imdbNumbers = mapped.imdbSeason to mapped.imdbEpisode
                 mapped.imdb?.let { ids.putIfAbsent("imdb", it) }
                 mapped.tmdb?.let { ids.putIfAbsent("tmdb", it) }
                 mapped.kitsu?.let { ids.putIfAbsent("kitsu", it) }
@@ -634,8 +644,17 @@ internal class ElevateWatchProgressReporter(private val application: Application
             episode = if (movie) null else file.episode,
             anime = anime, progressAllowed = policy.first, preferKitsu = policy.second,
             originalAnimeId = originalAnimeId(episodeData, collected),
-            ids = ids, imdbNumbers = imdbNumbers, urlId = urlId
+            ids = ids, imdbNumbers = imdbNumbers, urlId = urlId,
+            expectedDurationMs = item.expectedDurationMs ?: (
+                if (movie) (detail as? MovieLoadResponse)?.duration
+                else matchedEpisode?.runTime
+            )?.takeIf { it in 1 until 1_440 }?.toLong()?.times(60_000L)
         )
+        Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=DOWNLOAD_ID" +
+            " app=S${file.season}:E${file.episode} imdb=${ids["imdb"]}" +
+            " imdbInput=S${imdbNumbers?.first}:E${imdbNumbers?.second}" +
+            " expectedMs=${resolved.expectedDurationMs}" +
+            " status=${if (ids.isEmpty()) "UNVERIFIED" else "READY"}")
         downloadedMappings[cacheKey] = now to resolved
         if (downloadedMappings.size > 20)
             downloadedMappings.remove(downloadedMappings.keys.first())
@@ -643,40 +662,45 @@ internal class ElevateWatchProgressReporter(private val application: Application
     }
 
     private suspend fun send(report: Report) {
-        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) return
-        val item = report.item.offline?.let { resolveDownloaded(report.item) ?: return }
-            ?: report.item
-        if (item.progressAllowed == false) return
-        val ids = item.ids.toMutableMap()
-        // Reuse the same verified AIOStreams season mapping as Watch History Sync.
-        if (item.anime && !item.movie) {
-            val imdb = ids["imdb"]?.takeIf { it.matches(Regex("tt[0-9]+")) }
-            val season = item.imdbNumbers?.first ?: item.season
-            val tmdb = ids["tmdb"]
-            val source = item.originalAnimeId?.substringBefore(':')
-                ?.takeIf { it in setOf("kitsu", "mal", "anilist") }
-            val needsMapping = season == null || season > 1 ||
-                imdb == null || ids["kitsu"] == null
-            val direct = source?.takeIf { needsMapping }?.let { kind ->
-                item.originalAnimeId?.let { id ->
-                    ElevateAnimeIdResolver.resolveTrackingSource(kind, id)
-                }
-            }?.takeIf { mapped ->
-                (imdb == null || mapped.imdb == null || mapped.imdb == imdb) &&
-                    (tmdb == null || mapped.tmdb == null || mapped.tmdb == tmdb) &&
-                    (season == null || mapped.matchesSeason(season))
-            }
-            val mapped = direct ?: if (imdb != null && season != null && season > 0 &&
-                (season > 1 || ids["kitsu"] == null)) {
-                ElevateAnimeIdResolver.resolveTrackingImdbSeason(imdb, season)
-                    ?.takeIf { it.matchesSeason(season) }
-            } else null
-            mapped?.let {
-                it.kitsu?.let { value -> ids["kitsu"] = value }
-                it.mal?.let { value -> ids["mal"] = value }
-                it.anilist?.let { value -> ids["anilist"] = value }
-            }
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) {
+            Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=BLOCK reason=FEATURE_OFF")
+            return
         }
+        val item = report.item.offline?.let { resolveDownloaded(report.item) ?: run {
+            Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=BLOCK reason=DOWNLOAD_ID_UNVERIFIED")
+            return
+        } } ?: report.item
+        if (item.progressAllowed == false) {
+            Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=BLOCK reason=CATALOG_OFF")
+            return
+        }
+        val ids = item.ids.toMutableMap()
+        val original = item.originalAnimeId?.takeIf {
+            it.matches(Regex("(?:kitsu|mal|anilist):[0-9]+"))
+        }
+        val originalSeason = item.imdbNumbers?.first ?: item.season
+        val originalEpisode = item.imdbNumbers?.second ?: item.episode
+        Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=INPUT event=${report.event}" +
+            " imdb=${ids["imdb"]} original=$original app=S${item.season}:E${item.episode}" +
+            " imdb=S${item.imdbNumbers?.first}:E${item.imdbNumbers?.second}" +
+            " preferKitsu=${item.preferKitsu} allowed=${item.progressAllowed}")
+        val verified = if (item.anime && !item.movie && originalEpisode != null &&
+            originalEpisode > 0)
+            ElevateAnimeIdResolver.verifiedEpisode(ids["imdb"], originalSeason,
+                if (original != null) item.episode ?: originalEpisode else originalEpisode,
+                original, "PROGRESS") else null
+        if (verified != null) {
+            verified.mapping.kitsu?.let { ids["kitsu"] = it }
+            verified.mapping.mal?.let { ids["mal"] = it }
+            verified.mapping.anilist?.let { ids["anilist"] = it }
+        } else if (item.anime && !item.movie && original == null &&
+            originalSeason != null && (originalSeason > 1 || originalSeason == 0)) {
+            // Unverified title-wide IDs must not preempt original IMDb S/E.
+            ids.remove("kitsu"); ids.remove("mal"); ids.remove("anilist")
+        }
+        Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=MAPPING" +
+            " status=${if (verified != null) "MATCH" else "UNVERIFIED"}" +
+            " via=${verified?.via} kitsu=${verified?.mapping?.kitsu} local=${verified?.localEpisode}")
         if (ids["imdb"]?.matches(Regex("tt[0-9]+")) != true &&
             ids["tmdb"]?.toLongOrNull()?.let { it > 0L } != true) {
             ids["simkl"]?.let { ids.putAll(resolveSimkl(it, item.movie)) }
@@ -700,13 +724,21 @@ internal class ElevateWatchProgressReporter(private val application: Application
             ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
         val anime = item.anime
         val originalId = originalPlaybackId(item.url, ids)
+        val eligibleKitsu = kitsu?.takeIf { candidate ->
+            verified?.mapping?.kitsu == candidate || original == "kitsu:$candidate" ||
+                !anime || item.movie
+        }
+        val eligibleMal = mal?.takeIf { candidate ->
+            verified?.mapping?.mal == candidate || original == "mal:$candidate" ||
+                !anime || item.movie
+        }
         val base = when {
-            item.preferKitsu && anime && kitsu != null -> "kitsu:" + kitsu
+            item.preferKitsu && anime && eligibleKitsu != null -> "kitsu:" + eligibleKitsu
             originalId != null -> originalId
             imdb != null -> imdb
             tmdb != null -> "tmdb:" + tmdb
-            kitsu != null -> "kitsu:" + kitsu
-            mal != null -> "mal:" + mal
+            eligibleKitsu != null -> "kitsu:" + eligibleKitsu
+            eligibleMal != null -> "mal:" + eligibleMal
             else -> item.urlId?.takeIf {
                 it.matches(Regex("tt[0-9]+|(?:tmdb|kitsu|mal):[0-9]+"))
             } ?: run {
@@ -716,14 +748,22 @@ internal class ElevateWatchProgressReporter(private val application: Application
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
             else (if (base.startsWith("tt")) item.imdbNumbers?.first else null)
                 ?: item.season
-        val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:")) item.episode
+        val episode = if (base.startsWith("kitsu:") || base.startsWith("mal:"))
+            verified?.localEpisode ?: item.episode
             else (if (base.startsWith("tt")) item.imdbNumbers?.second else null)
                 ?: item.episode
         val videoId = if (item.movie) base else {
-            if (episode == null || episode <= 0 || season == null || season <= 0) return
+            if (episode == null || episode <= 0 || season == null || season < 0) {
+                Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=BLOCK reason=INVALID_SEASON_EPISODE" +
+                    " base=$base season=$season episode=$episode")
+                return
+            }
             if (base.startsWith("kitsu:") || base.startsWith("mal:")) base + ":" + episode
             else base + ":" + season + ":" + episode
         }
+        Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=OUTPUT" +
+            " status=READY event=${report.event} base=$base season=$season episode=$episode" +
+            " videoId=$videoId via=${verified?.via ?: "ORIGINAL_OR_FALLBACK"}")
         val body = JSONObject()
             .put("id", UUID.randomUUID().toString())
             .put("event", report.event)
@@ -746,6 +786,11 @@ internal class ElevateWatchProgressReporter(private val application: Application
             requestBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()),
             timeout = 15L
         )
+        val status = response.code
         response.okhttpResponse.close()
+        Log.i("ElevateSeasonAudit", "feature=PROGRESS phase=HTTP" +
+            " event=${report.event} videoId=$videoId code=$status" +
+            " status=${if (status in 200..299) "SUCCESS" else "FAILED"}")
+        if (status !in 200..299) throw IllegalStateException("PROGRESS_HTTP_$status")
     }
 }

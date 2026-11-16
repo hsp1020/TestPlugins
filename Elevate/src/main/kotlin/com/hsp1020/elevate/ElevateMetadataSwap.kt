@@ -1152,7 +1152,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     expectedSeason++
                 }
                 val mappingStarted = SystemClock.elapsedRealtime()
-                val seasonMappings = if (imdb != null && seasons.isNotEmpty())
+                val initialSeasonMappings = if (imdb != null && seasons.isNotEmpty())
                     withContext(Dispatchers.IO) {
                         val firstSeason = seasons.first()
                         val first = ElevateAnimeIdResolver.resolveImdbSeason(imdb, firstSeason)
@@ -1167,6 +1167,44 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             } ?: ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
                         }
                     } else emptyMap()
+                val seasonMappings = if (imdb != null && anime && seasons.isNotEmpty()) {
+                    // Keep verified AIO ranges. Retry only seasons without a reliable
+                    // season/range claim, with bounded concurrent fallback lookups.
+                    val fallbackLimiter = Semaphore(4)
+                    seasons.map { season ->
+                        async(Dispatchers.IO) {
+                            val initial = initialSeasonMappings[season]
+                            val absolutes = numbersBySeason[season].orEmpty()
+                                .mapNotNull { absoluteByEpisode[season to it] }
+                            val rangeVerified = initial != null && absolutes.isNotEmpty() &&
+                                absolutes.size == numbersBySeason[season]?.size &&
+                                absolutes.all { value -> initial.tmdbRanges.any { range ->
+                                    value >= range.start &&
+                                        (range.end == null || value <= range.end)
+                                } }
+                            val seasonVerified = initial != null &&
+                                ElevateWatchHistoryRules.verifiedSeason(season,
+                                    listOf(initial.imdbSeason, initial.tvdbSeason,
+                                        initial.traktSeason, initial.tmdbSeason),
+                                    seasons.size > 1)
+                            val selected = if (rangeVerified || seasonVerified) initial else {
+                                val probe = numbersBySeason[season].orEmpty().minOrNull()
+                                if (probe == null) null else withTimeoutOrNull(8_000L) {
+                                    fallbackLimiter.withPermit {
+                                        ElevateAnimeIdResolver.verifiedEpisode(imdb, season,
+                                            probe, feature = "TMDB_SWAP")?.mapping
+                                    }
+                                }
+                            }
+                            Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=SEASON_MAPPING" +
+                                " season=$season status=${if (selected != null) "MATCH" else "UNVERIFIED"}" +
+                                " via=${if (rangeVerified) "AIO_RANGE" else if (seasonVerified) "AIO_SEASON" else "VERIFIED_FALLBACK"}" +
+                                " kitsu=${selected?.kitsu} tmdb=${selected?.tmdb}:" +
+                                "${selected?.tmdbSeason} ranges=${selected?.tmdbRanges?.size}")
+                            season to selected
+                        }
+                    }.awaitAll().toMap()
+                } else initialSeasonMappings
                 Log.i("ElevateMetaTiming",
                     "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.values.count { it != null }} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
                 val seasonStarted = SystemClock.elapsedRealtime()
@@ -1238,7 +1276,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val responses = requests.map { (appSeason, targetSeason, id) ->
                         async(Dispatchers.IO) {
                             if (appSeason in completeSourceSeasons)
-                                return@async Triple(appSeason, targetSeason,
+                                return@async Triple(appSeason, id to targetSeason,
                                     emptyMap<Int, EpisodeMeta>())
                             val queuedAt = SystemClock.elapsedRealtime()
                             var queueMs = -1L
@@ -1268,23 +1306,52 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 "MetaEpisodeMap", "phase=TMDB_SOURCE tmdb=S$targetSeason:E$n appSeason=$appSeason" +
                                     " thumb=${!fields.poster.isNullOrBlank()} plot=${!fields.description.isNullOrBlank()}" +
                                     " rating=${fields.rating} airDate=${fields.date}")
-                            Triple(appSeason, targetSeason, byNumber)
+                            Triple(appSeason, id to targetSeason, byNumber)
                         }
                     }.awaitAll()
                     val result = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
-                    val used = mutableSetOf<Pair<Int, Int>>()
+                    val used = mutableSetOf<Triple<String, Int, Int>>()
                     var imdbKitsuLoaded = false
                     var imdbKitsu = emptyMap<Pair<Int, Int>, Int>()
                     val titleKitsu = mutableMapOf<String, Map<Int, Int>>()
                     for (appSeason in seasons.sorted()) {
-                        if (appSeason in completeSourceSeasons) continue
+                        if (appSeason in completeSourceSeasons) {
+                            Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=SEASON_RESULT" +
+                                " season=$appSeason status=UNCHANGED reason=COMPLETE_SOURCE")
+                            continue
+                        }
                         val isSpecial = appSeason == specialSeason
-                        val targets = responses.filter { it.first == appSeason }
-                            .associate { it.second to it.third }
                         val mapping = directMapping?.takeIf {
                             seasons.size == 1 && appSeason == 1
                         } ?: seasonMappings[appSeason]
                         val kitsuId = mapping?.kitsu ?: ids.kitsu
+                        val targetId = if (isSpecial) detailId else
+                            mapping?.tmdb?.takeIf {
+                                mapping.tmdbSeason != null || mapping.tmdbRanges.isNotEmpty()
+                            } ?: detailId
+                        if (targetId == null) {
+                            Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=SEASON_RESULT" +
+                                " season=$appSeason status=FAILED reason=NO_TMDB_ID")
+                            continue
+                        }
+                        // When a later cour shares the same TMDB title/season and AIO has no
+                        // fromEpisode, continue after the last *verified* previous mapping.
+                        val mappedTmdbSeason = mapping?.tmdbSeason
+                        val priorEnd = if (mapping?.tmdbFromEpisode == null &&
+                            mappedTmdbSeason != null)
+                            used.asSequence().filter { it.first == targetId &&
+                                it.second == mappedTmdbSeason }
+                                .map { it.third }.maxOrNull() else null
+                        val fromEpisode = mapping?.tmdbFromEpisode ?: priorEnd?.plus(1) ?: 1
+                        if (mappedTmdbSeason != null)
+                            Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=OFFSET" +
+                                " season=$appSeason tmdb=$targetId:S$mappedTmdbSeason" +
+                                " given=${mapping?.tmdbFromEpisode} previousEnd=$priorEnd start=$fromEpisode")
+                        val targets = responses.filter {
+                            it.first == appSeason && it.second.first == targetId
+                        }.associate { it.second.second to it.third }
+                        var matches = 0
+                        var misses = 0
                         for (number in numbersBySeason[appSeason].orEmpty().distinct().sorted()) {
                             val key = appSeason to number
                             val sourceDate = if (completeAio)
@@ -1303,7 +1370,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             val aioTarget = if (isSpecial) 0 to number else
                                 range?.let { it.season to absolute!! }
                                 ?: mapping?.tmdbSeason?.let {
-                                    it to ((mapping.tmdbFromEpisode ?: 1) + number - 1)
+                                    it to (fromEpisode + number - 1)
                                 }
                                 ?: if (!anime) appSeason to number else null
                             val aioData = aioTarget?.let { targets[it.first]?.get(it.second) }
@@ -1312,7 +1379,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             }
                             val dateRejected = anime && dateDiff != null && dateDiff >= 30L
                             val aioKey = aioTarget?.takeIf {
-                                aioData != null && !dateRejected && it !in used
+                                aioData != null && !dateRejected &&
+                                    Triple(targetId, it.first, it.second) !in used
                             }
                             var kitsuAbsolute: Int? = null
                             var kitsuKey: Pair<Int, Int>? = null
@@ -1336,7 +1404,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     }
                                 }.orEmpty().filter { candidate ->
                                     val targetDay = dayOf(targets[candidate.first]?.get(candidate.second)?.date)
-                                    candidate !in used && !(dateRejected && candidate == aioTarget) &&
+                                    Triple(targetId, candidate.first, candidate.second) !in used &&
+                                        !(dateRejected && candidate == aioTarget) &&
                                         (originalDay == null || targetDay == null ||
                                             kotlin.math.abs(originalDay - targetDay) < 30L)
                                 }
@@ -1353,15 +1422,23 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 }
                             }.distinct() else emptyList()
                             val airDateKey = airDateCandidates.singleOrNull()
-                                ?.takeUnless { it in used }
+                                ?.takeUnless { Triple(targetId, it.first, it.second) in used }
                             val mapped = aioKey ?: kitsuKey ?: airDateKey
                             if (mapped != null) {
                                 val data = targets[mapped.first]?.get(mapped.second)
                                 if (data != null) {
-                                    used.add(mapped)
+                                    used.add(Triple(targetId, mapped.first, mapped.second))
+                                    matches++
                                     result[key] = data
                                 }
                             }
+                            if (mapped == null) misses++
+                            Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=EPISODE" +
+                                " app=S$appSeason:E$number targetId=$targetId" +
+                                " target=$mapped aio=$aioTarget absolute=$absolute from=$fromEpisode" +
+                                " dateDiff=$dateDiff" +
+                                " method=${if (aioKey != null) "AIO" else if (kitsuKey != null) "KITSU" else if (airDateKey != null) "AIRDATE" else "NONE"}" +
+                                " status=${if (mapped != null) "MATCH" else if (dateRejected) "REJECT_30D" else "MISS"}")
                             if (appSeason >= 21) Log.i("MetaEpisodeMap",
                                 "phase=TMDB_MAP app=S$appSeason:E$number special=$isSpecial absolute=$absolute" +
                                     " aio=$aioTarget dateDiff=$dateDiff aioRejected30d=$dateRejected" +
@@ -1371,6 +1448,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     " reason=${if (mapped != null) "MATCH" else if (dateRejected) "AIRDATE_30D" else if (aioData == null) "AIO_MISSING" else "AMBIGUOUS_OR_DUPLICATE"}" +
                                     " sourceDate=$sourceDate tmdbDate=${mapped?.let { targets[it.first]?.get(it.second)?.date }}")
                         }
+                        Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=SEASON_RESULT" +
+                            " season=$appSeason targetId=$targetId matched=$matches missed=$misses" +
+                            " status=${if (misses == 0) "SUCCESS" else if (matches > 0) "PARTIAL" else "FAILED"}")
                     }
                     result
                 }
@@ -1731,7 +1811,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 val video = videos.optJSONObject(i) ?: continue
                                 put(JSONObject().apply {
                                     for (field in listOf("season", "episode", "number", "id",
-                                        "imdb_id", "imdbSeason", "imdbEpisode", "tvdb_id",
+                                        "absoluteEpisode", "imdb_id", "imdbSeason", "imdbEpisode", "tvdb_id",
                                         "streams", "title", "name", "overview", "description",
                                         "thumbnail", "poster", "released", "firstAired",
                                         "runtime", "rating")) {
@@ -1824,7 +1904,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 manifest.encodedPath.orEmpty().removeSuffix("/manifest.json") +
                     "/meta/$type/${Uri.encode(id)}.json"
             ).build().toString()
-            val key = version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
+            // New metadata schema retains absoluteEpisode; bypass old slim disk entries.
+            val key = "absolute-v2|" + version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
             val result = shared(key, "meta", metadata, metaFlights) {
                 request(url, movie)
             }

@@ -207,13 +207,77 @@ internal class ElevateActorHook(
                 ElevateIdResolver.imdbForTmdb(it, false)
             }
             imdb?.let { ElevateAnimeIdResolver.resolveImdbSeason(it, selectedSeason) }
+                ?.takeIf { mapped -> ElevateWatchHistoryRules.verifiedSeason(
+                    selectedSeason, listOf(mapped.imdbSeason, mapped.tvdbSeason,
+                        mapped.traktSeason, mapped.tmdbSeason), multiSeason) }
         } else null
+        // Independent anime titles can have a different cast for each selected season.
+        val selectedEpisodes = if (!movie && selectedSeason != null)
+            (response as? TvSeriesLoadResponse)?.episodes?.filter {
+                it.season == selectedSeason && it.episode > 0
+            }.orEmpty() else emptyList()
+        val episodeIds = selectedEpisodes.map {
+            ElevateMediaIdentity.collect(episodeData = it.data)
+        }
+        val seasonAnilist = episodeIds.mapNotNull { it.anilist }.distinct().singleOrNull()
+        val seasonMal = episodeIds.mapNotNull { it.mal }.distinct().singleOrNull()
+        val seasonKitsu = episodeIds.mapNotNull { it.kitsu }.distinct().singleOrNull()
+        val seasonAnime = nativeAnime || simklMapping?.segment == "anime" ||
+            aioMapping != null || ids.anilist != null || ids.mal != null || ids.kitsu != null
+        android.util.Log.i("ElevateSeasonAudit", "feature=ACTOR phase=INPUT" +
+            " season=$selectedSeason multi=$multiSeason anime=$seasonAnime" +
+            " imdb=${ids.imdb} pageAl=${ids.anilist} episodeAl=$seasonAnilist" +
+            " episodeMal=$seasonMal episodeKitsu=$seasonKitsu episodes=${selectedEpisodes.size}")
+        if (seasonAnime && selectedSeason != null && selectedEpisodes.isNotEmpty()) {
+            // These IDs were found in the chosen season's own episodes, never the page-wide metadata.
+            seasonAnilist?.let { id -> anilist(id)?.let {
+                android.util.Log.i("ElevateSeasonAudit",
+                    "feature=ACTOR phase=RESULT status=MATCH via=SEASON_EPISODE" +
+                    " season=$selectedSeason al=$id cast=${it.actors.size}")
+                return it
+            } }
+            seasonMal?.let { id -> animeMapped("mal", id)?.let {
+                android.util.Log.i("ElevateSeasonAudit",
+                    "feature=ACTOR phase=RESULT status=MATCH via=SEASON_MAL" +
+                    " season=$selectedSeason mal=$id cast=${it.actors.size}")
+                return it
+            } }
+            seasonKitsu?.let { id -> animeMapped("kitsu", id)?.let {
+                android.util.Log.i("ElevateSeasonAudit",
+                    "feature=ACTOR phase=RESULT status=MATCH via=SEASON_KITSU" +
+                    " season=$selectedSeason kitsu=$id cast=${it.actors.size}")
+                return it
+            } }
+            val first = selectedEpisodes.first()
+            val firstIds = ElevateMediaIdentity.collect(episodeData = first.data)
+            val imdb = ids.imdb ?: ids.tmdb?.let {
+                ElevateIdResolver.imdbForTmdb(it, false)
+            }
+            val verified = ElevateAnimeIdResolver.verifiedEpisode(imdb,
+                firstIds.imdbSeason ?: selectedSeason,
+                firstIds.imdbEpisode ?: first.episode,
+                firstIds.original?.takeIf {
+                    it.matches(Regex("(?:kitsu|mal|anilist):[0-9]+"))
+                }, "ACTOR")
+            val resolvedCast = verified?.mapping?.anilist?.let { anilist(it) }
+                ?: verified?.mapping?.mal?.let { animeMapped("mal", it) }
+            android.util.Log.i("ElevateSeasonAudit", "feature=ACTOR phase=ROUTE" +
+                " season=$selectedSeason lookup=S${firstIds.imdbSeason ?: selectedSeason}:" +
+                "E${firstIds.imdbEpisode ?: first.episode} status=${if (resolvedCast != null) "MATCH" else "UNVERIFIED"}" +
+                " via=${verified?.via} al=${verified?.mapping?.anilist}" +
+                " cast=${resolvedCast?.actors?.size ?: 0}")
+            if (resolvedCast != null) return resolvedCast
+        }
         if (simklMapping?.segment == "anime" || aioMapping != null) {
             if (movie) return simklMapping?.anilist?.let { anilist(it) }
                 ?: simklMapping?.mal?.let { animeMapped("mal", it) }
             val imdb = ids.imdb ?: simklMapping?.imdb
             val mapped = aioMapping ?: if (imdb != null && selectedSeason != null)
-                ElevateAnimeIdResolver.resolveImdbSeason(imdb, selectedSeason) else null
+                ElevateAnimeIdResolver.resolveImdbSeason(imdb, selectedSeason)
+                    ?.takeIf { candidate -> ElevateWatchHistoryRules.verifiedSeason(
+                        selectedSeason, listOf(candidate.imdbSeason, candidate.tvdbSeason,
+                            candidate.traktSeason, candidate.tmdbSeason), multiSeason) }
+            else null
             mapped?.anilist?.let { anilist(it) }?.let { return it }
             mapped?.mal?.let { animeMapped("mal", it) }?.let { return it }
             // Never use a title-wide AniList ID as another season's cast.
@@ -246,6 +310,9 @@ internal class ElevateActorHook(
         // Consult the IMDb season mapping only for multi-season pages or as a fallback.
         if (anime && !movie && selectedSeason != null && ids.imdb != null) {
             val mapping = ElevateAnimeIdResolver.resolveImdbSeason(ids.imdb, selectedSeason)
+                ?.takeIf { candidate -> ElevateWatchHistoryRules.verifiedSeason(
+                    selectedSeason, listOf(candidate.imdbSeason, candidate.tvdbSeason,
+                        candidate.traktSeason, candidate.tmdbSeason), multiSeason) }
             val seasonal = mapping?.anilist?.let { anilist(it) }
             if (seasonal != null) return seasonal
         }
@@ -469,6 +536,10 @@ internal class ElevateActorHook(
                 val fallback = page.actors?.takeIf { it.isNotEmpty() }
                     ?: response?.actors.orEmpty()
                 val resolved = loaded ?: CastResult(fallback, null)
+                android.util.Log.i("ElevateSeasonAudit", "feature=ACTOR phase=APPLY" +
+                    " season=$season multi=$multiSeason" +
+                    " status=${if (loaded != null) "MAPPED" else if (fallback.isNotEmpty()) "PAGE_FALLBACK" else "EMPTY"}" +
+                    " count=${resolved.actors.size}")
                 val actors = resolved.actors.map { row ->
                     val actor = row.actor.takeIf { !it.image.isNullOrBlank() }
                         ?: row.actor.copy(image = noActorImage)

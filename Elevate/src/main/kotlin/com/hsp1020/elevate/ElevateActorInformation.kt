@@ -144,6 +144,9 @@ internal object ElevateActorInformation {
             .buildUpon().appendQueryParameter("language", language)
             .appendQueryParameter("api_key", apiKey).build().toString()
         val response = app.get(url, timeout = 15L)
+        android.util.Log.i("ElevateSeasonAudit", "feature=ACTOR_INFO phase=HTTP" +
+            " personId=$personId endpoint=${if (endpoint.isEmpty()) "BIO" else "CREDITS"}" +
+            " code=${response.code} status=${if (response.code in 200..299) "SUCCESS" else "FAILED"}")
         if (response.code !in 200..299) {
             throw IllegalStateException(when (response.code) {
                 401 -> "TMDB API key was rejected (401)"
@@ -314,6 +317,9 @@ internal object ElevateActorInformation {
 
         fun click(person: ElevateActorPersonRef, originCard: View? = null) {
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
+            android.util.Log.i("ElevateSeasonAudit", "feature=ACTOR_INFO phase=OPEN" +
+                " personId=${person.id} status=${if (person.id != null) "READY" else "NO_TMDB_ID"}" +
+                " pageHash=${page.url.hashCode()}")
             originActorFocus = if (isLayout(TV)) originCard else null
             originActorPosition = if (isLayout(TV)) originCard?.let { card ->
                 fragment.view?.findViewById<androidx.recyclerview.widget.RecyclerView>(

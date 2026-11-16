@@ -36,7 +36,9 @@ internal object ElevateOfflineMedia {
         val withoutIds = listOf(i.imdb, i.tmdb, i.mal, i.anilist, i.kitsu).all { it == null }
         return (base + listOfNotNull(
             i.original.takeIf { independent },
-            i.simkl.takeIf { withoutIds }
+            i.simkl.takeIf { withoutIds },
+            // Keep existing keys for regular episodes; distinguish special IMDb S0.
+            i.imdbSeason?.takeIf { it != i.season }?.let { "imdb:$it:${i.imdbEpisode}" }
         )).joinToString("|")
     }
     private fun JSONObject.string(name: String) =
@@ -66,7 +68,13 @@ internal object ElevateOfflineMedia {
                 j.string("anilist"), j.string("kitsu"),
                 j.optInt("season").takeIf { j.has("season") && !j.isNull("season") && it >= 0 },
                 j.optInt("episode"), j.optBoolean("anime"), j.optBoolean("movie"),
-                0L, null, j.string("simkl"), j.string("original")
+                0L, null, j.string("simkl"), j.string("original"),
+                j.optInt("imdbSeason").takeIf {
+                    j.has("imdbSeason") && !j.isNull("imdbSeason") && it >= 0
+                },
+                j.optInt("imdbEpisode").takeIf { it > 0 },
+                j.string("episodeMal"), j.string("episodeAniList"),
+                j.optBoolean("singleSeason")
             )
         }.getOrNull()
     }
@@ -76,6 +84,9 @@ internal object ElevateOfflineMedia {
             put("anilist", i.anilist); put("kitsu", i.kitsu)
             put("simkl", i.simkl); put("original", i.original)
             put("season", i.season); put("episode", i.episode)
+            put("imdbSeason", i.imdbSeason); put("imdbEpisode", i.imdbEpisode)
+            put("episodeMal", i.episodeMal); put("episodeAniList", i.episodeAniList)
+            put("singleSeason", i.singleSeason)
             put("anime", i.anime); put("movie", i.movie)
         }
         prefs(ctx).edit().putString("identity:$parentId", j.toString()).apply()

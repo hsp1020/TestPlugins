@@ -513,7 +513,7 @@ internal class ElevateSkipController(private val application: Application) :
             playerDuration < 60_000L && episodeDuration > playerDuration) {
             episodeDuration
         } else playerDuration ?: episodeDuration ?: 0L
-        val trace = ""
+        val trace = "${state.instance}:$nextEpisode"
         val identity = if (episode != null && response != null)
             ElevateSkipRepository.identity(response, episode, duration,
                 if (state.instance != activeInstance || episodeId != activeEpisode)
@@ -1149,11 +1149,15 @@ internal object ElevateSkipRepository {
         val imdb: String?, val tmdb: String?, val mal: String?, val anilist: String?,
         val kitsu: String?, val season: Int?, val episode: Int, val anime: Boolean,
         val movie: Boolean, val duration: Long, val absoluteEpisode: Int?,
-        val simkl: String? = null, val original: String? = null
+        val simkl: String? = null, val original: String? = null,
+        val imdbSeason: Int? = null, val imdbEpisode: Int? = null,
+        val episodeMal: String? = null, val episodeAniList: String? = null,
+        val singleSeason: Boolean = false
     ) {
         val key: String
             get() = listOf(imdb, tmdb, mal, anilist, kitsu, simkl, original,
-                season, episode, anime, movie).joinToString("|")
+                season, episode, anime, movie, imdbSeason, imdbEpisode,
+                episodeMal, episodeAniList, singleSeason).joinToString("|")
     }
     private data class OfflineIds(
         val imdb: String?, val tmdb: String?, val mal: String?,
@@ -1167,7 +1171,8 @@ internal object ElevateSkipRepository {
     private data class CachedStamps(
         val intro: List<VideoSkipStamp>, val ani: List<VideoSkipStamp>,
         val anime: List<VideoSkipStamp>, val theIntroIdentity: Identity?,
-        val releases: List<ReleaseStamps>, val until: Long
+        val releases: List<ReleaseStamps>, val until: Long,
+        val releaseRefetched: Boolean = false
     )
     private val resultCache = ConcurrentHashMap<String, CachedStamps>()
     private const val RELEASE_DIFFERENCE_MS = 60_000L
@@ -1182,12 +1187,17 @@ internal object ElevateSkipRepository {
     fun identity(response: LoadResponse, episode: ResultEpisode, duration: Long,
         trace: String? = null): Identity {
         val ids = ElevateMediaIdentity.collect(response, episode.data, episodeFirst = true)
+        val episodeIds = ElevateMediaIdentity.collect(episodeData = episode.data)
+        val singleSeason = (response as? com.lagradost.cloudstream3.TvSeriesLoadResponse)
+            ?.episodes?.mapNotNull { it.season }?.distinct()?.size == 1
         val movie = response.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
             episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         return Identity(ids.imdb, ids.tmdb, ids.mal, ids.anilist, ids.kitsu,
             episode.season ?: ids.imdbSeason, episode.episode,
             ElevateMediaIdentity.anime(response, episode, ids),
-            movie, duration, episode.totalEpisodeIndex, ids.simkl, ids.original)
+            movie, duration, episode.totalEpisodeIndex, ids.simkl, ids.original,
+            ids.imdbSeason, ids.imdbEpisode, episodeIds.mal, episodeIds.anilist,
+            singleSeason)
     }
 
     suspend fun identityDownloaded(
@@ -1277,12 +1287,17 @@ internal object ElevateSkipRepository {
 
     private suspend fun request(url: String, trace: String? = null, source: String? = null): JSONObject? =
         try {
-            val response = app.get(url, timeout = 7L).text
-
-            JSONObject(response)
+            val response = app.get(url, timeout = 7L)
+            val status = response.code
+            val raw = response.text
+            android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=HTTP" +
+                " trace=$trace source=$source code=$status" +
+                " status=${if (status in 200..299) "OK" else "FAILED"}")
+            if (status in 200..299) JSONObject(raw) else null
         } catch (ex: CancellationException) { throw ex }
           catch (ex: Exception) {
-
+              android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=HTTP" +
+                " trace=$trace source=$source status=ERROR type=${ex.javaClass.simpleName}")
               null
           }
 
@@ -1294,7 +1309,20 @@ internal object ElevateSkipRepository {
             return null
         }
 
-        val result = when (i.original?.substringBefore(':')) {
+        val original = i.original?.takeIf {
+            it.matches(Regex("(?:kitsu|mal|anilist):[0-9]+"))
+        }
+        val result = if (i.imdb != null) {
+            ElevateAnimeIdResolver.verifiedEpisode(i.imdb,
+                i.imdbSeason ?: i.season, i.imdbEpisode ?: i.episode,
+                original, "SKIP")?.let { verified ->
+                val m = verified.mapping
+                ElevateAnimeIdResolver.EpisodeMapping(m.mal, m.anilist,
+                    verified.localEpisode, m.kitsu,
+                    m.imdbSeason ?: m.tvdbSeason ?: m.tmdbSeason,
+                    m.imdb, m.tmdb, m.imdbSeason, m.tmdbSeason, m.tmdbFromEpisode)
+            }
+        } else when (i.original?.substringBefore(':')) {
             "kitsu" -> ElevateAnimeIdResolver.resolveEpisode(
                 null, null, null, i.kitsu, i.season, i.episode, trace)
             "mal" -> ElevateAnimeIdResolver.resolveEpisode(
@@ -1302,24 +1330,40 @@ internal object ElevateSkipRepository {
             "anilist" -> ElevateAnimeIdResolver.resolveEpisode(
                 null, null, i.anilist, null, i.season, i.episode, trace)
             else -> ElevateAnimeIdResolver.resolveEpisode(
-                i.imdb, i.mal, i.anilist, i.kitsu, i.season, i.episode, trace)
+                null, i.mal, i.anilist, i.kitsu, i.season, i.episode, trace)
         }
-
+        android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=MAPPING trace=$trace" +
+            " imdb=${i.imdb} original=$original app=S${i.season}:E${i.episode}" +
+            " imdb=S${i.imdbSeason}:E${i.imdbEpisode}" +
+            " status=${if (result == null) "UNVERIFIED" else "MATCH"}" +
+            " kitsu=${result?.kitsu} mal=${result?.mal} al=${result?.anilist}" +
+            " local=${result?.episode}")
         return result
     }
 
     // Provider season numbering is independent of the original Stremio episode numbering.
     private fun introDbIdentity(i: Identity, mapping: ElevateAnimeIdResolver.EpisodeMapping?): Identity {
-        if (!i.anime || i.movie || mapping == null || mapping.imdb == null ||
+        if (!i.anime || i.movie) return i
+        if (i.imdbSeason != null && i.imdbEpisode != null)
+            return i.copy(season = i.imdbSeason, episode = i.imdbEpisode)
+        // An independent anime ID is not evidence of the corresponding IMDb S/E.
+        if (i.original?.substringBefore(':') in setOf("kitsu", "mal", "anilist"))
+            return i.copy(imdb = null)
+        if (mapping == null || mapping.imdb == null ||
             mapping.imdb != i.imdb || mapping.imdbSeason == null) return i
-        return i.copy(season = mapping.imdbSeason, episode = mapping.episode)
+        // Local AniList/Kitsu E is never an IMDb episode number.
+        return i.copy(season = mapping.imdbSeason)
     }
 
     private fun theIntroDbIdentity(i: Identity, mapping: ElevateAnimeIdResolver.EpisodeMapping?): Identity {
         if (i.tmdb == null) return introDbIdentity(i, mapping)
-        if (!i.anime || i.movie || mapping == null || mapping.tmdb == null ||
-            mapping.tmdb != i.tmdb || mapping.tmdbSeason == null) return i
-        val mappedEpisode = (mapping.tmdbFromEpisode ?: 1).toLong() + mapping.episode - 1L
+        if (!i.anime || i.movie) return i
+        if (mapping == null || mapping.tmdb != i.tmdb ||
+            mapping.tmdbSeason == null || mapping.tmdbFromEpisode == null) {
+            // Never query a displayed anime season against an unrelated TMDB work.
+            return introDbIdentity(i, mapping).copy(tmdb = null)
+        }
+        val mappedEpisode = mapping.tmdbFromEpisode.toLong() + mapping.episode - 1L
         if (mappedEpisode !in 1L..Int.MAX_VALUE.toLong()) return i
         return i.copy(season = mapping.tmdbSeason, episode = mappedEpisode.toInt())
     }
@@ -1468,7 +1512,10 @@ internal object ElevateSkipRepository {
 
             return emptyList()
         }
-        val mal = mapped?.mal ?: i.mal ?: run {
+        val trustedMal = i.mal?.takeIf {
+            i.episodeMal == it || i.original == "mal:$it" || i.singleSeason
+        }
+        val mal = mapped?.mal ?: trustedMal ?: run {
 
             return emptyList()
         }
@@ -1520,7 +1567,10 @@ internal object ElevateSkipRepository {
 
             return emptyList()
         }
-        val anilist = mapped?.anilist ?: i.anilist ?: run {
+        val trustedAniList = i.anilist?.takeIf {
+            i.episodeAniList == it || i.original == "anilist:$it" || i.singleSeason
+        }
+        val anilist = mapped?.anilist ?: trustedAniList ?: run {
 
             return emptyList()
         }
@@ -1538,15 +1588,18 @@ internal object ElevateSkipRepository {
 
         suspend fun query(stage: String, graphql: String): JSONObject? =
             try {
-                val body = JSONObject(app.post("https://api.anime-skip.com/graphql",
+                val response = app.post("https://api.anime-skip.com/graphql",
                     json = mapOf("query" to graphql),
                     headers = mapOf("X-Client-ID" to clientId, "Content-Type" to "application/json"),
-                    timeout = 7L).text)
+                    timeout = 7L)
+                val body = JSONObject(response.text)
                 val errors = body.optJSONArray("errors")
-                if (errors != null && errors.length() > 0) {
-
-                }
-                body.node("data")
+                android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=HTTP" +
+                    " trace=$trace source=AnimeSkip stage=$stage code=${response.code}" +
+                    " errors=${errors?.length() ?: 0}" +
+                    " status=${if (response.code in 200..299 && (errors?.length() ?: 0) == 0) "OK" else "FAILED"}")
+                if (response.code in 200..299 && (errors?.length() ?: 0) == 0)
+                    body.node("data") else null
             } catch (ex: CancellationException) { throw ex }
               catch (ex: Exception) {
 
@@ -1659,10 +1712,14 @@ internal object ElevateSkipRepository {
         try {
             val result = withTimeoutOrNull(8_000L) { block() }
 
+            android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=PROVIDER" +
+                " trace=$trace source=$name count=${result?.size ?: 0}" +
+                " status=${if (result == null) "TIMEOUT" else if (result.isEmpty()) "EMPTY" else "MATCH"}")
             result.orEmpty()
         } catch (ex: CancellationException) { throw ex }
           catch (ex: Exception) {
-
+              android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=PROVIDER" +
+                " trace=$trace source=$name status=ERROR type=${ex.javaClass.simpleName}")
               emptyList()
           }
 
@@ -1672,12 +1729,14 @@ internal object ElevateSkipRepository {
         withContext(Dispatchers.IO) {
             val cached = resultCache[i.key] ?: return@withContext null
             val identity = cached.theIntroIdentity ?: return@withContext null
+            if (cached.releaseRefetched) return@withContext null
             val release = cached.releases.firstOrNull { sameRelease(it.duration, i.duration) }
                 ?: ReleaseStamps(i.duration, provider(trace, "TheIntroDB") {
                     theIntroDB(identity.copy(duration = i.duration), trace)
                 }).also { added ->
                     resultCache[i.key] = cached.copy(
-                        releases = (cached.releases + added).takeLast(4))
+                        releases = (cached.releases + added).takeLast(4),
+                        releaseRefetched = true)
                 }
             project(release.data, i)
         }
@@ -1689,22 +1748,35 @@ internal object ElevateSkipRepository {
         if (i.duration < 0L || i.duration > 24L * 60L * 60L * 1000L)
             return@withContext emptyList()
         val now = System.currentTimeMillis()
+        android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=INPUT trace=$trace" +
+            " imdb=${i.imdb} app=S${i.season}:E${i.episode}" +
+            " imdb=S${i.imdbSeason}:E${i.imdbEpisode}" +
+            " original=${i.original} offline=$preferLocal duration=${i.duration}")
         if (preferLocal) {
             CloudStreamApp.context?.let { ElevateOfflineMedia.stamps(it, i) }
-                ?.let { return@withContext it }
+                ?.let {
+                    android.util.Log.i("ElevateSeasonAudit",
+                        "feature=SKIP phase=RESULT trace=$trace status=OFFLINE_CACHE count=${it.size}")
+                    return@withContext it
+                }
         }
         resultCache[i.key]?.takeIf { it.until > now }?.let { cached ->
             val release = cached.releases.firstOrNull { sameRelease(it.duration, i.duration) }
-            val current = if (cached.theIntroIdentity != null && release == null) {
+            val current = if (cached.theIntroIdentity != null && release == null &&
+                !cached.releaseRefetched) {
                 // A different runtime invalidates TheIntroDB only, not the other providers.
                 val stamps = provider(trace, "TheIntroDB") {
                     theIntroDB(cached.theIntroIdentity.copy(duration = i.duration), trace)
                 }
                 cached.copy(releases = (cached.releases +
-                    ReleaseStamps(i.duration, stamps)).takeLast(4))
+                    ReleaseStamps(i.duration, stamps)).takeLast(4),
+                    releaseRefetched = true)
                     .also { resultCache[i.key] = it }
             } else cached
             val result = selected(current, i)
+            android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=RESULT trace=$trace" +
+                " status=CACHE count=${result.size}" +
+                " sources=${result.groupingBy { it.source }.eachCount()}")
             if (preferLocal && result.isNotEmpty() && i.duration > 0L)
                 CloudStreamApp.context?.let { ElevateOfflineMedia.putStamps(it, i, result) }
             return@withContext result
@@ -1753,6 +1825,9 @@ internal object ElevateSkipRepository {
             }
         } ?: CachedStamps(emptyList(), emptyList(), emptyList(), null, emptyList(), 0L)
         val result = selected(fetched, i)
+        android.util.Log.i("ElevateSeasonAudit", "feature=SKIP phase=RESULT trace=$trace" +
+            " status=${if (result.isNotEmpty()) "MATCH" else "EMPTY"} count=${result.size}" +
+            " sources=${result.groupingBy { it.source }.eachCount()}")
         if (resultCache.size >= 400) resultCache.clear()
         resultCache[i.key] = fetched.copy(until = now + if (result.isEmpty()) MISS else DAY)
         if (result.isNotEmpty() && i.duration > 0L)

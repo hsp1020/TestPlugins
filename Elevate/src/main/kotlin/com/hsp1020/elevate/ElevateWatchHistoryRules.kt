@@ -54,6 +54,13 @@ internal object ElevateWatchHistoryRules {
     fun consistentSeason(season: Int, claims: Collection<Int?>): Boolean =
         season > 0 && (season == 1 || claims.any { it == season })
 
+    /** For multi-season pages, season-one claims must not silently accept a later cour. */
+    fun verifiedSeason(season: Int, claims: Collection<Int?>, multi: Boolean): Boolean {
+        val known = claims.filterNotNull().filter { it > 0 }
+        return if (multi && season == 1) 1 in known
+            else consistentSeason(season, claims)
+    }
+
     /** A standalone MAL/Kitsu/AniList page is already a specific anime season. */
     fun originalSeasonId(original: String?, singleSeason: Boolean): Map<String, String> {
         if (!singleSeason) return emptyMap()

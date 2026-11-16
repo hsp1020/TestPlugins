@@ -62,6 +62,10 @@ internal object ElevateMediaIdentity {
         val raw = field("originalAnimeId") ?: field("id")
         val origin = raw?.takeIf { it.matches(originPattern) }
         fun positive(field: String) = obj.optInt(field).takeIf { it > 0 }
+        // IMDb season zero is a real specials season, not an absent value.
+        fun imdbSeason() = obj.optInt("imdbSeason").takeIf {
+            obj.has("imdbSeason") && !obj.isNull("imdbSeason") && it >= 0
+        }
         return Ids(
             imdb(field("imdbId", "imdb_id", "imdb")) ?: imdb(origin),
             number(field("tmdbId", "tmdb_id", "_tmdbId", "moviedb_id", "tmdb"), "tmdb")
@@ -73,7 +77,7 @@ internal object ElevateMediaIdentity {
             number(field("kitsuId", "kitsu_id", "kitsu"), "kitsu")
                 ?: number(origin?.takeIf { it.startsWith("kitsu:") }, "kitsu"),
             number(field("simklId", "simkl"), "simkl"), origin,
-            positive("imdbSeason"), positive("imdbEpisode")
+            imdbSeason(), positive("imdbEpisode")
         )
     }
     private fun parseSync(values: Map<String, String>?): Ids {

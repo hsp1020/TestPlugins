@@ -1266,6 +1266,12 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
             val initialAnime = animePage
             val speculative = speculativeAnimeIds
             val multi = maxOf(seasonNumbers.size, responseSeasons.size) > 1
+            val probeEpisode = (runCatching { responseField?.get(resultModel) as? TvSeriesLoadResponse }
+                .getOrNull())?.episodes?.firstOrNull {
+                    it.season == sn && it.episode > 0
+                }?.episode
+            Log.i("ElevateSeasonAudit", "feature=HISTORY phase=INPUT season=$sn multi=$multi probe=$probeEpisode" +
+                " imdb=${mediaIds.imdb} localIds=${seasonEpisodeIds[sn]?.keys}")
             // Explicit episode IDs or an independent single-season URL can
             // identify Kitsu/MAL/AniList even when IMDb is entirely absent.
             val originalLocalIds = ElevateWatchHistoryRules.seasonIdsFor(
@@ -1303,7 +1309,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                             mal != null || anilist != null || kitsu != null
                         val direct = imdb?.let {
                             ElevateAnimeIdResolver.resolveTrackingImdbSeason(it, sn)
-                                ?.takeIf { mapped -> mapped.hasAnime() && mapped.matchesSeason(sn) }
+                                ?.takeIf { mapped ->
+                                    mapped.hasAnime() && ElevateWatchHistoryRules.verifiedSeason(
+                                        sn, listOf(mapped.imdbSeason, mapped.tvdbSeason,
+                                            mapped.traktSeason, mapped.tmdbSeason), multi)
+                                }
                         }
                         if (direct != null) direct else if (imdb == null && tmdb == null) null else {
                             val candidates = listOf("mal", "anilist", "kitsu")
@@ -1316,7 +1326,10 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                 if (mapped.hasAnime() && ElevateWatchHistoryRules.matchingAnimeIdentity(
                                     imdb, tmdb, mapped.imdb, mapped.tmdb, sn,
                                     listOf(mapped.imdbSeason, mapped.tvdbSeason,
-                                        mapped.traktSeason, mapped.tmdbSeason))) {
+                                        mapped.traktSeason, mapped.tmdbSeason)) &&
+                                    ElevateWatchHistoryRules.verifiedSeason(sn, listOf(
+                                        mapped.imdbSeason, mapped.tvdbSeason,
+                                        mapped.traktSeason, mapped.tmdbSeason), multi)) {
                                     verified = mapped
                                     break
                                 }
@@ -1440,9 +1453,19 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                         val mapping = try { withContext(Dispatchers.IO) {
                             val byImdb = seasonMapping ?: imdb?.let {
                                 ElevateAnimeIdResolver.resolveTrackingImdbSeason(it, sn)
-                                    ?.takeIf { mapping -> mapping.matchesSeason(sn) }
+                                    ?.takeIf { item -> ElevateWatchHistoryRules.verifiedSeason(
+                                        sn, listOf(item.imdbSeason, item.tvdbSeason,
+                                            item.traktSeason, item.tmdbSeason), multi) }
                             }
-                            if (byImdb != null) byImdb else {
+                            val verifiedEpisode = if (byImdb == null && imdb != null && probeEpisode != null)
+                                ElevateAnimeIdResolver.verifiedEpisode(imdb, sn, probeEpisode,
+                                    feature = "HISTORY") else null
+                            if (byImdb != null) byImdb else if (verifiedEpisode != null) {
+                                Log.i("ElevateSeasonAudit",
+                                    "feature=HISTORY phase=ROUTE season=$sn via=${verifiedEpisode.via}" +
+                                    " kitsu=${verifiedEpisode.mapping.kitsu} local=${verifiedEpisode.localEpisode}")
+                                verifiedEpisode.mapping
+                            } else {
                                 // A single source ID can be mapped only when the AIO
                                 // response explicitly identifies the selected season.
                                 val candidates = listOf("mal", "anilist", "kitsu")
@@ -1452,7 +1475,19 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                                         ?: effectiveIds.asMap()[prefix]
                                         ?: continue
                                     val mapped = ElevateAnimeIdResolver.resolveTrackingSource(prefix, value)
-                                    if (mapped != null) {
+                                        ?: continue
+                                    val localProof = localIds[prefix] == value
+                                    val claims = listOf(mapped.imdbSeason, mapped.tvdbSeason,
+                                        mapped.traktSeason, mapped.tmdbSeason)
+                                    val anchored = (imdb != null && imdb == mapped.imdb) ||
+                                        (effectiveIds.tmdb != null && effectiveIds.tmdb == mapped.tmdb)
+                                    val accepted = localProof || (anchored &&
+                                        ElevateWatchHistoryRules.verifiedSeason(sn, claims, multi))
+                                    Log.i("ElevateSeasonAudit",
+                                        "feature=HISTORY phase=CANDIDATE season=$sn source=$prefix" +
+                                        " id=$value localProof=$localProof anchored=$anchored claims=$claims" +
+                                        " status=${if (accepted) "MATCH" else "REJECT"}")
+                                    if (accepted) {
                                         verified = mapped
                                         break
                                     }
@@ -1462,6 +1497,11 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                         } } catch (e: CancellationException) { throw e }
                           catch (_: Exception) { null }
                         val verified = mapping
+                        Log.i("ElevateSeasonAudit", "feature=HISTORY phase=RESULT season=$sn" +
+                            " status=${if (verified == null && localIds.isEmpty()) "UNVERIFIED" else "MATCH_OR_LOCAL"}" +
+                            " kitsu=${verified?.kitsu ?: localIds["kitsu"]}" +
+                            " mal=${verified?.mal ?: localIds["mal"]}" +
+                            " anilist=${verified?.anilist ?: localIds["anilist"]}")
                         mappedSeason = SeasonTrackerIds(
                             verified?.mal?.toIntOrNull() ?: localIds["mal"]?.toIntOrNull(),
                             verified?.anilist?.toIntOrNull() ?: localIds["anilist"]?.toIntOrNull(),
@@ -1492,6 +1532,9 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                     }
                 }
                 if (!valid(gen, sn)) return@launch
+                Log.i("ElevateSeasonAudit", "feature=HISTORY phase=TARGET season=$sn" +
+                    " providers=${ids.keys.sorted().joinToString(",")}" +
+                    " source=${if (originalLocalIds.isNotEmpty()) "EPISODE" else "MAPPED_OR_PAGE"}")
                 val matched = AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
                     .filter { it.authUser() != null }
                 if (episodeBased && seasonNumbers.isEmpty() &&
@@ -2112,6 +2155,9 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                 } catch(e:Exception) {
                     false
                 }
+                Log.i("ElevateSeasonAudit", "feature=HISTORY phase=WRITE_RESULT season=$sn" +
+                    " provider=$prefix id=$id status=${if (result) "VERIFIED" else if (writeAcceptedButUnconfirmed) "PENDING" else "FAILED"}" +
+                    " watched=${draft.watched} state=${draft.status}")
                 if(result || writeAcceptedButUnconfirmed) {
                     try {
                         withContext(Dispatchers.IO) { refreshAfterVerifiedWrite(tracker,prefix) }
