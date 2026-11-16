@@ -3869,6 +3869,117 @@ open class StremioC(
     }
 
 
+    /** Resolve ambiguous IMDb seasons only after the regular TVDB fallback fails. */
+    private suspend fun fetchKitsuFranchiseMeta(kitsuId: String): JsonNode? =
+        runSuspendCatching {
+            parseJson<JsonNode>(fetchSharedAnimeText(
+                "https://anime-kitsu.strem.fun/meta/series/kitsu:$kitsuId.json"
+            )).get("meta")
+        }.getOrNull()?.takeIf {
+            it.get("kitsu_id").textOrNull() == kitsuId ||
+                it.get("id").textOrNull() == "kitsu:$kitsuId"
+        }
+
+    private suspend fun resolveKitsuFranchiseFallback(
+        seedKitsuId: String?, tvdbId: Int?, seedTvdbSeason: Int?,
+        season: Int, episode: Int, traceId: String
+    ): AnimeEpisodeRoute? {
+        val seed = seedKitsuId?.toIntOrNull()?.takeIf { it > 0 }?.toString() ?: return null
+        val expectedTvdb = tvdbId?.takeIf { it > 0 } ?: return null
+        val preferred = when {
+            seedTvdbSeason != null && season > seedTvdbSeason -> "Sequel"
+            seedTvdbSeason != null && season < seedTvdbSeason -> "Prequel"
+            else -> null
+        }
+        val visited = mutableSetOf(seed)
+        var frontier = listOf(seed)
+        traceSource(traceId, "KITSU_FRANCHISE_START",
+            "seed=$seed tvdb=$expectedTvdb target=S$season:E$episode preferred=$preferred")
+
+        // Traverse both relation directions; use priority only for lookup order.
+        // At each depth, never select a candidate before evaluating its siblings.
+        for (depth in 0..3) {
+            val links = mutableListOf<Pair<String, String>>()
+            val matches = mutableListOf<AnimeEpisodeRoute>()
+            for (id in frontier) {
+                val meta = fetchKitsuFranchiseMeta(id) ?: continue
+                if (depth > 0) {
+                    val lookup = "kitsu:$id"
+                    val mapping = fetchAnimeSeasonMapping(
+                        LoadData(id = lookup, originalAnimeId = lookup, kitsuId = id, isAnime = true),
+                        traceId
+                    )
+                    val local = mapping?.takeIf {
+                        it.kitsuId == id && it.tvdbId == expectedTvdb &&
+                            it.tvdbSeason == season && it.tvdbAbsoluteOrder == false
+                    }?.let { info ->
+                        val first = info.tvdbFromEpisode ?: 1
+                        (episode - first + 1).takeIf { episode >= first && it > 0 }
+                    }
+                    val video = local?.let { number ->
+                        meta.get("videos")?.takeIf { it.isArray }?.filter { item ->
+                            (item.get("episode").intOrNull() ?: item.get("number").intOrNull()) == number &&
+                                (item.get("season").intOrNull() ?: 1) > 0 &&
+                                item.get("id").textOrNull() == "kitsu:$id:$number"
+                        }?.singleOrNull()
+                    }
+                    traceSource(traceId, "KITSU_FRANCHISE_CHECK",
+                        "depth=$depth kitsu=$id tvdb=${mapping?.tvdbId}:" +
+                        "S${mapping?.tvdbSeason} localE=$local episodeMatch=${video != null}")
+                    if (video != null) matches.add(AnimeEpisodeRoute(
+                        mapping, id, local, video.get("absoluteEpisode").intOrNull()?.takeIf { it > 0 },
+                        "KITSU_FRANCHISE"
+                    ))
+                }
+                if (depth == 3) continue
+                meta.get("links")?.takeIf { it.isArray }?.forEach { link ->
+                    if (link.get("category").textOrNull()?.equals("Franchise", true) != true)
+                        return@forEach
+                    val relation = when {
+                        link.get("name").textOrNull()?.startsWith("Sequel:", true) == true -> "Sequel"
+                        link.get("name").textOrNull()?.startsWith("Prequel:", true) == true -> "Prequel"
+                        else -> return@forEach
+                    }
+                    val nextId = link.get("url").textOrNull()
+                        ?.takeIf { it.startsWith("stremio:///detail/series/kitsu:") }
+                        ?.removePrefix("stremio:///detail/series/kitsu:")
+                        ?.toIntOrNull()?.takeIf { it > 0 }?.toString() ?: return@forEach
+                    links.add(nextId to relation)
+                }
+            }
+            if (matches.size > 1) {
+                traceSource(traceId, "KITSU_FRANCHISE_RESULT",
+                    "status=AMBIGUOUS depth=$depth candidates=${matches.size}")
+                return null
+            }
+            if (matches.size == 1) {
+                val found = matches.single()
+                traceSource(traceId, "KITSU_FRANCHISE_RESULT",
+                    "status=MATCH depth=$depth kitsu=${found.kitsuId} localE=${found.episode}")
+                return found
+            }
+            if (depth == 3) break
+            val next = mutableListOf<String>()
+            val ordered = if (preferred == null) links else
+                links.sortedBy { if (it.second == preferred) 0 else 1 }
+            for ((id, _) in ordered) {
+                if (id in visited) continue
+                if (visited.size > 12) {
+                    traceSource(traceId, "KITSU_FRANCHISE_RESULT",
+                        "status=LIMIT depth=$depth visited=${visited.size}")
+                    return null
+                }
+                visited.add(id)
+                next.add(id)
+            }
+            if (next.isEmpty()) break
+            frontier = next
+        }
+        traceSource(traceId, "KITSU_FRANCHISE_RESULT",
+            "status=MISS visited=${visited.size}")
+        return null
+    }
+
     private suspend fun resolveAnimeEpisodeRoute(loadData: LoadData, traceId: String): AnimeEpisodeRoute? {
         if (!(loadData.isAnime || loadData.originalAnimeId != null || loadData.anilistId != null ||
                 loadData.malId != null || loadData.kitsuId != null || isLibraryAnimeId(loadData.id) ||
@@ -3981,10 +4092,11 @@ open class StremioC(
         // Resolve that ambiguity by asking AIO for the same TVDB S/E, never by
         // translating IMDb S17 to an assumed AIO season number.
         if (local == null && imdb != null && season != null && episode != null) {
-            val tvdbId = mapped?.tvdbId ?: fetchAnimeSeasonMapping(
+            val fallbackMapping = if (mapped?.tvdbId != null) mapped else fetchAnimeSeasonMapping(
                 loadData.copy(season = null, episode = null, imdbSeason = null, imdbEpisode = null),
                 traceId
-            )?.tvdbId
+            )
+            val tvdbId = mapped?.tvdbId ?: fallbackMapping?.tvdbId
             traceSource(traceId, "AIO_TVDB_FALLBACK",
                 "imdb=$imdb input=S$season:E$episode tvdbId=$tvdbId" +
                 " reason=${if (tvdbId == null) "NO_TVDB_ID" else "NO_VERIFIED_IMDB_EPISODE"}")
@@ -4035,6 +4147,18 @@ open class StremioC(
                         " altSeason=${selected.imdbSeason}")
                     return route
                 }
+            }
+            val franchise = withTimeoutOrNull(15000L) {
+                resolveKitsuFranchiseFallback(
+                    mapped?.kitsuId ?: fallbackMapping?.kitsuId, tvdbId,
+                    mapped?.tvdbSeason ?: fallbackMapping?.tvdbSeason, season, episode, traceId
+                )
+            }
+            if (franchise != null) {
+                traceSource(traceId, "ANIME_ID_RESULT",
+                    "via=KITSU_FRANCHISE originalImdb=$imdb:S$season:E$episode" +
+                    " kitsu=${franchise.kitsuId} localE=${franchise.episode}")
+                return franchise
             }
         }
         val verified = local != null
