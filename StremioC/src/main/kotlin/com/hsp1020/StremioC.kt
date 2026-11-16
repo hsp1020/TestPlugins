@@ -4002,7 +4002,7 @@ open class StremioC(
                     " fromEpisode=${tvdb?.tvdbFromEpisode}" +
                     " kitsu=${tvdb?.kitsuId} mal=${tvdb?.malId} al=${tvdb?.aniListId}" +
                     " localE=$tvdbEpisode" +
-                    " status=${if (tvdbEpisode != null && tvdb.kitsuId != null) "MATCH" else "UNVERIFIED"}")
+                    " status=${if (tvdbEpisode != null && tvdb?.kitsuId != null) "MATCH" else "UNVERIFIED"}")
                 val kitsuId = tvdb?.kitsuId
                 if (tvdbEpisode != null && kitsuId != null) {
                     val lookup = "kitsu:$kitsuId"
