@@ -2907,6 +2907,9 @@ open class StremioC(
             loadData.id?.substringBefore(':')?.let { IMDB_ID_REGEX.matches(it) } == true &&
             loadData.season != null && loadData.episode != null
 
+    private fun originalImdbSeason(loadData: LoadData): Int? =
+        loadData.imdbSeason?.takeIf { it == 0 } ?: loadData.season
+
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val traceId = SystemClock.elapsedRealtimeNanos().toString(36)
         if (!isAddonEnabled()) {
@@ -2953,8 +2956,8 @@ open class StremioC(
         }
 
         val originalImdbEpisode = isOriginalImdbEpisode(loadData)
-        val globalSeason = if (actualIsMovie) null else if (originalImdbEpisode) loadData.season
-            else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
+        val globalSeason = if (actualIsMovie) null else if (originalImdbEpisode) originalImdbSeason(loadData)
+            else loadData.imdbSeason?.takeIf { it >= 0 } ?: loadData.season?.takeIf { it >= 0 } ?: 1
         val globalEpisode = if (actualIsMovie) null else if (originalImdbEpisode) loadData.episode
             else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
         traceSource(traceId, "NORMALIZE",
@@ -3875,7 +3878,7 @@ open class StremioC(
         val sourceId = source?.let { origin.substringAfter(':').substringBefore(':').toIntOrNull() }
             ?.takeIf { it > 0 }
         val originalImdb = isOriginalImdbEpisode(loadData)
-        val season = (if (originalImdb) loadData.season else
+        val season = (if (originalImdb) originalImdbSeason(loadData) else
             loadData.imdbSeason ?: loadData.season)?.takeIf { it >= 0 }
         val episode = (if (originalImdb) loadData.episode else
             loadData.imdbEpisode ?: loadData.episode)?.takeIf { it > 0 }
@@ -4115,13 +4118,13 @@ open class StremioC(
                 ?: loadData.originalTitle?.takeIf { it.isNotBlank() }
                 ?: loadData.id ?: "Unknown",
             season = if (isMovie) null else if (route?.episode != null) 1
-                else if (originalImdbEpisode) loadData.season
-                else if (mapping != null) 1 else loadData.season?.takeIf { it > 0 } ?: globalSeason,
+                else if (originalImdbEpisode) originalImdbSeason(loadData)
+                else if (mapping != null) 1 else loadData.season?.takeIf { it >= 0 } ?: globalSeason,
             episode = if (isMovie) null else route?.episode
                 ?: loadData.episode?.takeIf { it > 0 } ?: globalEpisode,
-            imdbSeason = if (isMovie) null else if (originalImdbEpisode) loadData.season
+            imdbSeason = if (isMovie) null else if (originalImdbEpisode) originalImdbSeason(loadData)
                 else mappedImdbSeason
-                    ?: if (loadData.originalAnimeId != null) null else loadData.imdbSeason?.takeIf { it > 0 } ?: globalSeason,
+                    ?: if (loadData.originalAnimeId != null) null else loadData.imdbSeason?.takeIf { it >= 0 } ?: globalSeason,
             imdbEpisode = if (isMovie) null else if (originalImdbEpisode) loadData.episode
                 else if (mappedImdbSeason != null) loadData.episode
                 else if (loadData.originalAnimeId != null) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: globalEpisode,
@@ -4446,6 +4449,7 @@ open class StremioC(
             }
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await(), animeRouteDeferred.await())
+            val originalSpecial = media.originalImdbEpisode && media.imdbSeason == 0
             traceSource(traceId, "CINE_MEDIA",
                 "input=S${loadData.season}:E${loadData.episode}" +
                 " imdbInput=S${loadData.imdbSeason}:E${loadData.imdbEpisode}" +
@@ -4498,15 +4502,16 @@ open class StremioC(
 
                 withTimeoutOrNull(60000L) {
                     supervisorScope {
-                        val anime = if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1))
+                        val anime = if (media.hasSeasonMapping || (!originalSpecial && loadData.originalAnimeId == null && (media.season ?: 1) <= 1))
                             async(Dispatchers.IO) { callCine(animeRoute = true) } else null
                         val standard = if (media.hasSeasonMapping && media.tmdbId != null &&
                             media.tmdbSeason != null && media.tmdbEpisode != null ||
-                            !media.hasSeasonMapping && loadData.originalAnimeId == null && (media.season ?: 1) <= 1)
+                            !media.hasSeasonMapping && !originalSpecial && loadData.originalAnimeId == null && (media.season ?: 1) <= 1)
                             async(Dispatchers.IO) { callCine(animeRoute = false) } else null
                         val mappedImdb = if (
                             media.imdbId != null && media.imdbSeason != null && media.imdbEpisode != null &&
-                            (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) > 1) ||
+                            (media.hasSeasonMapping || originalSpecial ||
+                                (loadData.originalAnimeId == null && (media.season ?: 1) > 1) ||
                                 (media.tmdbId != null && (media.imdbSeason != media.season || media.imdbEpisode != media.episode)))
                         ) async(Dispatchers.IO) {
                             callCine(animeRoute = false, standardImdbRoute = true)
@@ -4559,6 +4564,7 @@ open class StremioC(
         try {
             val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode,
                 mappingDeferred?.await(), animeRouteDeferred.await())
+            val originalSpecial = media.originalImdbEpisode && media.imdbSeason == 0
             val streamPlayProvider = getStreamPlayProvider()
             traceSource(traceId, "STREAMPLAY_PROVIDER",
                 "general=${streamPlayProvider != null} isAnime=${media.isAnime}" +
@@ -4605,7 +4611,7 @@ open class StremioC(
             supervisorScope {
 
                 val dedicatedAnime = getStreamPlayAnimeProvider()?.takeIf {
-                    media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)
+                    media.hasSeasonMapping || (!originalSpecial && loadData.originalAnimeId == null && (media.season ?: 1) <= 1)
                 }?.let { animeProvider ->
                     async(Dispatchers.IO) {
                         try {
@@ -4652,7 +4658,7 @@ open class StremioC(
                     val anime = async(Dispatchers.IO) {
                         try {
                             if (media.animeEpisode != null ||
-                                (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
+                                (!originalSpecial && loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
                                 traceSource(traceId, "STREAMPLAY_AUTO_ID",
                                     "expectedAniList=${media.aniListId} expectedMal=${media.malId}" +
                                     " animeE=${media.animeEpisode ?: media.episode}" +
@@ -4665,7 +4671,7 @@ open class StremioC(
                         }
                     }
                     val general = if (media.hasSeasonMapping && media.tmdbSeason != null && media.tmdbEpisode != null && media.tmdbId != null ||
-                        !media.hasSeasonMapping && loadData.originalAnimeId == null && (media.season ?: 1) <= 1 &&
+                        !media.hasSeasonMapping && !originalSpecial && loadData.originalAnimeId == null && (media.season ?: 1) <= 1 &&
                         (media.imdbId != null || media.tmdbId != null)) {
                         async(Dispatchers.IO) {
                             try {
@@ -4681,7 +4687,8 @@ open class StremioC(
                     } else null
                     val imdbGeneral = if (media.imdbId != null &&
                         media.imdbSeason != null && media.imdbEpisode != null &&
-                        (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) > 1))) {
+                        (media.hasSeasonMapping || originalSpecial ||
+                            (loadData.originalAnimeId == null && (media.season ?: 1) > 1))) {
                         async(Dispatchers.IO) {
                             runSuspendCatching {
                                 withTimeoutOrNull(60000L) {

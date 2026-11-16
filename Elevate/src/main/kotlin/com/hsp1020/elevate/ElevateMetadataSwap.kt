@@ -231,7 +231,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 .takeIf { (ep.has("episode") && !ep.isNull("episode")) ||
                     (ep.has("number") && !ep.isNull("number")) }
             AioVideo(season, number, ep.episodeMeta(false), ep.string("id"),
-                ep.string("imdb_id"), ep.optInt("imdbSeason").takeIf { it > 0 },
+                ep.string("imdb_id"), ep.optInt("imdbSeason").takeIf {
+                    ep.has("imdbSeason") && !ep.isNull("imdbSeason") && it >= 0
+                },
                 ep.optInt("imdbEpisode").takeIf { it > 0 },
                 ep.optJSONArray("streams")?.takeIf { it.length() > 0 },
                 ep.optInt("absoluteEpisode").takeIf { it > 0 })
@@ -1008,7 +1010,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val number = video.number ?: index + 1
                 val payload = JSONObject().put("type", type)
                     .put("id", video.id ?: originalId)
-                    .put("season", season).put("episode", number)
+                    .put("season", video.season ?: season).put("episode", number)
                     .put("addonUrl", addonUrl)
                     .put("isAnime", response.type == TvType.Anime)
                     .put("watchProgressAllowed",
@@ -1023,7 +1025,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 if (originalId.startsWith("mal:") || originalId.startsWith("kitsu:") ||
                     originalId.startsWith("anilist:"))
                     payload.put("originalAnimeId", originalId)
-                video.imdbSeason?.let { payload.put("imdbSeason", it) }
+                (video.imdbSeason ?: video.season?.takeIf {
+                    it == 0 && (video.id ?: originalId).substringBefore(':')
+                        .matches(Regex("tt[0-9]+"))
+                })?.let { payload.put("imdbSeason", it) }
                 video.imdbEpisode?.let { payload.put("imdbEpisode", it) }
                 video.imdbId?.let { payload.put("imdbId", it) }
                 video.streams?.let { payload.put("embeddedStreams", it.toString()) }
