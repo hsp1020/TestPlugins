@@ -3876,7 +3876,7 @@ open class StremioC(
             ?.takeIf { it > 0 }
         val originalImdb = isOriginalImdbEpisode(loadData)
         val season = (if (originalImdb) loadData.season else
-            loadData.imdbSeason ?: loadData.season)?.takeIf { it > 0 }
+            loadData.imdbSeason ?: loadData.season)?.takeIf { it >= 0 }
         val episode = (if (originalImdb) loadData.episode else
             loadData.imdbEpisode ?: loadData.episode)?.takeIf { it > 0 }
         val imdb = listOf(loadData.id, loadData.imdbId)
@@ -3940,6 +3940,13 @@ open class StremioC(
             val mapped = fetchAnimeSeasonMapping(LoadData(id = lookup, originalAnimeId = lookup,
                 kitsuId = kitsu, season = 1, episode = local, isAnime = true), traceId)
             val valid = mapped?.kitsuId == kitsu
+            if (season == 0 && !valid) {
+                traceSource(traceId, "ANIME_ID_RESULT",
+                    "via=SPECIAL_UNVERIFIED reason=KITSU_AIO_MISMATCH" +
+                    " imdb=$imdb S0:E$episode kitsu=$kitsu localE=$local" +
+                    " resolvedKitsu=${mapped?.kitsuId}")
+                return AnimeEpisodeRoute(null, null, null, null, "SPECIAL_UNVERIFIED")
+            }
             val route = AnimeEpisodeRoute(if (valid) mapped else null, kitsu, local,
                 found.third, "KITSU_IMDB")
             traceSource(traceId, "ANIME_ID_RESULT",
@@ -3948,6 +3955,11 @@ open class StremioC(
                 " localE=$local absolute=${route.absolute}" +
                 " tmdb=${route.mapping?.tmdbId}:${route.mapping?.tmdbSeason}:${route.mapping?.tmdbEpisode}")
             return route
+        }
+        if (originalImdb && season == 0) {
+            traceSource(traceId, "ANIME_ID_RESULT",
+                "via=SPECIAL_UNVERIFIED reason=NO_EXACT_KITSU imdb=$imdb S0:E$episode")
+            return AnimeEpisodeRoute(null, null, null, null, "SPECIAL_UNVERIFIED")
         }
         val mapped = fetchAnimeSeasonMapping(loadData, traceId)
         val converted = if (season != null && episode != null) mapped?.tvdbRanges
