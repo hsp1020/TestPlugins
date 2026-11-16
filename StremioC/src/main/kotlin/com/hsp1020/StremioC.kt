@@ -2008,6 +2008,12 @@ open class StremioC(
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
                     "$baseId:$episode"
                 }
+                // The playback ID can already contain the provider's original IMDb S/E.
+                id?.split(':')?.let { parts ->
+                    parts.size == 3 && IMDB_ID_REGEX.matches(parts[0]) &&
+                        parts[1].toIntOrNull()?.let { it >= 0 } == true &&
+                        parts[2].toIntOrNull()?.let { it > 0 } == true
+                } == true -> id
                 id?.endsWith(":$season:$episode") == true -> id
                 else -> "$id:$season:$episode"
             }
@@ -3395,7 +3401,9 @@ open class StremioC(
                             val streamRequestUrl = "$cleanBaseUrl/stream/${route.first}/${route.second.urlEncode()}.json$querySuffix"
                             val response = customSession.get(streamRequestUrl, timeout = 30L)
                             val text = response.text
-                            val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                            val res = parseTracedStreams(text, traceId, name,
+                                route.first, route.second, response.code,
+                                response.headers.firstOrNull { it.first.equals("Content-Type", true) }?.second)
                             val emitted = emitOrderedAddonStreams(res?.streams, name,
                                 stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl),
                                 "main", addonUrl = currentMainUrl)
@@ -3466,7 +3474,9 @@ open class StremioC(
                                             val requestUrl = "$base/stream/${route.first}/${route.second.urlEncode()}.json$suffix"
                                             val response = customSession.get(requestUrl, timeout = 30L)
                                             val text = response.text
-                                            val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                                            val streams = parseTracedStreams(text, traceId, source,
+                                                route.first, route.second, response.code,
+                                                response.headers.firstOrNull { it.first.equals("Content-Type", true) }?.second)
                                             val emitted = emitOrderedAddonStreams(streams?.streams, source,
                                                 stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
                                                 "extra", addon.name, addonUrl, streamsAddonEnabled, subtitlesAddonEnabled)
@@ -6555,6 +6565,38 @@ open class StremioC(
                         " finalThumb=${!this.posterUrl.isNullOrBlank()} finalPlot=${!this.description.isNullOrBlank()}" +
                         " finalRating=$episodeRating finalAirDate=$finalAirDate")
             }
+        }
+    }
+
+    /** Diagnose unsuccessful stream parsing without recording URLs or response values. */
+    private fun parseTracedStreams(
+        body: String, traceId: String, source: String, type: String, id: String,
+        status: Int, contentType: String?
+    ): StreamsResponse? {
+        if (body.isBlank()) return null
+        return try {
+            parseJson<StreamsResponse>(body)
+        } catch (error: Exception) {
+            val root = runCatching { parseJson<JsonNode>(body) }.getOrNull()
+            val streams = root?.get("streams")
+            val first = streams?.takeIf { it.isArray && it.size() > 0 }?.get(0)
+            fun keys(node: JsonNode?): String = node?.takeIf { it.isObject }?.fieldNames()
+                ?.asSequence()?.take(12)?.joinToString(",") { it.take(32) } ?: "-"
+            val mapping = error as? com.fasterxml.jackson.databind.JsonMappingException
+            val path = mapping?.path?.joinToString(".") {
+                it.fieldName ?: "[${it.index}]"
+            }?.take(160) ?: "-"
+            val location = (error as? com.fasterxml.jackson.core.JsonProcessingException)?.location
+            traceSource(traceId, "STREMIO_STREAM_PARSE_DIAG",
+                "source=$source type=$type id=$id status=$status" +
+                " mime=${contentType?.substringBefore(';')?.take(60)} chars=${body.length}" +
+                " leadingCode=${body.firstOrNull { !it.isWhitespace() }?.code}" +
+                " root=${root?.nodeType ?: "INVALID_JSON"} rootKeys=${keys(root)}" +
+                " streams=${streams?.nodeType ?: "MISSING"} count=${if (streams?.isArray == true) streams.size() else -1}" +
+                " first=${first?.nodeType ?: "NONE"} firstKeys=${keys(first)}" +
+                " error=${error.javaClass.simpleName} cause=${error.cause?.javaClass?.simpleName}" +
+                " path=$path line=${location?.lineNr} col=${location?.columnNr}")
+            throw error
         }
     }
 
