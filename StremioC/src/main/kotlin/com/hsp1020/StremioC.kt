@@ -5396,6 +5396,15 @@ open class StremioC(
                                 }.map { it.season }
                             }).distinct().filter { it > 0 && (count <= 0 || it <= count) }
                     }
+                    val tmdbSeasonCount = detailRes.number_of_seasons ?: 0
+                    if (stremioType != "movie" && stremioType != "series" &&
+                        tmdbSeasonCount > 0 && requiredSeasons.any { it > tmdbSeasonCount } &&
+                        targetVideos.orEmpty().any {
+                            !it.firstAired.isNullOrBlank() || !it.released.isNullOrBlank()
+                        }) {
+                        requiredSeasons = (requiredSeasons.filter { it in 1..tmdbSeasonCount } +
+                            (1..tmdbSeasonCount)).distinct()
+                    }
                     if (targetVideos.orEmpty().any { it.seasonNumber == 0 })
                         requiredSeasons = (requiredSeasons + 0).distinct()
                     android.util.Log.i("MetaLoadTiming",
@@ -5953,7 +5962,7 @@ open class StremioC(
 
             val canSyncAnimeTrackers = isMovieForSync ||
                 ((finalType == "series" || finalType == "tv" || eligibleNonstandardId) &&
-                    videoSeasons.singleOrNull() == 1)
+                    videoSeasons.singleOrNull() != null)
             val useImdbSyncMapping = (originalAnimeId == null ||
                 (originalAnimeId.startsWith("anilist:") &&
                     fetchedAniListId == null && fetchedMalId == null && fetchedKitsuId == null)) &&
@@ -6014,7 +6023,8 @@ open class StremioC(
             val animeEpisodeSeasons = if (tmdbType == "tv" && videoSeasons.isNotEmpty() &&
                 (originalAnimeId != null || fetchedKitsuId != null ||
                     detailedEntry.kitsuIdExt != null || this@CatalogEntry.kitsuIdExt != null ||
-                    fetchedMalId != null || fetchedAniListId != null)) {
+                    fetchedMalId != null || fetchedAniListId != null ||
+                    (nonstandardType && useImdbSyncMapping))) {
                 var sharedRanges: AnimeSeasonMapping? = null
                 videoSeasons.mapNotNull { season ->
                     val directId = originalAnimeId?.takeIf { videoSeasons.size == 1 }
