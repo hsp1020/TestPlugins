@@ -259,7 +259,7 @@ class YoutubeProvider(
             object : LinkedHashMap<String, List<SearchResponse>>(12, 0.75f, true) {
                 override fun removeEldestEntry(
                     eldest: MutableMap.MutableEntry<String, List<SearchResponse>>?
-                ): Boolean = size > 64
+                ): Boolean = size > 12
             }
         )
 

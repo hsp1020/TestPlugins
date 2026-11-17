@@ -135,8 +135,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             cards.add(item)
                         }
                     }
-                    (APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider)
-                        ?.rememberVisibleHomeShorts(card.url, cards)
+                    YoutubeProvider.rememberVisibleHomeShorts(card.url, cards)
                 }
                 playHomeVideo(card)
             } else {
