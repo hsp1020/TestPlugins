@@ -36,7 +36,6 @@ internal object ElevateMetadataDiskCache {
     }
 
     suspend fun read(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
-        if (ElevateMetadataCacheDiagnostics.enabled()) return@withContext null
         val target = directory()?.takeIf { it.isDirectory }?.let { file(it, kind, key) }
             ?: return@withContext null
         if (!target.isFile || target.length() > MAX_FILE_BYTES) return@withContext null
@@ -64,7 +63,6 @@ internal object ElevateMetadataDiskCache {
     }
 
     suspend fun write(kind: String, key: String, body: String, ttlMs: Long) {
-        if (ElevateMetadataCacheDiagnostics.enabled()) return
         if (ttlMs <= 0L || body.contains("data:image/", true) ||
             body.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES) return
         withContext(Dispatchers.IO) {
@@ -126,14 +124,3 @@ internal object ElevateMetadataDiskCache {
     }
 }
 
-/** Shared app preference also read by StremioC, without a plugin dependency. */
-internal object ElevateMetadataCacheDiagnostics {
-    fun enabled(): Boolean =
-        com.lagradost.cloudstream3.CloudStreamApp.context
-            ?.getSharedPreferences(ElevateFeaturePrefs.FILE, android.content.Context.MODE_PRIVATE)
-            ?.getBoolean(ElevateFeaturePrefs.METADATA_CACHE_BYPASS, false) == true
-
-    fun requestHeaders(): Map<String, String> = if (enabled())
-        mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
-    else emptyMap()
-}

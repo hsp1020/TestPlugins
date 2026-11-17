@@ -905,7 +905,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val swapStarted = SystemClock.elapsedRealtime()
             val traceKey = page.url.hashCode()
             Log.i("ElevateMetaTiming",
-                "phase=SWAP_START key=$traceKey provider=$provider bypass=${ElevateMetadataCacheDiagnostics.enabled()}")
+                "phase=SWAP_START key=$traceKey provider=$provider")
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -1802,7 +1802,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             request: suspend () -> Fetched?
         ): JSONObject? {
             val now = System.currentTimeMillis()
-            val ram = if (ElevateMetadataCacheDiagnostics.enabled()) null else synchronized(cache) {
+            val ram = synchronized(cache) {
                 cache[key]?.takeIf { now >= it.at && now - it.at < it.ttlMs }?.bytes
             }
             if (ram != null) runCatching { JSONObject(String(ram, Charsets.UTF_8)) }
@@ -1821,8 +1821,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         }
                     }
                     val fetched = request()
-                    if (fetched != null && fetched.ttlMs > 0L &&
-                        !ElevateMetadataCacheDiagnostics.enabled()) {
+                    if (fetched != null && fetched.ttlMs > 0L) {
                         val body = fetched.json.toString()
                         val raw = body.toByteArray(Charsets.UTF_8)
                         if (raw.size <= MAX_RAW_BYTES) {
@@ -1887,7 +1886,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
 
         private suspend fun request(url: String, movie: Boolean?): Fetched? = try {
             val response = app.get(url,
-                headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 12L)
+                 timeout = 12L)
             if (response.code !in 200..299) null else {
                 val text = response.text
                 val raw = JSONObject(text)

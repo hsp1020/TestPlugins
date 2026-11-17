@@ -351,7 +351,7 @@ internal object ElevateAnimeIdResolver {
         val now = System.currentTimeMillis()
         synchronized(kitsuCache) {
             kitsuCache[id]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
+                 now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
             }?.let {
 
                 return it.second
@@ -364,7 +364,7 @@ internal object ElevateAnimeIdResolver {
                     withTimeoutOrNull(10_000L) {
                         limiter.withPermit {
                             val text = app.get("https://anime-kitsu.strem.fun/meta/series/kitsu:" +
-                                id + ".json", headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                id + ".json", 
                                 timeout = 8L).text
                             val videos = JSONObject(text).optJSONObject("meta")?.optJSONArray("videos")
                             buildMap<Int, Int> {
@@ -386,7 +386,7 @@ internal object ElevateAnimeIdResolver {
 
                       emptyMap()
                   }
-                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(kitsuCache) {
+                synchronized(kitsuCache) {
                     kitsuCache[id] = System.currentTimeMillis() to result
                 }
                 result
@@ -411,7 +411,7 @@ internal object ElevateAnimeIdResolver {
         val now = System.currentTimeMillis()
         synchronized(imdbKitsuCache) {
             imdbKitsuCache[imdb]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() &&
+                
                     now - it.first < if (it.second.isEmpty()) 300_000L else 86_400_000L
             }?.let { return it.second }
         }
@@ -421,7 +421,7 @@ internal object ElevateAnimeIdResolver {
                     withTimeoutOrNull(10_000L) {
                         limiter.withPermit {
                             val raw = app.get("https://anime-kitsu.strem.fun/meta/series/$imdb.json",
-                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                
                                 timeout = 8L).text
                             val videos = JSONObject(raw).optJSONObject("meta")?.optJSONArray("videos")
                             buildMap<Pair<Int, Int>, Int> {
@@ -439,7 +439,7 @@ internal object ElevateAnimeIdResolver {
                     } ?: emptyMap()
                 } catch (e: CancellationException) { throw e }
                   catch (_: Exception) { emptyMap() }
-                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(imdbKitsuCache) {
+                synchronized(imdbKitsuCache) {
                     imdbKitsuCache[imdb] = System.currentTimeMillis() to result
                 }
                 result
@@ -466,7 +466,7 @@ internal object ElevateAnimeIdResolver {
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first < if (it.second == null) 300_000L else 86_400_000L
+                 now - it.first < if (it.second == null) 300_000L else 86_400_000L
             }?.let {
 
                 return it.second
@@ -474,7 +474,7 @@ internal object ElevateAnimeIdResolver {
         }
         val flight = synchronized(cache) {
             cache[key]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() &&
+                
                     System.currentTimeMillis() - it.first in 0 until
                     if (it.second == null) 300_000L else 86_400_000L
             }?.let {
@@ -493,7 +493,7 @@ internal object ElevateAnimeIdResolver {
                         val requestedAt = android.os.SystemClock.elapsedRealtime()
                         val root = try {
                             JSONObject(app.get(url,
-                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                                
                                 timeout = 5L).text)
                         } catch (e: CancellationException) { throw e }
                           catch (ex: Exception) {
@@ -609,7 +609,7 @@ internal object ElevateAnimeIdResolver {
             }
         } catch (e: CancellationException) { throw e }
           catch (_: Exception) { null }
-                if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(cache) {
+                synchronized(cache) {
                     cache[key] = System.currentTimeMillis() to found
                 }
                 found

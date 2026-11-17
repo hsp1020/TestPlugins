@@ -41,7 +41,6 @@ internal object ElevateTmdbMetadata {
 
     /** A /find response already contains original_language; reuse it. */
     fun rememberOriginalLanguage(id: String, movie: Boolean, value: String?) {
-        if (ElevateMetadataCacheDiagnostics.enabled()) return
         val number = id.toLongOrNull()?.takeIf { it > 0 } ?: return
         val original = language(value) ?: return
         val key = "${if (movie) "movie" else "tv"}:$number"
@@ -79,7 +78,7 @@ internal object ElevateTmdbMetadata {
         val now = System.currentTimeMillis()
         val task = synchronized(originLogoCache) {
             originLogoCache[key]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first in 0 until TTL
+                 now - it.first in 0 until TTL
             }
                 ?.let {
                     return it.second
@@ -100,12 +99,12 @@ internal object ElevateTmdbMetadata {
                     val response = app.get(
                         "https://api.themoviedb.org/3/$kind/$number/images",
                         params = mapOf("api_key" to apiKey, "include_image_language" to language),
-                        headers = ElevateMetadataCacheDiagnostics.requestHeaders(),
+                        
                         timeout = 12L
                     )
                     if (response.code !in 200..299) return@async null
                     JSONObject(response.text).optJSONArray("logos")?.also { logos ->
-                        if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(originLogoCache) {
+                        synchronized(originLogoCache) {
                             originLogoCache[key] = System.currentTimeMillis() to logos
                             if (originLogoCache.size > 128)
                                 originLogoCache.remove(originLogoCache.keys.first())
@@ -136,7 +135,7 @@ internal object ElevateTmdbMetadata {
         val now = System.currentTimeMillis()
         val task = synchronized(seasonCache) {
             seasonCache[key]?.takeIf {
-                !ElevateMetadataCacheDiagnostics.enabled() && now - it.first in 0 until SEASON_TTL
+                 now - it.first in 0 until SEASON_TTL
             }?.let {
                 Log.i("ElevateMetaTiming",
                     "phase=TMDB_SEASON id=$number season=$season cache=RAM elapsedMs=${SystemClock.elapsedRealtime() - callStarted} success=true")
@@ -144,7 +143,7 @@ internal object ElevateTmdbMetadata {
             }
             seasonFlights[key] ?: scope.async(start = CoroutineStart.LAZY) {
                 val requestStarted = SystemClock.elapsedRealtime()
-                var cacheSource = if (ElevateMetadataCacheDiagnostics.enabled()) "BYPASS" else "MISS"
+                var cacheSource = "MISS"
                 var httpMs = -1L
                 var status = "EMPTY"
                 try {
@@ -165,7 +164,7 @@ internal object ElevateTmdbMetadata {
                     val response = try {
                         app.get("https://api.themoviedb.org/3/tv/$number/season/$season",
                             params = mapOf("api_key" to apiKey, "language" to locale),
-                            headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 12L)
+                             timeout = 12L)
                     } finally {
                         httpMs = SystemClock.elapsedRealtime() - httpStarted
                     }
@@ -174,7 +173,7 @@ internal object ElevateTmdbMetadata {
                         return@async null
                     }
                     JSONObject(response.text).also { json ->
-                        if (!ElevateMetadataCacheDiagnostics.enabled()) synchronized(seasonCache) {
+                        synchronized(seasonCache) {
                             seasonCache[key] = System.currentTimeMillis() to json
                             if (seasonCache.size > 128) seasonCache.remove(seasonCache.keys.first())
                         }
@@ -216,7 +215,7 @@ internal object ElevateTmdbMetadata {
         val key = "$kind:$number"
         val normalizedLocale = locale.lowercase(Locale.ROOT)
         val detailDiskKey = key + ":" + normalizedLocale + (if (movie) "" else ":seasons")
-        if (!ElevateMetadataCacheDiagnostics.enabled() && needsDetails && synchronized(cache) {
+        if ( needsDetails && synchronized(cache) {
                 cache[key]?.takeIf { System.currentTimeMillis() - it.at in 0 until TTL }
                     ?.let { it.detailLocale == normalizedLocale && it.details != null } != true
             }) {
@@ -243,7 +242,7 @@ internal object ElevateTmdbMetadata {
             val (job, joining) = synchronized(cache) {
                 val now = System.currentTimeMillis()
                 val previous = cache[key]?.takeIf {
-                    !ElevateMetadataCacheDiagnostics.enabled() && now - it.at in 0 until TTL
+                     now - it.at in 0 until TTL
                 }
                 val hasDetails = previous?.detailLoaded == true || previous?.originalLanguage != null
                 val hasCredits = previous?.creditsLocale == normalizedLocale && previous?.credits != null
@@ -278,7 +277,7 @@ internal object ElevateTmdbMetadata {
                                 params["append_to_response"] = "credits"
                             }
                             val response = app.get(endpoint, params = params,
-                                headers = ElevateMetadataCacheDiagnostics.requestHeaders(), timeout = 12L)
+                                 timeout = 12L)
                             if (response.code !in 200..299) return@async null
                             val json = JSONObject(response.text)
                             val original = if (fetchDetails) language(json.optString("original_language"))
@@ -303,7 +302,7 @@ internal object ElevateTmdbMetadata {
                             }
                             synchronized(cache) {
                                 val current = cache[key]?.takeIf {
-                                    !ElevateMetadataCacheDiagnostics.enabled() &&
+                                    
                                         System.currentTimeMillis() - it.at in 0 until TTL
                                 }
                                 val entry = Entry(System.currentTimeMillis(),
@@ -313,10 +312,8 @@ internal object ElevateTmdbMetadata {
                                     if (fetchCredits) foundCredits else current?.credits,
                                     if (fetchDetails && needsDetails) normalizedLocale else current?.detailLocale,
                                     if (fetchDetails && needsDetails) foundDetail else current?.details)
-                                if (!ElevateMetadataCacheDiagnostics.enabled()) {
-                                    cache[key] = entry
-                                    if (cache.size > 128) cache.remove(cache.keys.first())
-                                }
+                                cache[key] = entry
+                                if (cache.size > 128) cache.remove(cache.keys.first())
                                 entry
                             }
                         } catch (e: CancellationException) {
