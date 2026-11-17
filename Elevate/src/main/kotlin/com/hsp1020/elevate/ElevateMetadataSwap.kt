@@ -84,7 +84,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
         val season: Int?, val number: Int?,
         val meta: EpisodeMeta, val id: String?, val imdbId: String?,
         val imdbSeason: Int?, val imdbEpisode: Int?, val streams: JSONArray?,
-        val absoluteEpisode: Int? = null
+        val absoluteEpisode: Int? = null,
+        val explicitSeason: Boolean = true
     )
 
     private data class Metadata(
@@ -236,7 +237,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 },
                 ep.optInt("imdbEpisode").takeIf { it > 0 },
                 ep.optJSONArray("streams")?.takeIf { it.length() > 0 },
-                ep.optInt("absoluteEpisode").takeIf { it > 0 })
+                ep.optInt("absoluteEpisode").takeIf { it > 0 },
+                ep.has("season") && !ep.isNull("season"))
         }
         // Number missing/zero episodes after the last regular episode in each season.
         val grouped = parsed.groupBy { it.season ?: 0 }
@@ -1069,6 +1071,120 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
         }
 
+
+        /** Match addon artwork/metadata without altering provider-owned episode identities. */
+        private suspend fun verifiedAddonEpisodes(
+            base: List<ResultEpisode>, source: Metadata,
+            mappings: Map<Int, ElevateAnimeIdResolver.Mapping?>,
+            imdb: String?, anime: Boolean, specialSeason: Int?
+        ): Map<Pair<Int, Int>, EpisodeMeta> {
+            val videos = source.videos.withIndex().filter { (_, video) ->
+                (video.season ?: -1) >= 0 && (video.number ?: 0) > 0 &&
+                    (video.season != 0 || video.explicitSeason)
+            }
+            if (videos.isEmpty()) return emptyMap()
+            val byPair = videos.groupBy { it.value.season!! to it.value.number!! }
+            val byImdb = videos.filter {
+                it.value.imdbSeason != null && it.value.imdbEpisode != null
+            }.groupBy { it.value.imdbSeason!! to it.value.imdbEpisode!! }
+            val byAbsolute = videos.filter {
+                it.value.absoluteEpisode != null
+            }.groupBy { it.value.absoluteEpisode!! }
+            val dateParser = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).apply {
+                isLenient = false
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            fun day(raw: String?): Long? = raw?.take(10)?.let {
+                runCatching { dateParser.parse(it)?.time?.div(86_400_000L) }.getOrNull()
+            }
+            val dates = videos.associate { it.index to day(it.value.meta.date) }
+            val byDay = videos.filter { dates[it.index] != null }
+                .groupBy { dates[it.index]!! }
+            val nativeDate = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
+            val kitsuAbsolute = if (anime && imdb != null && byAbsolute.isNotEmpty())
+                ElevateAnimeIdResolver.kitsuImdbAbsolutes(imdb) else emptyMap()
+            val used = mutableSetOf<Int>()
+            val mappedEpisodes = LinkedHashMap<Pair<Int, Int>, EpisodeMeta>()
+            val lastBySeason = mutableMapOf<Pair<String, Int>, Int>()
+            val imdbIdPattern = Regex("tt[0-9]+")
+            var misses = 0
+            for (episode in base) {
+                val season = episode.seasonIndex?.takeIf {
+                    it == episode.season && it in 0..99 && episode.episode > 0
+                } ?: continue
+                val key = season to episode.episode
+                val special = season == specialSeason
+                val day = episode.airDate?.let {
+                    day(nativeDate.format(java.util.Date(it)))
+                }
+                val raw = if (byImdb.isNotEmpty()) runCatching {
+                    JSONObject(episode.data)
+                }.getOrNull() else null
+                val explicitSeason = raw?.let { json ->
+                    json.optInt("imdbSeason").takeIf {
+                        json.has("imdbSeason") && !json.isNull("imdbSeason") && it >= 0
+                    }
+                }
+                val rawId = raw?.optString("id").orEmpty().substringBefore(':')
+                val originalImdbSeason = explicitSeason
+                    ?: season.takeIf { rawId.matches(imdbIdPattern) }
+                val originalImdbEpisode = raw?.optInt("imdbEpisode")?.takeIf { it > 0 }
+                    ?: episode.episode
+                val imdbPair = originalImdbSeason?.let { it to originalImdbEpisode }
+                fun eligible(candidate: IndexedValue<AioVideo>): Boolean {
+                    if (candidate.index in used || (candidate.value.season == 0) != special)
+                        return false
+                    if (imdbPair != null && candidate.value.imdbSeason != null &&
+                        candidate.value.imdbEpisode != null &&
+                        (candidate.value.imdbSeason to candidate.value.imdbEpisode) != imdbPair)
+                        return false
+                    val candidateDay = dates[candidate.index]
+                    return day == null || candidateDay == null ||
+                        kotlin.math.abs(day - candidateDay) < 30L
+                }
+                fun unique(options: List<IndexedValue<AioVideo>>, requireDate: Boolean = false)
+                    : IndexedValue<AioVideo>? = options.filter { candidate ->
+                    eligible(candidate) && (!requireDate || day != null &&
+                        dates[candidate.index]?.let {
+                            kotlin.math.abs(day - it) <= 1L
+                        } == true)
+                }.singleOrNull()
+
+                val mapping = mappings[season]
+                val offsetKey = mapping?.tmdbSeason?.let { mapping.tmdb.orEmpty() to it }
+                val fromEpisode = mapping?.tmdbFromEpisode
+                    ?: offsetKey?.let { lastBySeason[it]?.plus(1) } ?: 1
+                val absolute = kitsuAbsolute[key]
+                val range = absolute?.let { n -> mapping?.tmdbRanges?.singleOrNull {
+                    n >= it.start && (it.end == null || n <= it.end)
+                } }
+                val target = range?.let { it.season to absolute!! }
+                    ?: mapping?.tmdbSeason?.let { it to (fromEpisode + episode.episode - 1) }
+
+                val exact = imdbPair?.let { unique(byImdb[it].orEmpty()) }
+                val mapped = target?.let { unique(byPair[it].orEmpty()) }
+                val kitsu = absolute?.let { unique(byAbsolute[it].orEmpty()) }
+                val direct = unique(byPair[key].orEmpty(), requireDate = anime)
+                val airDate = day?.let { d -> unique((-1L..1L).flatMap {
+                    byDay[d + it].orEmpty()
+                }, requireDate = true) }
+                val selected = exact ?: mapped ?: kitsu ?: direct ?: airDate
+                if (selected != null) {
+                    used += selected.index
+                    mappedEpisodes[key] = selected.value.meta
+                    if (offsetKey != null && target ==
+                        (selected.value.season to selected.value.number))
+                        lastBySeason[offsetKey] = maxOf(
+                            lastBySeason[offsetKey] ?: 0, selected.value.number!!
+                        )
+                } else misses++
+            }
+            if (misses > 0) Log.i("ElevateSeasonAudit",
+                "feature=AIO_SWAP phase=EPISODES matched=" + mappedEpisodes.size +
+                    " missed=" + misses)
+            return mappedEpisodes
+        }
+
         private fun updateEpisodes() {
             val source = metadata ?: return
             val baseRef = originalEpisodes
@@ -1110,13 +1226,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val seasons = if (completeAio) aioBySeason.keys.toList()
                 else base.mapNotNull { episode ->
                     episode.seasonIndex?.takeIf {
-                        it == episode.season && it in 1..99 && episode.episode > 0
+                        it == episode.season && it in 0..99 && episode.episode > 0
                     }
                 }.distinct()
                 val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
                     else null
                 // StremioC already exposes Season S as its sole named season.
-                val specialSeason = if (completeAio) 0 else
+                val specialSeason = if (completeAio || 0 in seasons) 0 else
                     (nativeResponse as? TvSeriesLoadResponse)?.seasonNames
                         ?.singleOrNull()?.season?.takeIf {
                             original?.syncData?.get("metadata_swap_allowed") == "true"
@@ -1128,7 +1244,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         season to number
                     }.groupBy({ it.first }, { it.second })
                 else base.mapNotNull { ep ->
-                    val season = ep.seasonIndex?.takeIf { it > 0 && it == ep.season }
+                    val season = ep.seasonIndex?.takeIf { it in 0..99 && it == ep.season }
                         ?: return@mapNotNull null
                     ep.episode.takeIf { it > 0 }?.let { season to it }
                 }.groupBy({ it.first }, { it.second })
@@ -1152,11 +1268,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     expectedSeason++
                 }
                 val mappingStarted = SystemClock.elapsedRealtime()
-                val initialSeasonMappings = if (imdb != null && seasons.isNotEmpty())
+                val regularSeasons = seasons.filter { it > 0 }
+                val initialSeasonMappings = if (imdb != null && regularSeasons.isNotEmpty())
                     withContext(Dispatchers.IO) {
-                        val firstSeason = seasons.first()
+                        val firstSeason = regularSeasons.first()
                         val first = ElevateAnimeIdResolver.resolveImdbSeason(imdb, firstSeason)
-                        seasons.associateWith { season ->
+                        regularSeasons.associateWith { season ->
                             if (season == firstSeason) first else first?.takeIf { item ->
                                 val absolute = numbersBySeason[season].orEmpty()
                                     .mapNotNull { absoluteByEpisode[season to it] }
@@ -1167,11 +1284,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             } ?: ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
                         }
                     } else emptyMap()
-                val seasonMappings = if (imdb != null && anime && seasons.isNotEmpty()) {
+                val seasonMappings = if (imdb != null && anime && regularSeasons.isNotEmpty()) {
                     // Keep verified AIO ranges. Retry only seasons without a reliable
                     // season/range claim, with bounded concurrent fallback lookups.
                     val fallbackLimiter = Semaphore(4)
-                    seasons.map { season ->
+                    regularSeasons.map { season ->
                         async(Dispatchers.IO) {
                             val initial = initialSeasonMappings[season]
                             val absolutes = numbersBySeason[season].orEmpty()
@@ -1207,6 +1324,9 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 } else initialSeasonMappings
                 Log.i("ElevateMetaTiming",
                     "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.values.count { it != null }} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
+                val verifiedAddon = if (!completeAio && source.source == "AIO")
+                    verifiedAddonEpisodes(base, source, seasonMappings, imdb, anime, specialSeason)
+                else emptyMap()
                 val seasonStarted = SystemClock.elapsedRealtime()
                 val activeSeasonRequests = java.util.concurrent.atomic.AtomicInteger(0)
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
@@ -1220,17 +1340,22 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     }
                     val completeSourceSeasons = if (source.source == "AIO")
                         seasons.filter { appSeason ->
-                            (if (completeAio) source.videos.filter {
+                            if (completeAio) source.videos.filter {
                                 it.season == appSeason
-                            }.map { it.meta }
-                            else base.filter { it.seasonIndex == appSeason &&
-                                it.season == appSeason && it.episode > 0 }
-                                .mapNotNull { source.episodes[appSeason to it.episode] })
-                                .let { list -> list.isNotEmpty() && list.all {
+                            }.map { it.meta }.let { list ->
+                                list.isNotEmpty() && list.all {
                                     it.name != null && it.description != null &&
                                     it.poster != null && it.date != null &&
                                     it.runTime != null && it.rating != null
-                                } }
+                                }
+                            } else numbersBySeason[appSeason].orEmpty().distinct()
+                                .takeIf { it.isNotEmpty() }?.all { number ->
+                                    verifiedAddon[appSeason to number]?.let {
+                                        it.name != null && it.description != null &&
+                                            it.poster != null && it.date != null &&
+                                            it.runTime != null && it.rating != null
+                                    } == true
+                                } == true
                         }.toSet() else emptySet()
                     val requests = seasons.flatMap { sourceSeason ->
                         val isSpecial = sourceSeason == specialSeason
@@ -1496,7 +1621,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         it == episode.season && it in 0..99 && episode.episode > 0
                     }
                     val key = season?.let { it to episode.episode }
-                    val addon = key?.let { source.episodes[it] }
+                    val addon = key?.let { verifiedAddon[it] }
                     val tmdb = key?.let { tmdbEpisodes[it] }
                     val info = (if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
                         else tmdb)
