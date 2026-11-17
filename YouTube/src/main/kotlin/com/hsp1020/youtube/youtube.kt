@@ -253,42 +253,28 @@ class YoutubeProvider(
 
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // Only main-page results actually delivered to Home are authoritative.
-        // Watch recommendations and background chip bootstrap must not alter them.
-        private val publishedHomeShorts = Collections.synchronizedMap(
-            object : LinkedHashMap<String, List<SearchResponse>>(12, 0.75f, true) {
-                override fun removeEldestEntry(
-                    eldest: MutableMap.MutableEntry<String, List<SearchResponse>>?
-                ): Boolean = size > 12
-            }
-        )
-
-        // A Home click uses the exact displayed row even if other catalogs reload.
-        @Volatile private var clickedHomeShorts: Pair<String, List<SearchResponse>>? = null
+        // Retain only the last clicked Home row; all other catalog caches remain unchanged.
+        @Volatile private var clickedHomeShorts: List<SearchResponse> = emptyList()
 
         internal fun rememberVisibleHomeShorts(url: String, cards: List<SearchResponse>) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: return
             if (cards.any { YoutubeUtils.extractYoutubeId(it.url) == videoId }) {
-                clickedHomeShorts = videoId to cards
+                clickedHomeShorts = cards
             }
         }
 
-        /** Number of the tapped home Shorts item in the current home catalog. */
+        /** Number of the clicked Home Shorts item in the current row. */
         internal fun homeShortIndex(url: String): Int? {
             if (!url.contains("/shorts/") || !url.contains("ctx=home")) return null
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: return null
-            val clicked = clickedHomeShorts
-            if (clicked?.first == videoId) {
-                return clicked.second.indexOfFirst {
-                    YoutubeUtils.extractYoutubeId(it.url) == videoId
-                }.takeIf { it >= 0 }
+            val clickedIndex = clickedHomeShorts.indexOfFirst {
+                YoutubeUtils.extractYoutubeId(it.url) == videoId
             }
-            return synchronized(publishedHomeShorts) {
-                publishedHomeShorts.values.lastOrNull { cards ->
-                    cards.any { YoutubeUtils.extractYoutubeId(it.url) == videoId }
-                }?.indexOfFirst {
-                    YoutubeUtils.extractYoutubeId(it.url) == videoId
-                }?.takeIf { it >= 0 }
+            if (clickedIndex >= 0) return clickedIndex
+            return synchronized(homeShorts) {
+                homeShorts.indexOfFirst {
+                    YoutubeUtils.extractYoutubeId(it.data) == videoId
+                }.takeIf { it >= 0 }
             }
         }
 
@@ -2682,68 +2668,32 @@ class YoutubeProvider(
         }
     }
 
-    /** Preserve the Shorts order actually shown on each Home catalog page. */
-    private fun publishHomeShorts(
-        page: Int, requestData: String, results: MutableList<SearchResponse>
-    ) {
-        val key = "$lang|$requestData"
-        if (results.none { it.url.contains("/shorts/") && it.url.contains("ctx=home") }) {
-            // Non-Shorts catalogs must not evict Shorts rows still shown on Home.
-            if (page == 1) synchronized(publishedHomeShorts) { publishedHomeShorts.remove(key) }
-            return
-        }
-        synchronized(publishedHomeShorts) {
-            val items = if (page == 1) ArrayList<SearchResponse>()
-                else ArrayList(publishedHomeShorts[key].orEmpty())
-            val seen = HashSet<String>(items.size + results.size)
-            items.forEach { YoutubeUtils.extractYoutubeId(it.url)?.let(seen::add) }
-
-            for (i in results.indices) {
-                val card = results[i]
-                if (!card.url.contains("/shorts/") || !card.url.contains("ctx=home")) continue
-                val id = YoutubeUtils.extractYoutubeId(card.url) ?: continue
-                if (!seen.add(id)) continue
-
-                val position = items.size + 1
-                val prefixEnd = card.name.indexOf(' ')
-                val numbered = "#$position"
-                val shown = if (card is MovieSearchResponse && card.name.startsWith("#") &&
-                    prefixEnd > 1 && (prefixEnd != numbered.length ||
-                        !card.name.startsWith(numbered))
-                ) {
-                    card.copy(name = numbered + card.name.substring(prefixEnd))
-                } else card
-                results[i] = shown
-                items.add(shown)
-            }
-            publishedHomeShorts[key] = items
-        }
-    }
-
-    /** Episodes are created only when a Home Shorts card is opened. */
-    private fun publishedHomeShortEpisodes(url: String): List<Episode> {
+    /** Keep the clicked Home order across playback and subsequent detail opens. */
+    private fun homeShortEpisodes(url: String): List<Episode> {
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: return emptyList()
-        val clicked = clickedHomeShorts
-        val cards = if (clicked?.first == videoId) clicked.second else
-            synchronized(publishedHomeShorts) {
-                publishedHomeShorts.values.lastOrNull { items ->
-                    items.any { YoutubeUtils.extractYoutubeId(it.url) == videoId }
-                } ?: emptyList()
+        val cards = clickedHomeShorts
+        if (cards.any { YoutubeUtils.extractYoutubeId(it.url) == videoId }) {
+            return cards.mapIndexed { index, card ->
+                val id = YoutubeUtils.extractYoutubeId(card.url)
+                val label = if (card.name.startsWith("#")) card.name.substringAfter(' ', card.name)
+                    else card.name
+                val hasViews = label.startsWith("[Shorts | ")
+                val title = if (hasViews) label.substringAfter("] ", label) else label
+                val views = if (hasViews) label.substringAfter("[Shorts | ").substringBefore("]")
+                    else ""
+                newEpisode(card.url) {
+                    name = title
+                    posterUrl = card.posterUrl
+                    description = id?.let { epMetaMapCache[it] }.orEmpty().ifBlank { views }
+                    episode = index + 1
+                }
             }
-        return cards.mapIndexed { index, card ->
-            val id = YoutubeUtils.extractYoutubeId(card.url)
-            val label = if (card.name.startsWith("#")) card.name.substringAfter(' ', card.name)
-                else card.name
-            val hasViews = label.startsWith("[Shorts | ")
-            val title = if (hasViews) label.substringAfter("] ", label) else label
-            val views = if (hasViews) label.substringAfter("[Shorts | ").substringBefore("]")
-                else ""
-            newEpisode(card.url) {
-                name = title
-                posterUrl = card.posterUrl
-                description = id?.let { epMetaMapCache[it] }.orEmpty().ifBlank { views }
-                episode = index + 1
-            }
+        }
+        // Native/non-direct opens reuse the pre-existing 200-item Shorts cache.
+        return synchronized(homeShorts) {
+            if (homeShorts.none { YoutubeUtils.extractYoutubeId(it.data) == videoId }) {
+                emptyList()
+            } else homeShorts.map { it.copy() }
         }
     }
 
@@ -2965,7 +2915,6 @@ class YoutubeProvider(
             results.addAll(sorted)
         }
 
-        publishHomeShorts(page, requestData, results)
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -3620,7 +3569,7 @@ class YoutubeProvider(
         val list = if (shorts) {
             if (url.contains("ctx=search")) {
                 synchronized(searchShorts) { searchShorts.map { it.copy() } }
-            } else publishedHomeShortEpisodes(url)
+            } else homeShortEpisodes(url)
         } else emptyList()
         val episodes = if (list.isNotEmpty() &&
             list.any { YoutubeUtils.extractYoutubeId(it.data) == videoId }) {
@@ -3664,7 +3613,7 @@ class YoutubeProvider(
             val useSearchList = url.contains("ctx=search")
             var targetEpisodes = if (useSearchList) {
                 synchronized(searchShorts) { searchShorts.map { it.copy() } }
-            } else publishedHomeShortEpisodes(url)
+            } else homeShortEpisodes(url)
             if (targetEpisodes.isEmpty()) {
                 targetEpisodes = listOf(newEpisode(url) {
                     name = "Shorts Video"

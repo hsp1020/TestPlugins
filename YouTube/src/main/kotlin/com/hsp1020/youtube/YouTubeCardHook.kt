@@ -127,12 +127,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 (card.url.contains("/watch?v=") || card.url.contains("/shorts/")) &&
                 !card.url.contains("list=") &&
                 card !is DataStoreHelper.ResumeWatchingResult) {
-                if (card.url.contains("/shorts/")) {
-                    val cards = ArrayList<SearchResponse>()
-                    for (i in 0 until adapter.itemCount) {
+                if (card.url.contains("/shorts/") && card.url.contains("ctx=home")) {
+                    // Cap the clicked row at the existing 200-Shorts limit.
+                    val position = (0 until adapter.itemCount).firstOrNull {
+                        adapter.getItemOrNull(it)?.url == card.url
+                    } ?: 0
+                    val cards = ArrayList<SearchResponse>(minOf(adapter.itemCount, 200))
+                    for (i in (position - 199).coerceAtLeast(0) until adapter.itemCount) {
                         val item = adapter.getItemOrNull(i) ?: continue
                         if (item.apiName == "YouTube" && item.url.contains("/shorts/")) {
                             cards.add(item)
+                            if (cards.size == 200) break
                         }
                     }
                     YoutubeProvider.rememberVisibleHomeShorts(card.url, cards)
