@@ -2137,8 +2137,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val sourceMetaPath = sourceUrl.substringBefore('?').substringAfter("/meta/", "")
             val sourceType = sourceMetaPath.takeIf { it.contains('/') }
                 ?.substringBefore('/')?.takeIf(String::isNotBlank)
-            val candidates = if (movie) listOf("movie") else
-                if (ids.animeIds) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
+            val candidates = if (movie) listOf("movie") else listOf("series")
             val type = if (stremioManaged) sourceType?.takeIf { it in allowedTypes }
                 else candidates.firstOrNull { it in allowedTypes }
             Log.i("ElevateAioTrace",
