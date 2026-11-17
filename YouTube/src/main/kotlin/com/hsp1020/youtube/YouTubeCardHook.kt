@@ -1952,23 +1952,28 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (role != Role.HOME_CARD) return
                 val adapter = list.adapter as? HomeChildItemAdapter ?: return
                 var hasShorts = false
+                var clippedShorts = false
                 for (i in 0 until list.childCount) {
-                    val position = list.getChildAdapterPosition(list.getChildAt(i))
+                    val child = list.getChildAt(i)
+                    val position = list.getChildAdapterPosition(child)
                     if (position == RecyclerView.NO_POSITION) continue
                     val item = adapter.getItemOrNull(position) ?: continue
                     if (item.apiName == "YouTube" && item.url.contains("/shorts/")) {
                         hasShorts = true
+                        clippedShorts = list.height > 0 && child.height > list.height
                         break
                     }
                 }
                 val previous = visibleShorts
                 visibleShorts = hasShorts
-                if (previous == null || previous == hasShorts || adaptiveRemeasurePosted) return
+                if (((previous == null || previous == hasShorts) && !clippedShorts) ||
+                    adaptiveRemeasurePosted) return
                 adaptiveRemeasurePosted = true
                 list.post {
                     adaptiveRemeasurePosted = false
                     if (watchers[list] === this@Watcher && list.isAttachedToWindow) {
                         list.requestLayout()
+                        list.parent?.requestLayout()
                     }
                 }
             }
