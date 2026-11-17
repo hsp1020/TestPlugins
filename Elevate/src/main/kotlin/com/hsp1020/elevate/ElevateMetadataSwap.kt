@@ -914,6 +914,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val movie = response?.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
                     runCatching { JSONObject(page.url).optString("type") == "movie" }.getOrDefault(false)
                 val locale = getCurrentLocale(application).replace('_', '-')
+                var aioPlot = false
+                var tmdbPlot = false
                 val resolved = try {
                     withContext(Dispatchers.IO) {
                         val aioIds = if (provider == "AIO" &&
@@ -945,6 +947,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         }
                         Log.i("ElevateMetaTiming",
                             "phase=TMDB_DETAIL key=$traceKey id=${id ?: "NONE"} elapsedMs=${SystemClock.elapsedRealtime() - detailStarted} success=${tmdb != null}")
+                        aioPlot = !aio?.overview.isNullOrBlank()
+                        tmdbPlot = !tmdb?.overview.isNullOrBlank()
                         (if (provider == "AIO") aio?.withFallback(tmdb)
                             else tmdb) to id
                     }
@@ -989,8 +993,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 swapped?.let { nativePage(model, it) }
                 activateLinks()
                 suppressNativeTrailers()
+                val publishedPlotSource = when {
+                    current.overview.isNullOrBlank() -> "EMPTY"
+                    provider == "AIO" && aioPlot -> "AIO"
+                    tmdbPlot -> "TMDB"
+                    else -> "UNKNOWN"
+                }
                 Log.i("ElevateMetaTiming",
-                    "phase=SWAP_PUBLISHED key=$traceKey elapsedMs=${SystemClock.elapsedRealtime() - swapStarted}")
+                    "phase=SWAP_PUBLISHED key=$traceKey elapsedMs=${SystemClock.elapsedRealtime() - swapStarted}" +
+                        " aioPlot=$aioPlot tmdbPlot=$tmdbPlot publishedPlotSource=$publishedPlotSource")
                 updateEpisodes()
             }
         }
