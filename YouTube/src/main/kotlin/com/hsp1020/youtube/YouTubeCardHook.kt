@@ -116,8 +116,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     // Intercept native Home adapter callbacks instead of card View listeners:
     // native/Elevate rebinds are free to replace the View's click listener.
-    private inner class HomeDirectClick(val original: (SearchClickCallback) -> Unit) :
-        (SearchClickCallback) -> Unit {
+    private inner class HomeDirectClick(
+        val original: (SearchClickCallback) -> Unit,
+        private val adapter: HomeChildItemAdapter
+    ) : (SearchClickCallback) -> Unit {
         override fun invoke(event: SearchClickCallback) {
             val card = event.card
             if (host != null && event.action == SEARCH_ACTION_LOAD &&
@@ -125,6 +127,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 (card.url.contains("/watch?v=") || card.url.contains("/shorts/")) &&
                 !card.url.contains("list=") &&
                 card !is DataStoreHelper.ResumeWatchingResult) {
+                if (card.url.contains("/shorts/")) {
+                    val cards = ArrayList<SearchResponse>()
+                    for (i in 0 until adapter.itemCount) {
+                        val item = adapter.getItemOrNull(i) ?: continue
+                        if (item.apiName == "YouTube" && item.url.contains("/shorts/")) {
+                            cards.add(item)
+                        }
+                    }
+                    (APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider)
+                        ?.rememberVisibleHomeShorts(card.url, cards)
+                }
                 playHomeVideo(card)
             } else {
                 original(event)
@@ -1898,7 +1911,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     if (homeAdapter !== current) {
                         homeAdapter = current
                         homeOriginalClick = current.clickCallback
-                        val wrapper = HomeDirectClick(current.clickCallback)
+                        val wrapper = HomeDirectClick(current.clickCallback, current)
                         homeWrappedClick = wrapper
                         current.clickCallback = wrapper
                     } else if (current.clickCallback === homeOriginalClick) {
