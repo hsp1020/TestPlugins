@@ -6549,10 +6549,12 @@ open class StremioC(
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
-                this.posterUrl = thumbnail?.takeIf(String::isNotBlank)
-                    ?: tmdbEp?.stillPath?.takeIf(String::isNotBlank)
-                        ?.let { "https://image.tmdb.org/t/p/w500$it" }
-                    ?: TRANSPARENT_PIXEL
+                val tmdbThumb = tmdbEp?.stillPath?.takeIf(String::isNotBlank)
+                    ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                val originalThumb = thumbnail?.takeIf(String::isNotBlank)
+                this.posterUrl = if (mappedTmdbOnly && tmdbEpisodeKey != null)
+                    tmdbThumb ?: originalThumb ?: TRANSPARENT_PIXEL
+                else originalThumb ?: tmdbThumb ?: TRANSPARENT_PIXEL
 
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
                 if (type != "movie" && type != "series" && !unknownEpisode) {
