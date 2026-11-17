@@ -887,6 +887,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val includeActors = !ElevateFeaturePrefs.enabled(
                 application, ElevateFeature.ACTOR_INFORMATION)
             if (!featureOn || policy == "false") {
+                if (provider == "AIO") Log.i("ElevateAioTrace",
+                    "phase=SKIP key=${page.url.hashCode()} reason=${if (!featureOn) "DISABLED" else "POLICY"}")
                 if (previous != null &&
                     (model.page.value as? Resource.Success<ResultData>)?.value === previous)
                     nativePage(model, page)
@@ -895,6 +897,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
             val manifest = prefs.getString(ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "").orEmpty()
             if (provider == "AIO" && manifest.isBlank()) {
+                Log.i("ElevateAioTrace",
+                    "phase=SKIP key=${page.url.hashCode()} reason=NO_MANIFEST_SETTING")
                 if (previous != null &&
                     (model.page.value as? Resource.Success<ResultData>)?.value === previous)
                     nativePage(model, page)
@@ -906,6 +910,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val traceKey = page.url.hashCode()
             Log.i("ElevateMetaTiming",
                 "phase=SWAP_START key=$traceKey provider=$provider")
+            if (provider == "AIO") Log.i("ElevateAioTrace",
+                "phase=START key=$traceKey provider=${model.currentRepo?.api?.name}" +
+                    " responseType=${nativeResponse?.type}" +
+                    " responseClass=${nativeResponse?.javaClass?.simpleName}" +
+                    " policy=$policy")
             job = scope.launch {
                 val currentResponse = runCatching { responseField?.get(model) as? LoadResponse }.getOrNull()
                 val response = currentResponse?.takeIf { it.url == page.url }
@@ -914,6 +923,12 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 val movie = response?.type in setOf(TvType.Movie, TvType.AnimeMovie) ||
                     runCatching { JSONObject(page.url).optString("type") == "movie" }.getOrDefault(false)
                 val locale = getCurrentLocale(application).replace('_', '-')
+                if (provider == "AIO") Log.i("ElevateAioTrace",
+                    "phase=IDS key=$traceKey responseMatched=${response != null}" +
+                        " ignoreNative=${ElevateMediaIdentity.ignoreNativeAnimeIds(response)}" +
+                        " original=${ids.original} imdb=${ids.imdb} tmdb=${ids.tmdb}" +
+                        " mal=${ids.mal} anilist=${ids.anilist} kitsu=${ids.kitsu}" +
+                        " simkl=${ids.simkl} movie=$movie locale=$locale")
                 var aioPlot = false
                 var tmdbPlot = false
                 val resolved = try {
@@ -922,10 +937,23 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             ids.original == null && ids.imdb == null && ids.tmdb == null &&
                             !ids.animeIds && ids.simkl != null)
                             ElevateMediaIdentity.enrichSimkl(ids, movie) else ids
-                        val aio = if (provider == "AIO")
-                            Addon.load(manifest, movie, aioIds, page.url, locale, policy == "true")
-                                ?.let { metadataFromAddon(it, includeActors) }
+                        if (provider == "AIO" && aioIds != ids) Log.i("ElevateAioTrace",
+                            "phase=ENRICH key=$traceKey original=${aioIds.original}" +
+                                " imdb=${aioIds.imdb} tmdb=${aioIds.tmdb}" +
+                                " mal=${aioIds.mal} anilist=${aioIds.anilist}" +
+                                " kitsu=${aioIds.kitsu}")
+                        val aioRaw = if (provider == "AIO") Addon.load(
+                            manifest, movie, aioIds, page.url, locale, policy == "true", traceKey)
                         else null
+                        val aio = aioRaw?.let { metadataFromAddon(it, includeActors) }
+                        if (provider == "AIO") Log.i("ElevateAioTrace",
+                            "phase=PARSE key=$traceKey response=${aioRaw != null}" +
+                                " parsed=${aio != null} plotChars=${aio?.overview?.length ?: 0}" +
+                                " title=${!aio?.title.isNullOrBlank()}" +
+                                " poster=${!aio?.poster.isNullOrBlank()}" +
+                                " logo=${!aio?.logo.isNullOrBlank()}" +
+                                " videos=${aio?.videos?.size ?: 0}" +
+                                " episodePairs=${aio?.episodes?.size ?: 0}")
                         val idStarted = SystemClock.elapsedRealtime()
                         val id = tmdbId(aioIds, movie)
                         Log.i("ElevateMetaTiming",
@@ -949,6 +977,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             "phase=TMDB_DETAIL key=$traceKey id=${id ?: "NONE"} elapsedMs=${SystemClock.elapsedRealtime() - detailStarted} success=${tmdb != null}")
                         aioPlot = !aio?.overview.isNullOrBlank()
                         tmdbPlot = !tmdb?.overview.isNullOrBlank()
+                        if (provider == "AIO") Log.i("ElevateAioTrace",
+                            "phase=MERGE key=$traceKey aio=${aio != null}" +
+                                " tmdb=${tmdb != null} aioPlotChars=${aio?.overview?.length ?: 0}" +
+                                " tmdbPlotChars=${tmdb?.overview?.length ?: 0}" +
+                                " plotSource=${if (aioPlot) "AIO" else if (tmdbPlot) "TMDB" else "EMPTY"}")
                         (if (provider == "AIO") aio?.withFallback(tmdb)
                             else tmdb) to id
                     }
@@ -983,6 +1016,11 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     ElevateFeaturePrefs.METADATA_SWAP_ADDON_URL, "") == manifest
                 if (!generationMatches || !originalMatches || !fragmentReady ||
                     !featureStillOn || !providerMatches || !manifestMatches) {
+                    if (provider == "AIO") Log.i("ElevateAioTrace",
+                        "phase=PUBLISH_SKIP key=$traceKey generation=$generationMatches" +
+                            " original=$originalMatches fragment=$fragmentReady" +
+                            " feature=$featureStillOn provider=$providerMatches" +
+                            " manifest=$manifestMatches")
                     return@launch
                 }
                 metadata = current
@@ -991,6 +1029,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 swapped = current.toPage(page, movie, includeActors)
                 pendingPage = null
                 swapped?.let { nativePage(model, it) }
+                if (provider == "AIO") Log.i("ElevateAioTrace",
+                    "phase=PAGE key=$traceKey source=${current.source}" +
+                        " plotChars=${current.overview?.length ?: 0}" +
+                        " pagePlot=${swapped?.plotText != null}" +
+                        " originalPlot=${page.plotText != null}" +
+                        " poster=${!current.poster.isNullOrBlank()}" +
+                        " videos=${current.videos.size}")
                 activateLinks()
                 suppressNativeTrailers()
                 val publishedPlotSource = when {
@@ -1087,13 +1132,17 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private suspend fun verifiedAddonEpisodes(
             base: List<ResultEpisode>, source: Metadata,
             mappings: Map<Int, ElevateAnimeIdResolver.Mapping?>,
-            imdb: String?, anime: Boolean, specialSeason: Int?
+            imdb: String?, anime: Boolean, specialSeason: Int?, traceKey: Int?
         ): Map<Pair<Int, Int>, EpisodeMeta> {
             val videos = source.videos.withIndex().filter { (_, video) ->
                 (video.season ?: -1) >= 0 && (video.number ?: 0) > 0 &&
                     (video.season != 0 || video.explicitSeason)
             }
-            if (videos.isEmpty()) return emptyMap()
+            if (videos.isEmpty()) {
+                Log.i("ElevateAioTrace",
+                    "phase=EP_MATCH key=$traceKey reason=NO_VALID_VIDEO total=${source.videos.size}")
+                return emptyMap()
+            }
             val byPair = videos.groupBy { it.value.season!! to it.value.number!! }
             val byImdb = videos.filter {
                 it.value.imdbSeason != null && it.value.imdbEpisode != null
@@ -1119,6 +1168,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val lastBySeason = mutableMapOf<Pair<String, Int>, Int>()
             val imdbIdPattern = Regex("tt[0-9]+")
             var misses = 0
+            val routes = mutableMapOf<String, Int>()
+            val failed = ArrayList<String>(6)
             for (episode in base) {
                 val season = episode.seasonIndex?.takeIf {
                     it == episode.season && it in 0..99 && episode.episode > 0
@@ -1181,6 +1232,14 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }, requireDate = true) }
                 val selected = exact ?: mapped ?: kitsu ?: direct ?: airDate
                 if (selected != null) {
+                    val route = when (selected) {
+                        exact -> "IMDB"
+                        mapped -> "AIOSTREAMS"
+                        kitsu -> "KITSU"
+                        direct -> "SAME_NUMBER_DATE"
+                        else -> "AIRDATE"
+                    }
+                    routes[route] = (routes[route] ?: 0) + 1
                     used += selected.index
                     mappedEpisodes[key] = selected.value.meta
                     if (offsetKey != null && target ==
@@ -1188,11 +1247,20 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         lastBySeason[offsetKey] = maxOf(
                             lastBySeason[offsetKey] ?: 0, selected.value.number!!
                         )
-                } else misses++
+                } else {
+                    misses++
+                    if (failed.size < 6) failed +=
+                        "S$season:E${episode.episode}(nativeDate=${day != null}," +
+                            "same=${byPair[key]?.size ?: 0}," +
+                            "dated=${byPair[key].orEmpty().count { dates[it.index] != null }}," +
+                            "imdb=${imdbPair != null},mapping=${target != null}," +
+                            "kitsu=${absolute != null})"
+                }
             }
-            if (misses > 0) Log.i("ElevateSeasonAudit",
-                "feature=AIO_SWAP phase=EPISODES matched=" + mappedEpisodes.size +
-                    " missed=" + misses)
+            Log.i("ElevateAioTrace",
+                "phase=EP_MATCH key=$traceKey native=${base.size} aio=${source.videos.size}" +
+                    " eligible=${videos.size} matched=${mappedEpisodes.size}" +
+                    " missed=$misses routes=$routes failed=${failed.joinToString(";")}")
             return mappedEpisodes
         }
 
@@ -1202,10 +1270,16 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val completeAio = source.source == "AIO" && source.videos.isNotEmpty() &&
                 original?.syncData?.get("metadata_swap_allowed") == "true"
             if (source.source == "AIO" && source.videos.isEmpty()) {
+                Log.i("ElevateAioTrace",
+                    "phase=EP_SKIP key=${original?.url?.hashCode()} reason=NO_AIO_VIDEOS")
                 originalEpisodes?.let(::nativeEpisodes)
                 return
             }
-            if (!completeAio && baseRef == null) return
+            if (!completeAio && baseRef == null) {
+                if (source.source == "AIO") Log.i("ElevateAioTrace",
+                    "phase=EP_SKIP key=${original?.url?.hashCode()} reason=NO_NATIVE_EPISODES")
+                return
+            }
             val base = baseRef.orEmpty()
             val generation = serial
             episodeJob?.cancel()
@@ -1216,6 +1290,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     extraSync = original?.syncData, urls = listOfNotNull(original?.url))
                 val anime = ElevateMediaIdentity.anime(nativeResponse, base.firstOrNull(), ids) ||
                     (source.originalLanguage.equals("ja", true) && source.tmdbAnimation)
+                if (source.source == "AIO") Log.i("ElevateAioTrace",
+                    "phase=EP_INPUT key=$traceKey mode=${if (completeAio) "FULL" else "GENERAL"}" +
+                        " native=${base.size} videos=${source.videos.size}" +
+                        " anime=$anime nativeDated=${base.count { it.airDate != null }}" +
+                        " aioDated=${source.videos.count { !it.meta.date.isNullOrBlank() }}" +
+                        " nativeSeasons=${base.mapNotNull { it.seasonIndex }.distinct().take(8)}" +
+                        " aioSeasons=${source.videos.mapNotNull { it.season }.distinct().take(8)}")
                 val animeLookup = if (anime) {
                     val direct = ids.original?.let { raw ->
                         val kind = raw.substringBefore(':')
@@ -1336,8 +1417,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 Log.i("ElevateMetaTiming",
                     "phase=SEASON_MAPPING key=$traceKey seasons=${seasons.size} mapped=${seasonMappings.values.count { it != null }} elapsedMs=${SystemClock.elapsedRealtime() - mappingStarted}")
                 val verifiedAddon = if (!completeAio && source.source == "AIO")
-                    verifiedAddonEpisodes(base, source, seasonMappings, imdb, anime, specialSeason)
+                    verifiedAddonEpisodes(base, source, seasonMappings, imdb, anime,
+                        specialSeason, traceKey)
                 else emptyMap()
+                if (source.source == "AIO") Log.i("ElevateAioTrace",
+                    "phase=EP_VERIFY key=$traceKey full=$completeAio" +
+                        " mappedSeasons=${seasonMappings.values.count { it != null }}" +
+                        " matched=${verifiedAddon.size}")
                 val seasonStarted = SystemClock.elapsedRealtime()
                 val activeSeasonRequests = java.util.concurrent.atomic.AtomicInteger(0)
                 val tmdbEpisodes = withContext(Dispatchers.IO) {
@@ -1627,6 +1713,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         "phase=EPISODES_DONE key=$traceKey mode=FALLBACK episodes=${fallback.size} totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
                     return@launch
                 }
+                var appliedAio = 0
+                var appliedTmdb = 0
+                var keptNative = 0
+                var changedPlots = 0
                 val result = base.map { episode ->
                     val season = episode.seasonIndex?.takeIf {
                         it == episode.season && it in 0..99 && episode.episode > 0
@@ -1636,6 +1726,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                     val tmdb = key?.let { tmdbEpisodes[it] }
                     val info = (if (source.source == "AIO") addon?.withFallback(tmdb) ?: tmdb
                         else tmdb)
+                    if (source.source == "AIO") {
+                        when {
+                            addon != null -> appliedAio++
+                            tmdb != null -> appliedTmdb++
+                            else -> keptNative++
+                        }
+                        if (info?.description != null &&
+                            info.description != episode.description) changedPlots++
+                    }
                     if ((season ?: -1) >= 21) Log.i("MetaEpisodeMap",
                         "phase=TMDB_APPLY app=S$season:E${episode.episode} found=${info != null}" +
                             " beforeThumb=${!episode.poster.isNullOrBlank()} beforePlot=${!episode.description.isNullOrBlank()}" +
@@ -1659,6 +1758,10 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 swappedEpisodes = result
                 traceEpisodeIndices("SWAPPED", result)
                 nativeEpisodes(result)
+                if (source.source == "AIO") Log.i("ElevateAioTrace",
+                    "phase=EP_PUBLISHED key=$traceKey total=${result.size}" +
+                        " aio=$appliedAio tmdb=$appliedTmdb native=$keptNative" +
+                        " changedPlots=$changedPlots")
                 Log.i("ElevateMetaTiming",
                     "phase=EPISODES_DONE key=$traceKey mode=TMDB episodes=${result.size} tmdbEpisodes=${tmdbEpisodes.size} totalMs=${SystemClock.elapsedRealtime() - episodeStarted}")
             }
@@ -1810,6 +1913,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
         private suspend fun shared(
             key: String, kind: String, cache: LinkedHashMap<String, Cached>,
             flights: MutableMap<String, Deferred<JSONObject?>>,
+            traceKey: Int,
             request: suspend () -> Fetched?
         ): JSONObject? {
             val now = System.currentTimeMillis()
@@ -1818,20 +1922,33 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
             if (ram != null) runCatching { JSONObject(String(ram, Charsets.UTF_8)) }
                 .getOrNull()?.let {
+                    Log.i("ElevateAioTrace",
+                        "phase=CACHE key=$traceKey kind=$kind via=RAM bytes=${ram.size}")
                     return it
                 }
             val job = synchronized(cache) {
-                flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                flights[key]?.also {
+                    Log.i("ElevateAioTrace",
+                        "phase=CACHE key=$traceKey kind=$kind via=INFLIGHT")
+                } ?: scope.async(start = CoroutineStart.LAZY) {
                     val disk = ElevateMetadataDiskCache.read(kind, key)
                     if (disk != null) {
                         val parsed = runCatching { JSONObject(disk.body) }.getOrNull()
                         if (parsed != null) {
+                            Log.i("ElevateAioTrace",
+                                "phase=CACHE key=$traceKey kind=$kind via=DISK" +
+                                    " ttlMs=${disk.ttlMs} chars=${disk.body.length}")
                             remember(kind, cache, key, disk.at, disk.ttlMs,
                                 disk.body.toByteArray(Charsets.UTF_8))
                             return@async parsed
                         }
                     }
+                    Log.i("ElevateAioTrace",
+                        "phase=CACHE key=$traceKey kind=$kind via=NETWORK")
                     val fetched = request()
+                    Log.i("ElevateAioTrace",
+                        "phase=CACHE_RESULT key=$traceKey kind=$kind success=${fetched != null}" +
+                            " ttlMs=${fetched?.ttlMs ?: 0L}")
                     if (fetched != null && fetched.ttlMs > 0L) {
                         val body = fetched.json.toString()
                         val raw = body.toByteArray(Charsets.UTF_8)
@@ -1895,9 +2012,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
         }
 
-        private suspend fun request(url: String, movie: Boolean?): Fetched? = try {
-            val response = app.get(url,
-                 timeout = 12L)
+        private suspend fun request(url: String, movie: Boolean?, traceKey: Int): Fetched? = try {
+            val started = SystemClock.elapsedRealtime()
+            val response = app.get(url, timeout = 12L)
+            Log.i("ElevateAioTrace",
+                "phase=HTTP key=$traceKey kind=${if (movie == null) "MANIFEST" else "META"}" +
+                    " host=${Uri.parse(url).host} status=${response.code}" +
+                    " elapsedMs=${SystemClock.elapsedRealtime() - started}")
             if (response.code !in 200..299) null else {
                 val text = response.text
                 val raw = JSONObject(text)
@@ -1927,6 +2048,14 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         text.contains("data:image/", true)) {
                         ttl = 0L
                     }
+                    Log.i("ElevateAioTrace",
+                        "phase=HTTP_META key=$traceKey wantType=$wantedType actualType=$foundType" +
+                            " wantId=$wantedId actualId=$foundId idValid=$idValid" +
+                            " typeValid=$typeValid transient=$transient ttlMs=$ttl" +
+                            " videos=${meta.optJSONArray("videos")?.length() ?: 0}" +
+                            " plotChars=${meta.optString("description").ifBlank {
+                                meta.optString("overview")
+                            }.length} payloadChars=${text.length}")
                 }
                 val result = if (meta == null) raw else {
                     val data = meta
@@ -1962,23 +2091,32 @@ internal class ElevateMetadataSwap(private val application: Application) :
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) { null }
+        } catch (error: Exception) {
+            Log.i("ElevateAioTrace",
+                "phase=HTTP_ERROR key=$traceKey error=${error.javaClass.simpleName}")
+            null
+        }
 
         suspend fun load(rawManifest: String, movie: Boolean, ids: ElevateMediaIdentity.Ids,
-            sourceUrl: String, locale: String, stremioManaged: Boolean): JSONObject? {
+            sourceUrl: String, locale: String, stremioManaged: Boolean,
+            traceKey: Int): JSONObject? {
             val manifest = manifestUrl(rawManifest)
             if (manifest == null) {
+                Log.i("ElevateAioTrace", "phase=MANIFEST key=$traceKey reason=INVALID_URL")
                 return null
             }
             val uri = manifest.toString()
-            val definition = shared(uri, "manifest", manifests, manifestFlights) {
-                request(uri, null)
+            val definition = shared(uri, "manifest", manifests, manifestFlights, traceKey) {
+                request(uri, null, traceKey)
             }
             if (definition == null) {
+                Log.i("ElevateAioTrace",
+                    "phase=MANIFEST key=$traceKey reason=NOT_LOADED host=${manifest.host}")
                 return null
             }
             val resources = definition.optJSONArray("resources")
             if (resources == null) {
+                Log.i("ElevateAioTrace", "phase=MANIFEST key=$traceKey reason=NO_RESOURCES")
                 return null
             }
             val supportsMeta = (0 until resources.length()).any {
@@ -1989,6 +2127,8 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 }
             }
             if (!supportsMeta) {
+                Log.i("ElevateAioTrace",
+                    "phase=MANIFEST key=$traceKey reason=META_UNSUPPORTED")
                 return null
             }
             val allowedTypes = definition.optJSONArray("types")?.let { arr ->
@@ -2001,7 +2141,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                 if (ids.animeIds) listOf("anime", "series", "tv") else listOf("series", "tv", "anime")
             val type = if (stremioManaged) sourceType?.takeIf { it in allowedTypes }
                 else candidates.firstOrNull { it in allowedTypes }
+            Log.i("ElevateAioTrace",
+                "phase=TYPE key=$traceKey host=${manifest.host}" +
+                    " version=${definition.optString("version").take(30)}" +
+                    " allowed=${allowedTypes.take(12)} candidates=$candidates" +
+                    " selected=$type source=$sourceType managed=$stremioManaged")
             if (type == null) {
+                Log.i("ElevateAioTrace", "phase=SELECT_FAIL key=$traceKey reason=NO_TYPE")
                 return null
             }
             val sourceId = sourceMetaPath.takeIf { it.contains('/') }
@@ -2010,14 +2156,19 @@ internal class ElevateMetadataSwap(private val application: Application) :
             val prefixes = definition.optJSONArray("idPrefixes")?.let { arr ->
                 (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
             }.orEmpty()
-            val id = if (stremioManaged) sourceId else listOfNotNull(
+            val idCandidates = listOfNotNull(
                 ids.original, ids.imdb, ids.tmdb?.let { "tmdb:$it" },
                 ids.mal?.let { "mal:$it" }, ids.anilist?.let { "anilist:$it" },
                 ids.kitsu?.let { "kitsu:$it" }
-            ).distinct().firstOrNull { candidate ->
+            ).distinct()
+            val id = if (stremioManaged) sourceId else idCandidates.firstOrNull { candidate ->
                 prefixes.isEmpty() || prefixes.any { candidate.startsWith(it, true) }
             }
+            Log.i("ElevateAioTrace",
+                "phase=ID_SELECT key=$traceKey prefixes=${prefixes.take(12)}" +
+                    " candidates=$idCandidates selected=$id managed=$stremioManaged")
             if (id == null) {
+                Log.i("ElevateAioTrace", "phase=SELECT_FAIL key=$traceKey reason=NO_ID")
                 return null
             }
             val version = definition.optString("version").trim()
@@ -2041,10 +2192,16 @@ internal class ElevateMetadataSwap(private val application: Application) :
             ).build().toString()
             // New metadata schema retains absoluteEpisode; bypass old slim disk entries.
             val key = "absolute-v2|" + version + "|" + locale.lowercase(Locale.ROOT) + "|" + url
-            val result = shared(key, "meta", metadata, metaFlights) {
-                request(url, movie)
+            Log.i("ElevateAioTrace",
+                "phase=META_REQUEST key=$traceKey host=${manifest.host}" +
+                    " type=$type id=$id candidates=${idCandidates.size}")
+            val result = shared(key, "meta", metadata, metaFlights, traceKey) {
+                request(url, movie, traceKey)
             }
             val found = result?.optJSONObject("meta") != null
+            Log.i("ElevateAioTrace",
+                "phase=META_RESULT key=$traceKey found=$found reason=" +
+                    (if (result == null) "NO_RESPONSE" else if (!found) "NO_META" else "OK"))
             if (found) return result
             return null
         }
