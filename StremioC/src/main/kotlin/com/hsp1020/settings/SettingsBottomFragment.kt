@@ -124,7 +124,8 @@ object SettingsRepository {
                         link = obj.optString("link", ""),
                         type = obj.optString("type", "StremioC"),
                         isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
-                        isProgressSyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
+                        isProgressSyncEnabled = obj.optBoolean("isProgressSyncEnabled",
+                            obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true))),
                         isStreamsAddonEnabled = obj.optBoolean("isStreamsAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         isSubtitlesAddonEnabled = obj.optBoolean("isSubtitlesAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         isCineStreamIntegrationEnabled = if (obj.has("isCineStreamIntegrationEnabled")) obj.optBoolean("isCineStreamIntegrationEnabled") else null,
@@ -149,7 +150,7 @@ object SettingsRepository {
                 put("link", item.link)
                 put("type", item.type)
                 put("isSyncEnabled", item.isSyncEnabled)
-                put("isHistorySyncEnabled", item.isProgressSyncEnabled)
+                put("isProgressSyncEnabled", item.isProgressSyncEnabled)
                 put("isStreamsAddonEnabled", item.isStreamsAddonEnabled)
                 put("isSubtitlesAddonEnabled", item.isSubtitlesAddonEnabled)
                 item.isCineStreamIntegrationEnabled?.let { put("isCineStreamIntegrationEnabled", it) }

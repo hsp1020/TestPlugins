@@ -1163,7 +1163,7 @@ open class StremioC(
                             val obj = arr.getJSONObject(i)
                             val rawLink = obj.optString("link", "")
                             val enabled = obj.optBoolean("enabled", true)
-                            if (i == 0 && enabled) libraryUrl = rawLink
+                            if (libraryUrl.isBlank() && enabled && rawLink.isNotBlank()) libraryUrl = rawLink
                             if (obj.has("id")) catalogEnabledIds[obj.optLong("id")] = enabled
                             if (rawLink.isNotBlank()) {
                                 val key = stremioManifestUrl(rawLink)
@@ -1176,7 +1176,8 @@ open class StremioC(
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
-                                progressMap[link] = obj.optBoolean("isHistorySyncEnabled", map[link] ?: true)
+                                progressMap[link] = obj.optBoolean("isProgressSyncEnabled",
+                                    obj.optBoolean("isHistorySyncEnabled", map[link] ?: true))
                                 val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                                 streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
                                 subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
