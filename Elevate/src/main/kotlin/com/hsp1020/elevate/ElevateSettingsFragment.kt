@@ -108,8 +108,7 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
-    // Preserve the old addon URL but intentionally reset the renamed feature toggle.
-    const val WATCH_PROGRESS_ADDON_URL = "HISTORY_SYNC_URL"
+    const val WATCH_PROGRESS_SYNC_URL = "WATCH_PROGRESS_SYNC_URL"
     const val METADATA_SWAP_PROVIDER = "METADATA_SWAP_PROVIDER"
     const val METADATA_SWAP_ADDON_URL = "METADATA_SWAP_ADDON_URL"
     fun defaultEnabled(@Suppress("UNUSED_PARAMETER") feature: ElevateFeature): Boolean = false
@@ -325,11 +324,11 @@ class ElevateSettingsFragment : DialogFragment() {
                             isSingleLine = true
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                             applyElevateNativeFont()
-                            setText(preferences.getString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, "").orEmpty())
+                            setText(preferences.getString(ElevateFeaturePrefs.WATCH_PROGRESS_SYNC_URL, "").orEmpty())
                             addTextChangedListener(object : TextWatcher {
                                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                                    preferences.edit().putString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, s.toString().trim()).apply()
+                                    preferences.edit().putString(ElevateFeaturePrefs.WATCH_PROGRESS_SYNC_URL, s.toString().trim()).apply()
                                 }
                                 override fun afterTextChanged(s: Editable?) = Unit
                             })

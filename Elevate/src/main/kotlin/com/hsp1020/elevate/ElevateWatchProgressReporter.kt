@@ -156,7 +156,7 @@ internal class ElevateWatchProgressReporter(private val application: Application
 
     private fun progressEndpointBase(): String? {
         if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.WATCH_PROGRESS_SYNC)) return null
-        val url = prefs.getString(ElevateFeaturePrefs.WATCH_PROGRESS_ADDON_URL, null)?.trim()
+        val url = prefs.getString(ElevateFeaturePrefs.WATCH_PROGRESS_SYNC_URL, null)?.trim()
             ?.replace("stremio://", "https://") ?: return null
         return runCatching {
             val uri = URI(url)

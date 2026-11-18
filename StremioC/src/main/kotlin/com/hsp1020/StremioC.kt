@@ -387,10 +387,8 @@ open class StremioC(
             setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
         } else emptySet()
 
-    private fun libraryMetadataBase(): String? = CloudStreamApp.context
-        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        ?.getString("history_sync_url", null)
-        ?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
+    private fun libraryMetadataBase(): String? = getSyncSettings().libraryUrl
+        .trim().takeIf { it.isNotBlank() }?.cleanBaseUrl()
 
     private fun libraryItemId(url: String, host: String, vararg sections: String): String? =
         runCatching {
@@ -1080,7 +1078,7 @@ open class StremioC(
 
         private data class StreamSubtitleAddon(val name: String, val url: String)
         private data class SyncSettings(
-            val syncUrl: String,
+            val libraryUrl: String,
             val syncMap: Map<String, Boolean>,
             val progressSyncMap: Map<String, Boolean>,
             val streamsAddonMap: Map<String, Boolean>,
@@ -1127,8 +1125,8 @@ open class StremioC(
         settings.progressSyncMap[catalog]?.let { return it }
         // For a unified metadata URL without a clear origin, respect every
         // enabled catalog's explicit OFF; never guess a source.
-        if (settings.syncUrl.isBlank() ||
-            catalog != settings.syncUrl.cleanBaseUrl().lowercase()) return false
+        if (settings.libraryUrl.isBlank() ||
+            catalog != settings.libraryUrl.cleanBaseUrl().lowercase()) return false
         val candidates = settings.progressSyncMap.filterKeys { settings.syncMap[it] == true }
         return candidates.isNotEmpty() && candidates.values.all { it }
     }
@@ -1146,8 +1144,8 @@ open class StremioC(
                 }
                 val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyList())
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                val syncUrl = prefs.getString("history_sync_url", "").orEmpty()
                 val json = prefs.getString("stremio_saved_links", null)
+                var libraryUrl = ""
                 val map = mutableMapOf<String, Boolean>()
                 val progressMap = mutableMapOf<String, Boolean>()
                 val streamsMap = mutableMapOf<String, Boolean>()
@@ -1165,6 +1163,7 @@ open class StremioC(
                             val obj = arr.getJSONObject(i)
                             val rawLink = obj.optString("link", "")
                             val enabled = obj.optBoolean("enabled", true)
+                            if (i == 0 && enabled) libraryUrl = rawLink
                             if (obj.has("id")) catalogEnabledIds[obj.optLong("id")] = enabled
                             if (rawLink.isNotBlank()) {
                                 val key = stremioManifestUrl(rawLink)
@@ -1204,7 +1203,7 @@ open class StremioC(
                     }
                 }.onFailure { error ->
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
-                val result = SyncSettings(syncUrl, map, progressMap, streamsMap, subtitlesMap, extraUrls,
+                val result = SyncSettings(libraryUrl, map, progressMap, streamsMap, subtitlesMap, extraUrls,
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons,
                     cineIntegrationMap, streamPlayIntegrationMap, vixSrcIntegrationMap)
                 cachedSyncSettings = result
@@ -3018,16 +3017,16 @@ open class StremioC(
         val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
 
         val syncSettings = getSyncSettings()
-        val syncUrl = syncSettings.syncUrl
+        val libraryUrl = syncSettings.libraryUrl
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
 
         val savedStreamsAddon = syncSettings.streamsAddonMap[currentCleanUrl]
         val savedSubtitlesAddon = syncSettings.subtitlesAddonMap[currentCleanUrl]
-        val libraryHistoryStreamSync = savedStreamsAddon == null && savedSubtitlesAddon == null && mainUrl.isBlank() &&
-            syncUrl.isNotBlank() && currentCleanUrl == syncUrl.cleanBaseUrl().lowercase() &&
+        val libraryAddonDefault = savedStreamsAddon == null && savedSubtitlesAddon == null && mainUrl.isBlank() &&
+            libraryUrl.isNotBlank() && currentCleanUrl == libraryUrl.cleanBaseUrl().lowercase() &&
             stremioManifestUrl(currentMainUrl) !in syncSettings.disabledCatalogUrls
-        val streamsAddonEnabled = savedStreamsAddon ?: libraryHistoryStreamSync
-        val subtitlesAddonEnabled = savedSubtitlesAddon ?: libraryHistoryStreamSync
+        val streamsAddonEnabled = savedStreamsAddon ?: libraryAddonDefault
+        val subtitlesAddonEnabled = savedSubtitlesAddon ?: libraryAddonDefault
         val extraUrls = if (streamsAddonEnabled || subtitlesAddonEnabled) {
             syncSettings.streamSubtitleUrls.filter { addon ->
                 val parsed = addon.url.toHttpUrlOrNull()
