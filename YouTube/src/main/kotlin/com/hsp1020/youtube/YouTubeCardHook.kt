@@ -1830,128 +1830,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private var adaptiveRemeasurePosted = false
             private var posted = false
 
-            // Temporary, event-driven Home Shorts layout diagnostics.
-            // Reuse listeners for every holder; never poll or mutate sizing here.
-            private var traceSeq = 0
-            private var lastScrollTraceMs = 0L
-            private val tracedHomeHolders = IdentityHashMap<View, Boolean>()
-            private val traceHolderLayout = View.OnLayoutChangeListener { view, l, t, r, b, ol, ot, or, ob ->
-                if (r - l != or - ol || b - t != ob - ot) {
-                    traceHomeCard("HOLDER_LAYOUT ${or - ol}x${ob - ot}->${r - l}x${b - t}", view)
-                }
-            }
-            private val tracePosterLayout = View.OnLayoutChangeListener { view, l, t, r, b, ol, ot, or, ob ->
-                if (r - l != or - ol || b - t != ob - ot) {
-                    traceHomeCard("POSTER_LAYOUT ${or - ol}x${ob - ot}->${r - l}x${b - t}", view)
-                }
-            }
-            private val traceTitleLayout = View.OnLayoutChangeListener { view, l, t, r, b, ol, ot, or, ob ->
-                if (r - l != or - ol || b - t != ob - ot) {
-                    traceHomeCard("TITLE_LAYOUT ${or - ol}x${ob - ot}->${r - l}x${b - t}", view)
-                }
-            }
-            private val traceScroll = object : RecyclerView.OnScrollListener() {
-                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                    if (role != Role.HOME_CARD) return
-                    traceHomeRow("SCROLL_STATE_$newState")
-                    traceVisibleHomeCards("SCROLL_STATE_$newState")
-                }
-
-                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                    if (role != Role.HOME_CARD || dx == 0) return
-                    val now = android.os.SystemClock.uptimeMillis()
-                    if (now - lastScrollTraceMs < 150L) return
-                    lastScrollTraceMs = now
-                    traceVisibleHomeCards("SCROLL_SAMPLE")
-                }
-            }
-
-            private fun attachTrace(view: View) {
-                if (role != Role.HOME_CARD || tracedHomeHolders.put(view, true) != null) return
-                view.addOnLayoutChangeListener(traceHolderLayout)
-                view.findViewById<View>(R.id.background_card)
-                    ?.addOnLayoutChangeListener(tracePosterLayout)
-                view.findViewById<View>(R.id.imageText)
-                    ?.addOnLayoutChangeListener(traceTitleLayout)
-            }
-
-            private fun detachTrace(view: View) {
-                if (tracedHomeHolders.remove(view) == null) return
-                view.removeOnLayoutChangeListener(traceHolderLayout)
-                view.findViewById<View>(R.id.background_card)
-                    ?.removeOnLayoutChangeListener(tracePosterLayout)
-                view.findViewById<View>(R.id.imageText)
-                    ?.removeOnLayoutChangeListener(traceTitleLayout)
-            }
-
-            private fun traceHomeCard(event: String, view: View) {
-                if (role != Role.HOME_CARD) return
-                val holder = if (view.parent === list) view
-                    else list.findContainingItemView(view) ?: return
-                val position = list.getChildAdapterPosition(holder)
-                val adapter = list.adapter as? HomeChildItemAdapter ?: return
-                val item = adapter.getItemOrNull(position) ?: return
-                if (item.apiName != "YouTube" ||
-                    (!item.url.contains("/shorts/") && !item.url.contains("/watch?v="))) return
-                val poster = holder.findViewById<View>(R.id.background_card) ?: return
-                val title = holder.findViewById<TextView>(R.id.imageText) ?: return
-                val image = holder.findViewById<ImageView>(R.id.imageView) ?: return
-                val parentHeight = (list.parent as? View)?.height ?: -1
-                val bitmap = image.drawable
-                Log.i("YTHomeRatio",
-                    "seq=${++traceSeq} event=$event row=${System.identityHashCode(list)} " +
-                        "holder=${System.identityHashCode(holder)} pos=$position " +
-                        "short=${item.url.contains("/shorts/")} url=${item.url} " +
-                        "posterParam=${poster.layoutParams.width}x${poster.layoutParams.height} " +
-                        "expectedShort=${HomeChildItemAdapter.minPosterSize}x" +
-                        "${(HomeChildItemAdapter.minPosterSize * 16f / 9f).roundToInt()} " +
-                        "posterReal=${poster.width}x${poster.height} " +
-                        "image=${image.width}x${image.height} " +
-                        "source=${bitmap?.intrinsicWidth}x${bitmap?.intrinsicHeight} " +
-                        "titleVis=${title.visibility} shown=${title.isShown} " +
-                        "titleLen=${title.text.length} lines=${title.lineCount}/${title.maxLines} " +
-                        "titleSize=${title.width}x${title.height} titleMeasured=${title.measuredHeight} " +
-                        "titleParam=${title.layoutParams.width}x${title.layoutParams.height} " +
-                        "titleBelowPoster=${!poster.contains(title)} " +
-                        "holderSize=${holder.width}x${holder.height} " +
-                        "holderParam=${holder.layoutParams.width}x${holder.layoutParams.height} " +
-                        "rowHeight=${list.height} parentHeight=$parentHeight " +
-                        "scroll=${list.computeHorizontalScrollOffset()}")
-            }
-
-            private fun traceVisibleHomeCards(event: String) {
-                if (role != Role.HOME_CARD) return
-                for (i in 0 until list.childCount) {
-                    traceHomeCard(event, list.getChildAt(i))
-                }
-            }
-
-            private fun traceHomeRow(event: String) {
-                if (role != Role.HOME_CARD) return
-                val adapter = list.adapter as? HomeChildItemAdapter ?: return
-                for (i in 0 until list.childCount) {
-                    val position = list.getChildAdapterPosition(list.getChildAt(i))
-                    val item = adapter.getItemOrNull(position) ?: continue
-                    if (item.apiName != "YouTube") continue
-                    Log.i("YTHomeRatio",
-                        "seq=${++traceSeq} event=$event row=${System.identityHashCode(list)} " +
-                            "rowHeight=${list.height} measured=${list.measuredHeight} " +
-                            "parentHeight=${(list.parent as? View)?.height} " +
-                            "visibleShorts=$visibleShorts children=${list.childCount} " +
-                            "items=${adapter.itemCount} scroll=${list.computeHorizontalScrollOffset()}")
-                    return
-                }
-            }
-
             private val changes = object : RecyclerView.AdapterDataObserver() {
-                override fun onChanged() {
-                    traceHomeRow("ADAPTER_CHANGED")
-                    schedule()
-                }
-                override fun onItemRangeChanged(start: Int, count: Int) {
-                    traceHomeRow("ADAPTER_RANGE_CHANGED_${start}_${count}")
-                    schedule()
-                }
+                override fun onChanged() = schedule()
+                override fun onItemRangeChanged(start: Int, count: Int) = schedule()
                 override fun onItemRangeInserted(start: Int, count: Int) = schedule()
                 override fun onItemRangeRemoved(start: Int, count: Int) = schedule()
                 override fun onItemRangeMoved(from: Int, to: Int, count: Int) = schedule()
@@ -1959,29 +1840,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val children = object : RecyclerView.OnChildAttachStateChangeListener {
                 override fun onChildViewAttachedToWindow(view: View) {
                     syncAdapter()
-                    if (role == Role.HOME_CARD) {
-                        attachTrace(view)
-                        traceHomeCard("ATTACH_BEFORE", view)
-                    }
                     apply(view)
-                    if (role == Role.HOME_CARD) {
-                        traceHomeCard("ATTACH_AFTER", view)
-                        remeasureOnVisibleShortsChange()
-                    }
+                    if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                     if (!isParent) view.post {
                         if (view.parent === list && watchers[list] === this@Watcher) {
-                            traceHomeCard("POST_BEFORE", view)
                             apply(view)
-                            traceHomeCard("POST_AFTER", view)
+                            if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                         }
                     }
                 }
 
                 override fun onChildViewDetachedFromWindow(view: View) {
-                    if (role == Role.HOME_CARD) {
-                        traceHomeCard("DETACH_BEFORE", view)
-                        detachTrace(view)
-                    }
                     if (isParent) {
                         view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let(::unwatch)
                     } else if (role == Role.DETAIL_EPISODE) {
@@ -1993,19 +1862,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         // Keep expanded grid sizes stable while items are temporarily detached.
                         if (role != Role.DIALOG_GRID) restore(view)
                     }
-                    if (role == Role.HOME_CARD) {
-                        traceHomeCard("DETACH_AFTER", view)
-                        remeasureOnVisibleShortsChange()
-                    }
+                    if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                 }
             }
-            private val resized = View.OnLayoutChangeListener { _, left, top, right, bottom,
-                                                                  oldLeft, oldTop, oldRight, oldBottom ->
-                if (role == Role.HOME_CARD &&
-                    bottom - top != oldBottom - oldTop) {
-                    traceHomeRow("ROW_LAYOUT ${oldBottom - oldTop}->${bottom - top}")
-                    traceVisibleHomeCards("ROW_LAYOUT")
-                }
+            private val resized = View.OnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
                 if (role != Role.DIALOG_GRID || right - left != oldRight - oldLeft) schedule()
             }
             private val isParent get() = role == Role.HOME_PARENT || role == Role.SEARCH_PARENT
@@ -2013,7 +1873,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             fun open() {
                 list.addOnChildAttachStateChangeListener(children)
                 list.addOnLayoutChangeListener(resized)
-                if (role == Role.HOME_CARD) list.addOnScrollListener(traceScroll)
                 syncAdapter()
                 scan()
             }
@@ -2023,10 +1882,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 channelLongPressHandled = false
                 list.removeOnChildAttachStateChangeListener(children)
                 list.removeOnLayoutChangeListener(resized)
-                if (role == Role.HOME_CARD) {
-                    list.removeOnScrollListener(traceScroll)
-                    for (view in tracedHomeHolders.keys.toList()) detachTrace(view)
-                }
                 observed?.unregisterAdapterDataObserver(changes)
                 unbindHomeClick()
                 observed = null
@@ -2086,23 +1941,35 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
 
             private fun scan() {
-                for (i in 0 until list.childCount) {
-                    val view = list.getChildAt(i)
-                    if (role == Role.HOME_CARD) attachTrace(view)
-                    apply(view)
-                }
-                if (role == Role.HOME_CARD) {
-                    traceHomeRow("SCAN")
-                    remeasureOnVisibleShortsChange()
-                }
+                for (i in 0 until list.childCount) apply(list.getChildAt(i))
+                if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
             }
 
             /**
-             * CloudStream's horizontal catalog is wrap_content. Its measured height
-             * can shrink while only landscape cards are visible. When Shorts return,
-             * request one native measure pass so the newly bound four-line caption
-             * contributes to the row height. Never set fixed/minimum row heights.
+             * A recycled Shorts holder can be measured against the previous
+             * landscape row height, leaving the title at 0px. Check the existing
+             * text layout before asking the wrap_content Home row to remeasure.
              */
+            private fun shortsHeightClipped(): Boolean {
+                val adapter = list.adapter as? HomeChildItemAdapter ?: return false
+                if (list.height <= 0) return false
+                for (i in 0 until list.childCount) {
+                    val child = list.getChildAt(i)
+                    val position = list.getChildAdapterPosition(child)
+                    if (position == RecyclerView.NO_POSITION) continue
+                    val item = adapter.getItemOrNull(position) ?: continue
+                    if (item.apiName != "YouTube" || !item.url.contains("/shorts/")) continue
+                    val poster = child.findViewById<View>(R.id.background_card) ?: continue
+                    val title = child.findViewById<TextView>(R.id.imageText) ?: continue
+                    if (title.visibility != View.VISIBLE || title.text.isEmpty() || child.height <= 0) continue
+                    val needed = poster.layoutParams.height +
+                        (title.layout?.height ?: title.measuredHeight) +
+                        title.compoundPaddingTop + title.compoundPaddingBottom
+                    if (needed > list.height || title.height == 0) return true
+                }
+                return false
+            }
+
             private fun remeasureOnVisibleShortsChange() {
                 if (role != Role.HOME_CARD) return
                 val adapter = list.adapter as? HomeChildItemAdapter ?: return
@@ -2118,16 +1985,28 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
                 val previous = visibleShorts
                 visibleShorts = hasShorts
-                if (previous != hasShorts) traceHomeRow("SHORTS_VISIBLE_$previous->$hasShorts")
-                if (previous == null || previous == hasShorts || adaptiveRemeasurePosted) return
+                if (adaptiveRemeasurePosted ||
+                    ((previous == null || previous == hasShorts) && !shortsHeightClipped())) return
                 adaptiveRemeasurePosted = true
-                traceHomeRow("OLD_REMEASURE_REQUEST")
                 list.post {
                     adaptiveRemeasurePosted = false
-                    if (watchers[list] === this@Watcher && list.isAttachedToWindow) {
-                        traceHomeRow("OLD_REMEASURE_EXECUTE")
-                        list.requestLayout()
+                    if (watchers[list] !== this@Watcher || !list.isAttachedToWindow) return@post
+                    if (shortsHeightClipped()) {
+                        // Force holders to drop their cached constrained measurements
+                        // before their parent row measures again.
+                        for (i in 0 until list.childCount) {
+                            val child = list.getChildAt(i)
+                            val position = list.getChildAdapterPosition(child)
+                            val item = adapter.getItemOrNull(position)
+                            if (item?.apiName == "YouTube" && item.url.contains("/shorts/")) {
+                                child.forceLayout()
+                            }
+                        }
+                        list.forceLayout()
+                        (list.parent as? View)?.forceLayout()
+                        list.parent?.requestLayout()
                     }
+                    list.requestLayout()
                 }
             }
 
@@ -2176,7 +2055,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val title = view.findViewById<TextView>(R.id.imageText) ?: return
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
                 val state = modified[view] ?: CardState(title, card, image).also { modified[view] = it }
-                traceHomeCard("APPLY_BEFORE", view)
                 val expanded = !card.contains(title)
                 val lines = 4
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) title.setSingleLine(false)
@@ -2184,7 +2062,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (title.minLines != 1) title.minLines = 1
                 if (!video && !shorts) {
                     state.restoreSize()
-                    traceHomeCard("APPLY_RESTORE_OTHER", view)
                     return
                 }
 
@@ -2220,7 +2097,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         ?: card.width.takeIf { it > 0 }
                     if (titleWidth != null) state.setTitleWidth(titleWidth)
                 }
-                traceHomeCard("APPLY_AFTER", view)
             }
 
             private fun applyEpisode(view: View) {
