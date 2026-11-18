@@ -1042,12 +1042,15 @@ internal object ElevateActorInformation {
                     // Only these verified providers accept a TMDB ID in their load URL.
                     val providerClass = provider?.javaClass?.name
                     val route = when (providerClass) {
-                        "com.hsp1020.StremioC" -> provider?.mainUrl?.takeIf { it.isNotBlank() }
-                            ?.let { addon ->
-                                JSONObject().put("id", "tmdb:${credit.id}")
-                                    .put("type", if (movie) "movie" else "series")
-                                    .put("addonUrl", addon).toString()
-                            }
+                        "com.hsp1020.StremioC" -> {
+                            val addon = provider?.mainUrl?.takeIf { it.isNotBlank() }
+                            if (addon != null) JSONObject().put("id", "tmdb:${credit.id}")
+                                .put("type", if (movie) "movie" else "series")
+                                .put("addonUrl", addon).toString()
+                            else currentOrigin?.substringBefore("/meta/", "")
+                                ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                                ?.let { "$it/meta/${if (movie) "movie" else "series"}/tmdb%3A${credit.id}.json" }
+                        }
                         "com.megix.CineTmdbProvider",
                         "com.Phisher98.StreamPlay",
                         "com.phisher98.SuperStream",
