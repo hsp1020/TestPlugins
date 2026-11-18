@@ -159,14 +159,9 @@ internal fun stremioManifestCachePolicy(
     return StremioManifestCachePolicy(ttl, false)
 }
 
-private fun stremioMetadataDiagnosticBypass(): Boolean =
-    CloudStreamApp.context?.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
-        ?.getBoolean("METADATA_CACHE_BYPASS", false) == true
-
 internal fun <T> stremioCacheMemoryRead(
     cached: Pair<T, Long>?, ttlMs: Long
 ): Pair<T, Long>? {
-    if (stremioMetadataDiagnosticBypass()) return null
     if (cached == null) {
         return null
     }
@@ -212,7 +207,6 @@ private object MetadataDiskCache {
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
     suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
-        if (stremioMetadataDiagnosticBypass()) return@withContext null
         // Writers publish complete files using atomic rename. Reading a completed
         // file does not need the writer's global eviction/quota monitor.
         val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
@@ -262,7 +256,6 @@ private object MetadataDiskCache {
     }
 
     suspend fun write(kind: String, key: String, json: String, ttlMs: Long = TTL_MS) {
-        if (stremioMetadataDiagnosticBypass()) return
         if (kind == "meta" && ttlMs <= 0L) {
             return
         }
@@ -1305,10 +1298,7 @@ open class StremioC(
                 metadataTextFlights[url]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
-                        val response = customSession.get(url,
-                            headers = if (stremioMetadataDiagnosticBypass())
-                                mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
-                            else emptyMap())
+                        val response = customSession.get(url)
                         val text = response.text
                         text
                     } catch (error: Throwable) {
@@ -1347,8 +1337,7 @@ open class StremioC(
         }
 
         private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long, stamp: Long = System.currentTimeMillis()) {
-            if (stremioMetadataDiagnosticBypass()) return
-            val bytes = text.toByteArray(Charsets.UTF_8)
+                val bytes = text.toByteArray(Charsets.UTF_8)
             if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) {
                 return
             }
@@ -1373,8 +1362,7 @@ open class StremioC(
         }
 
         private fun cachedAddonMetaInRam(url: String): String? {
-            if (stremioMetadataDiagnosticBypass()) return null
-            val bytes = synchronized(addonMetaCache) {
+                    val bytes = synchronized(addonMetaCache) {
                 val held = addonMetaCache[url]
                 if (held != null && System.currentTimeMillis() - held.at < held.ttlMs) {
                     held.bytes
@@ -1510,9 +1498,8 @@ open class StremioC(
             }
             val storageKey = addonMetaStorageKey(url)
             // The catalog's own Metadata Sync switch controls its original meta cache.
-            val diagnosticBypass = stremioMetadataDiagnosticBypass()
-            val skipCache = diagnosticBypass || isMetadataSwapAllowed(url.substringBefore("/meta/"))
-            if (skipCache && !diagnosticBypass) {
+            val skipCache = isMetadataSwapAllowed(url.substringBefore("/meta/"))
+            if (skipCache) {
                 invalidateAddonMetaInRam(storageKey)
                 MetadataDiskCache.invalidate("meta", storageKey)
             }
@@ -1534,9 +1521,8 @@ open class StremioC(
                 addonMetaFlights[flightKey]
                     ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
-                        val response = customSession.get(url, headers = if (diagnosticBypass)
-                            mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
-                        else if (forceRefresh) mapOf("Cache-Control" to "no-cache") else emptyMap())
+                        val response = customSession.get(url, headers = if (forceRefresh)
+                            mapOf("Cache-Control" to "no-cache") else emptyMap())
                         if (response.code !in 200..299) {
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
@@ -2574,7 +2560,7 @@ open class StremioC(
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
         val startedAt = SystemClock.elapsedRealtime()
-        android.util.Log.i("MetaLoadTiming", "phase=LOAD_START key=${effectiveUrl.hashCode()} bypass=${stremioMetadataDiagnosticBypass()}")
+        android.util.Log.i("MetaLoadTiming", "phase=LOAD_START key=${effectiveUrl.hashCode()}")
         var outcome = "OK"
         return try {
             loadInternal(effectiveUrl, forceRefresh).also { result ->
@@ -3641,8 +3627,7 @@ open class StremioC(
                         (season to episode) to absolute else null
                 }.toMap()
         }.getOrNull() ?: emptyMap()
-        if (!stremioMetadataDiagnosticBypass())
-            kitsuImdbEpisodeCache[imdb] = episodes to System.currentTimeMillis()
+        kitsuImdbEpisodeCache[imdb] = episodes to System.currentTimeMillis()
         return episodes
     }
 
@@ -3714,7 +3699,7 @@ open class StremioC(
             return cachedAnime.first
         }
         if (traceId != null) traceSource(traceId, "AIO_CACHE_MISS", "query=$query")
-        val noMappingStamp = if (stremioMetadataDiagnosticBypass()) null else animeNoMappingCache[query]
+        val noMappingStamp = animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
