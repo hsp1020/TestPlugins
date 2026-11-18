@@ -96,6 +96,9 @@ data class LinkItem(
     val isProgressSyncEnabled: Boolean = true,
     val isStreamsAddonEnabled: Boolean = false,
     val isSubtitlesAddonEnabled: Boolean = false,
+    val isCineStreamIntegrationEnabled: Boolean? = null,
+    val isStreamPlayIntegrationEnabled: Boolean? = null,
+    val isVixSrcIntegrationEnabled: Boolean? = null,
     val enabled: Boolean = true
 )
 
@@ -124,6 +127,9 @@ object SettingsRepository {
                         isProgressSyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
                         isStreamsAddonEnabled = obj.optBoolean("isStreamsAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         isSubtitlesAddonEnabled = obj.optBoolean("isSubtitlesAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
+                        isCineStreamIntegrationEnabled = if (obj.has("isCineStreamIntegrationEnabled")) obj.optBoolean("isCineStreamIntegrationEnabled") else null,
+                        isStreamPlayIntegrationEnabled = if (obj.has("isStreamPlayIntegrationEnabled")) obj.optBoolean("isStreamPlayIntegrationEnabled") else null,
+                        isVixSrcIntegrationEnabled = if (obj.has("isVixSrcIntegrationEnabled")) obj.optBoolean("isVixSrcIntegrationEnabled") else null,
                         enabled = obj.optBoolean("enabled", true)
                     )
                 )
@@ -146,6 +152,9 @@ object SettingsRepository {
                 put("isHistorySyncEnabled", item.isProgressSyncEnabled)
                 put("isStreamsAddonEnabled", item.isStreamsAddonEnabled)
                 put("isSubtitlesAddonEnabled", item.isSubtitlesAddonEnabled)
+                item.isCineStreamIntegrationEnabled?.let { put("isCineStreamIntegrationEnabled", it) }
+                item.isStreamPlayIntegrationEnabled?.let { put("isStreamPlayIntegrationEnabled", it) }
+                item.isVixSrcIntegrationEnabled?.let { put("isVixSrcIntegrationEnabled", it) }
                 put("enabled", item.enabled)
             }
             arr.put(obj)
@@ -160,11 +169,6 @@ object SettingsRepository {
         return sharedPref.getBoolean(key, default)
     }
 
-    fun setIntegrationEnabled(sharedPref: SharedPreferences, key: String, state: Boolean) {
-        val editor = sharedPref.edit()
-        editor.putBoolean(key, state)
-        editor.commit()
-    }
 }
 
 class SettingsBottomFragment(
@@ -1875,9 +1879,9 @@ class SettingsBottomFragment(
         progressSync.isChecked = itemToEdit?.isProgressSyncEnabled ?: false
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
         if (!sources) {
-            setupToggle(dialogView, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
-            setupToggle(dialogView, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
-            setupToggle(dialogView, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
+            setupToggle(dialogView, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream", itemToEdit?.isCineStreamIntegrationEnabled)
+            setupToggle(dialogView, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay", itemToEdit?.isStreamPlayIntegrationEnabled)
+            setupToggle(dialogView, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc", itemToEdit?.isVixSrcIntegrationEnabled)
         }
         val close = simpleButton("Close")
         val save = simpleButton("Save")
@@ -1904,7 +1908,10 @@ class SettingsBottomFragment(
             )).copy(name = name.text.toString().trim().ifBlank { if (sources) "" else raw },
                 link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
                 isProgressSyncEnabled = progressSync.isChecked,
-                isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked)
+                isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked,
+                isCineStreamIntegrationEnabled = dialogView.findView<Switch>("switchCineStream").isChecked,
+                isStreamPlayIntegrationEnabled = dialogView.findView<Switch>("switchStreamPlay").isChecked,
+                isVixSrcIntegrationEnabled = dialogView.findView<Switch>("switchVixSrc").isChecked)
             val values = sourceDraft ?: catalogLinks()
             val index = values.indexOfFirst { it.id == changed.id }
             if (isEdit && index < 0) {
@@ -1915,12 +1922,6 @@ class SettingsBottomFragment(
             if (isEdit) values[index] = changed else values.add(changed)
             if (sourceDraft == null) {
                 SettingsRepository.saveLinks(sharedPref, values)
-                sharedPref.edit()
-                    .putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, dialogView.findView<Switch>("switchCineStream").isChecked)
-                    .putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, dialogView.findView<Switch>("switchStreamPlay").isChecked)
-                    .putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, dialogView.findView<Switch>("switchVixSrc").isChecked)
-                    .commit()
-                StremioC.invalidateSyncSettingsCache()
             }
             if (onLinksChanged != null) onLinksChanged(changed.id)
             else (rv?.adapter as? LinksAdapter)?.updateItem(changed)
@@ -2439,17 +2440,16 @@ class SettingsBottomFragment(
         if (isLayout(TV)) restoreRow(rv, 0) { (it as ViewGroup).getChildAt(2) }
     }
 
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
+    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String, currentState: Boolean?) {
         try {
             val switchView: CompoundButton = view.findView(viewId)
             switchView.isEnabled = isInstalled
             if (!isInstalled) {
                 switchView.isChecked = false
                 switchView.text = "$displayName Integration (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
                 switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
+                switchView.isChecked = currentState ?: SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")

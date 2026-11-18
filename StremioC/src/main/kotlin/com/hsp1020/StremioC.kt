@@ -1095,7 +1095,10 @@ open class StremioC(
             val streamSubtitleUrls: List<StreamSubtitleAddon>,
             val disabledCatalogUrls: Set<String> = emptySet(),
             val catalogEnabledIds: Map<Long, Boolean> = emptyMap(),
-            val catalogAddons: List<StreamSubtitleAddon> = emptyList()
+            val catalogAddons: List<StreamSubtitleAddon> = emptyList(),
+            val cineStreamIntegrationMap: Map<String, Boolean> = emptyMap(),
+            val streamPlayIntegrationMap: Map<String, Boolean> = emptyMap(),
+            val vixSrcIntegrationMap: Map<String, Boolean> = emptyMap()
         )
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
@@ -1159,6 +1162,9 @@ open class StremioC(
                 val catalogEnabled = mutableMapOf<String, Boolean>()
                 val catalogEnabledIds = mutableMapOf<Long, Boolean>()
                 val catalogAddons = mutableListOf<StreamSubtitleAddon>()
+                val cineIntegrationMap = mutableMapOf<String, Boolean>()
+                val streamPlayIntegrationMap = mutableMapOf<String, Boolean>()
+                val vixSrcIntegrationMap = mutableMapOf<String, Boolean>()
                 if (json != null) {
                     try {
                         val arr = org.json.JSONArray(json)
@@ -1182,6 +1188,12 @@ open class StremioC(
                                 val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                                 streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
                                 subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
+                                if (obj.has("isCineStreamIntegrationEnabled"))
+                                    cineIntegrationMap[link] = obj.optBoolean("isCineStreamIntegrationEnabled")
+                                if (obj.has("isStreamPlayIntegrationEnabled"))
+                                    streamPlayIntegrationMap[link] = obj.optBoolean("isStreamPlayIntegrationEnabled")
+                                if (obj.has("isVixSrcIntegrationEnabled"))
+                                    vixSrcIntegrationMap[link] = obj.optBoolean("isVixSrcIntegrationEnabled")
                             }
                         }
                     } catch (e: Exception) {
@@ -1200,7 +1212,8 @@ open class StremioC(
                 }.onFailure { error ->
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
                 val result = SyncSettings(syncUrl, map, progressMap, streamsMap, subtitlesMap, extraUrls,
-                    catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons)
+                    catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons,
+                    cineIntegrationMap, streamPlayIntegrationMap, vixSrcIntegrationMap)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -2983,9 +2996,10 @@ open class StremioC(
                 }) return
             if (seenStremioSubtitles.add(sub.url)) subtitleCallback(sub)
         }
+        val currentMainUrl = loadData.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
-            getIntegrationStremioAddons().forEach { addon ->
+            getIntegrationStremioAddons(currentMainUrl).forEach { addon ->
                 addon.name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
             }
         }
@@ -3012,7 +3026,6 @@ open class StremioC(
             }
         }
 
-        val currentMainUrl = loadData.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
         val cleanBaseUrl = currentMainUrl.fixSourceUrl().cleanBaseUrl()
         val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
 
@@ -3035,7 +3048,7 @@ open class StremioC(
         } else emptyList()
         val stremioAddons = (syncSettings.catalogAddons + syncSettings.streamSubtitleUrls)
             .distinctBy { stremioManifestUrl(it.url) }
-        val integrationAddons = getIntegrationStremioAddons()
+        val integrationAddons = getIntegrationStremioAddons(currentMainUrl)
         val cineAddons = integrationAddons.filter { it.fromCineStream }
         val streamPlayAddons = integrationAddons.filterNot { it.fromCineStream }
         fun rankSubtitle(sub: SubtitleFile, group: Int, addonUrl: String? = null) {
@@ -3555,7 +3568,7 @@ open class StremioC(
                 invokeStreamPlay(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(2), wrappedCallback, mappingDeferred, animeRouteDeferred, traceId)
             },
             {
-                if (isIntegrationEnabled("vixsrc_integration_enabled")) {
+                if (isCatalogIntegrationEnabled("vixsrc_integration_enabled", currentMainUrl)) {
                     VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, integratedSubtitleFrom(3), wrappedCallback)
                 }
             }
@@ -4402,11 +4415,25 @@ open class StremioC(
         return null
     }
 
-    private fun getIntegrationStremioAddons(): List<IntegrationStremioAddon> {
+    private fun isCatalogIntegrationEnabled(prefKey: String, catalogUrl: String?): Boolean {
+        val url = catalogUrl?.takeIf { it.isNotBlank() } ?: mainUrl
+        if (url.isBlank()) return isIntegrationEnabled(prefKey)
+        val settings = getSyncSettings()
+        val key = url.cleanBaseUrl().lowercase()
+        val state = when (prefKey) {
+            "cinestream_integration_enabled" -> settings.cineStreamIntegrationMap[key]
+            "streamplay_integration_enabled" -> settings.streamPlayIntegrationMap[key]
+            "vixsrc_integration_enabled" -> settings.vixSrcIntegrationMap[key]
+            else -> null
+        }
+        return state ?: isIntegrationEnabled(prefKey)
+    }
+
+    private fun getIntegrationStremioAddons(catalogUrl: String? = null): List<IntegrationStremioAddon> {
         val context = CloudStreamApp.context ?: return emptyList()
         val addons = linkedMapOf<Pair<String, Boolean>, IntegrationStremioAddon>()
 
-        if (isIntegrationEnabled("cinestream_integration_enabled") && getCineStreamProvider() != null) {
+        if (isCatalogIntegrationEnabled("cinestream_integration_enabled", catalogUrl) && getCineStreamProvider() != null) {
             getKey<String>("stremio_addons")
                 ?.lineSequence()
                 ?.filter { it.isNotBlank() }
@@ -4427,7 +4454,7 @@ open class StremioC(
                 }
         }
 
-        if (isIntegrationEnabled("streamplay_integration_enabled") && getStreamPlayProvider() != null) {
+        if (isCatalogIntegrationEnabled("streamplay_integration_enabled", catalogUrl) && getStreamPlayProvider() != null) {
             val raw = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                 .getString("streamplay_stremio_addon_saved_links", null)
 
@@ -4486,7 +4513,7 @@ open class StremioC(
         val encodedId = stremioId.urlEncode()
         traceSource(traceId, "STREMIO_TMDB_FALLBACK_ROUTE",
             "type=$targetType id=$stremioId source=S${loadData.season}:E${loadData.episode}")
-        val addons = getIntegrationStremioAddons()
+        val addons = getIntegrationStremioAddons(loadData.addonUrl)
         if (addons.isEmpty()) return
 
         supervisorScope {
@@ -4567,7 +4594,7 @@ open class StremioC(
         inlineSubtitleLoader: suspend (Map<String, Any?>) -> Unit,
         traceId: String
     ) {
-        if (!isIntegrationEnabled("cinestream_integration_enabled")) {
+        if (!isCatalogIntegrationEnabled("cinestream_integration_enabled", loadData.addonUrl)) {
             traceSource(traceId, "CINE_SKIP", "reason=DISABLED")
             return
         }
@@ -4686,7 +4713,7 @@ open class StremioC(
         animeRouteDeferred: Deferred<AnimeEpisodeRoute?>,
         traceId: String
     ) {
-        if (!isIntegrationEnabled("streamplay_integration_enabled")) {
+        if (!isCatalogIntegrationEnabled("streamplay_integration_enabled", loadData.addonUrl)) {
             traceSource(traceId, "STREAMPLAY_SKIP", "reason=DISABLED")
             return
         }
