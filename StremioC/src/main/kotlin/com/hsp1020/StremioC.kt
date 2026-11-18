@@ -2592,7 +2592,7 @@ open class StremioC(
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
                 return@coroutineScope run {
                     StremioC(base, name).load(metaUrl).also { response ->
-
+                        response.syncData["metadata_swap_allowed"] = "true"
                         for (source in listOf(metaUrl, response.url)) {
                             animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
                             episodeBasedByUrl[source]?.let { episodeBasedByUrl[url] = it }
@@ -2610,7 +2610,9 @@ open class StremioC(
             if (origin != null) {
                 val delegatedUrl = if (forceRefresh) url.toHttpUrlOrNull()?.newBuilder()
                     ?.addQueryParameter("__stremioc_refresh", "1")?.build()?.toString() ?: url else url
-                return@coroutineScope StremioC(origin, name).load(delegatedUrl)
+                return@coroutineScope StremioC(origin, name).load(delegatedUrl).also {
+                    it.syncData["metadata_swap_allowed"] = "true"
+                }
             }
         }
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
