@@ -1412,19 +1412,32 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                      localIds.isEmpty())) {
                     syncs.filterKeys { it in allowed }
                 } else if (mode == ElevateWatchHistoryRules.MediaMode.SINGLE_ANIME) {
-                    // An independent one-season provider page may expose an
-                    // original Kitsu/MAL ID that differs from the page-wide
-                    // syncData. Use that season-local identity, not season 1.
+                    // A lone S02+ episode is not proof that page/episode tracker IDs
+                    // belong to that season. Use the same verified route as Progress.
+                    val verifySeason = sn > 1 &&
+                        ElevateWatchHistoryRules.originalSeasonId(initialIds.original, true).isEmpty()
                     val mapped = try { withContext(Dispatchers.IO) {
-                        val original = listOf("mal", "anilist", "kitsu")
-                            .firstNotNullOfOrNull { prefix ->
-                                localIds[prefix]?.let { prefix to it }
+                        if (verifySeason) probeEpisode?.let { episode ->
+                            ElevateAnimeIdResolver.verifiedEpisode(
+                                effectiveIds.imdb, sn, episode, feature = "HISTORY"
+                            )?.mapping
+                        } else {
+                            val original = listOf("mal", "anilist", "kitsu")
+                                .firstNotNullOfOrNull { prefix ->
+                                    localIds[prefix]?.let { prefix to it }
+                                }
+                            original?.let { (prefix, value) ->
+                                ElevateAnimeIdResolver.resolveTrackingSource(prefix, value)
                             }
-                        original?.let { (prefix, value) ->
-                            ElevateAnimeIdResolver.resolveTrackingSource(prefix, value)
                         }
                     } } catch (e: CancellationException) { throw e }
                       catch (_: Exception) { null }
+                    if (verifySeason && mapped == null) {
+                        Log.i("ElevateSeasonAudit",
+                            "feature=HISTORY phase=BLOCK season=$sn reason=SEASON_ID_UNVERIFIED")
+                        teardownUi()
+                        return@launch
+                    }
                     val candidates = linkedMapOf<String, String>().apply {
                         mapped?.mal?.let { put("mal", it) }
                         mapped?.anilist?.let { put("anilist", it) }
@@ -1437,7 +1450,7 @@ internal class ElevateWatchHistoryHook(private val application: Application) :
                             put(key, if (key == "simkl")
                                 JSONObject().put("Simkl", value).toString() else value)
                         }
-                        localIds.forEach { (key, value) ->
+                        if (!verifySeason) localIds.forEach { (key, value) ->
                             putIfAbsent(key, if (key == "simkl")
                                 JSONObject().put("Simkl", value).toString() else value)
                         }

@@ -5764,6 +5764,13 @@ open class StremioC(
 
                     val isSpecial = video.seasonNumber == 0
                     val mapping = if (isSpecial) null else animeEpisodeSeasons[displaySeason]
+                    // A page-wide anime ID may belong to season 1, not this episode.
+                    val seasonSpecificIds = isAnime && displaySeason > 1 && originalAnimeId == null &&
+                        finalImdbId?.let { StremioC.IMDB_ID_REGEX.matches(it) } == true
+                    val trackerMapping = if (seasonSpecificIds) mapping?.takeIf { candidate ->
+                        listOf(candidate.imdbSeason, candidate.tvdbSeason,
+                            candidate.traktSeason, candidate.tmdbSeason).any { it == displaySeason }
+                    } else null
                     val tmdbSeason = mapping?.tmdbSeason
                     val directEpisode = mapping?.tmdbFromEpisode
                         ?.let { it + displayEpisode - 1 } ?: displayEpisode
@@ -5816,8 +5823,10 @@ open class StremioC(
                         provider, type, epImdbId, episodeTmdbMeta, 
                         displaySeason, displayEpisode, showTitle, tmdbId, 
                         isAnime, isBollywood, isAsian, isCartoon, 
-                        imdbSeason, imdbEpisode, originalTitle, englishTitle, 
-                        aniListId, malId, kitsuId,
+                        imdbSeason, imdbEpisode, originalTitle, englishTitle,
+                        if (seasonSpecificIds) trackerMapping?.aniListId else aniListId,
+                        if (seasonSpecificIds) trackerMapping?.malId else malId,
+                        if (seasonSpecificIds) trackerMapping?.kitsuId else kitsuId,
                         provider.mainUrl,
                         year, 
                         originalAnimeId,
