@@ -1321,8 +1321,13 @@ internal class ElevateMetadataSwap(private val application: Application) :
                         it == episode.season && it in 0..99 && episode.episode > 0
                     }
                 }.distinct()
-                val imdb = if (anime) ids.imdb?.takeIf { it.matches(Regex("tt[0-9]+")) }
-                    else null
+                val mappedImdb = if (source.source == "TMDB") directMapping?.takeIf {
+                    it.tmdb == null || it.tmdb == detailId
+                }?.imdb else null
+                val imdb = if (anime) (ids.imdb ?: mappedImdb
+                    ?: detailId?.takeIf { source.source == "TMDB" }
+                        ?.let { ElevateIdResolver.imdbForTmdb(it, false) })
+                    ?.takeIf { it.matches(Regex("tt[0-9]+")) } else null
                 // StremioC already exposes Season S as its sole named season.
                 val specialSeason = if (completeAio || 0 in seasons) 0 else
                     (nativeResponse as? TvSeriesLoadResponse)?.seasonNames
@@ -1376,6 +1381,18 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             } ?: ElevateAnimeIdResolver.resolveImdbSeason(imdb, season)
                         }
                     } else emptyMap()
+                // A paged S1 feed may carry absolute numbers without E1 in the page.
+                // Only trust them when AIOStreams identifies the exact range.
+                if (source.source == "TMDB" && !completeAio && anime &&
+                    seasons.size == 1 && seasons[0] == 1) {
+                    val ranges = initialSeasonMappings[1]?.tmdbRanges.orEmpty()
+                        .ifEmpty { directMapping?.tmdbRanges.orEmpty() }
+                    for (number in numbersBySeason[1].orEmpty()) {
+                        if (ranges.singleOrNull { number >= it.start &&
+                                (it.end == null || number <= it.end) } != null)
+                            absoluteByEpisode.putIfAbsent(1 to number, number)
+                    }
+                }
                 val seasonMappings = if (imdb != null && anime && regularSeasons.isNotEmpty()) {
                     // Keep verified AIO ranges. Retry only seasons without a reliable
                     // season/range claim, with bounded concurrent fallback lookups.
@@ -1454,6 +1471,25 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     } == true
                                 } == true
                         }.toSet() else emptySet()
+                    // The TMDB season counts select request candidates only, never
+                    // establish an episode match without existing date/Kitsu checks.
+                    val cumulativeFallback = if (source.source == "TMDB" &&
+                        !completeAio && anime && seasons.size == 1 && seasons[0] == 1 &&
+                        source.tmdbSeasons.count { it.key > 0 && it.value > 0 } > 1) {
+                        val numbers = numbersBySeason[1].orEmpty().distinct()
+                        val candidates = mutableMapOf<Int, Int>()
+                        var previous = 0
+                        for ((season, count) in source.tmdbSeasons.toSortedMap()) {
+                            if (season <= 0 || count <= 0) continue
+                            val end = previous + count
+                            if (season > 1) for (number in numbers) {
+                                if (number > previous && number <= end)
+                                    candidates[number] = season
+                            }
+                            previous = end
+                        }
+                        candidates
+                    } else emptyMap()
                     val requests = seasons.flatMap { sourceSeason ->
                         val isSpecial = sourceSeason == specialSeason
                         val titleSeason = ids.original?.substringBefore(':') in
@@ -1488,9 +1524,30 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             absolutes.all { n -> ranges.any { r ->
                                 n >= r.start && (r.end == null || n <= r.end)
                             } }
+                        val fallbackSeasons = if (!isSpecial && id == detailId &&
+                            sourceSeason == 1 && cumulativeFallback.isNotEmpty())
+                            numbersBySeason[sourceSeason].orEmpty().mapNotNull { number ->
+                                val absolute = absoluteByEpisode[sourceSeason to number] ?: number
+                                cumulativeFallback[number]?.takeIf {
+                                    ranges.none { range ->
+                                        absolute >= range.start &&
+                                            (range.end == null || absolute <= range.end)
+                                    }
+                                }
+                            }.distinct() else emptyList()
+                        val covered = fallbackSeasons.isNotEmpty() &&
+                            numbersBySeason[sourceSeason].orEmpty().all { number ->
+                                val absolute = absoluteByEpisode[sourceSeason to number] ?: number
+                                cumulativeFallback[number] != null || ranges.any { range ->
+                                    absolute >= range.start &&
+                                        (range.end == null || absolute <= range.end)
+                                }
+                            }
                         val targets = if (isSpecial) listOf(0)
-                            else if (fullyMapped && mappedSeasons.isNotEmpty())
-                                mappedSeasons else (mappedSeasons + actual).distinct()
+                            else if (fullyMapped && mappedSeasons.isNotEmpty() &&
+                                fallbackSeasons.isEmpty()) mappedSeasons
+                            else if (covered) (mappedSeasons + fallbackSeasons).distinct()
+                            else (mappedSeasons + actual + fallbackSeasons).distinct()
                         targets.filter { known.isEmpty() || it in known }.map {
                             Triple(sourceSeason, it, id)
                         }
