@@ -1176,8 +1176,7 @@ open class StremioC(
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
-                                progressMap[link] = obj.optBoolean("isProgressSyncEnabled",
-                                    obj.optBoolean("isHistorySyncEnabled", map[link] ?: true))
+                                progressMap[link] = obj.optBoolean("isProgressSyncEnabled", true)
                                 val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                                 streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
                                 subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
