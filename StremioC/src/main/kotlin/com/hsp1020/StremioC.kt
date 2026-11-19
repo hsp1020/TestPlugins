@@ -6107,6 +6107,11 @@ open class StremioC(
             val finalBackground = addonBackground ?: tmdbData?.fetchedBackdrop
             val finalName = originalName?.takeIf { it.isNotBlank() }
                 ?: tmdbData?.fetchedTitle?.takeIf { it.isNotBlank() } ?: "Unknown Content"
+            if (nonstandardType) android.util.Log.i("StremioQuickSearchTrace",
+                "phase=META_TITLE type=$finalType key=${provider.getUnifiedMetaUrl(finalType ?: "other", this@CatalogEntry.id ?: "").hashCode()}" +
+                    " metaName=${detailedEntry.name} metaTitle=${detailedEntry.title}" +
+                    " catalogName=${this@CatalogEntry.name} catalogTitle=${this@CatalogEntry.title}" +
+                    " tmdbTitle=${tmdbData?.fetchedTitle} resultTitle=$finalName")
             val finalAddonDescription = sequenceOf(detailedEntry.description, detailedEntry.overview,
                 this@CatalogEntry.description, this@CatalogEntry.overview)
                 .firstOrNull { !it.isNullOrBlank() }

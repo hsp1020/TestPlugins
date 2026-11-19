@@ -316,7 +316,12 @@ internal class RatingPlotImageHook(
 
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPreCreated(fm: FragmentManager, f: Fragment, savedInstanceState: Bundle?) {
-            if (f is QuickSearchFragment) scopeHomeSearch(f)
+            if (f is QuickSearchFragment) {
+                f.arguments?.getString(QuickSearchFragment.AUTOSEARCH_KEY)?.let { query ->
+                    android.util.Log.i("StremioQuickSearchTrace", "phase=QUICK_SEARCH_RECEIVED query=$query")
+                }
+                scopeHomeSearch(f)
+            }
         }
 
         override fun onFragmentViewCreated(
@@ -472,6 +477,18 @@ internal class RatingPlotImageHook(
             model.page.observe(fragment.viewLifecycleOwner) { value ->
                 val page = (value as? Resource.Success<ResultData>)?.value ?: return@observe
                 if (isNative) StremioC.latestRecommendationFor(page.url)?.let(::applyRecommendation)
+                if (isNative) {
+                    val type = page.url.substringAfter("/meta/", "").substringBefore('/')
+                    if (type.isNotBlank() && type != "movie" && type != "series") root.post {
+                        if (fragment.isAdded && fragment.view === root) {
+                            val shown = root.findViewById<TextView>(R.id.result_title)?.text?.toString()
+                            android.util.Log.i("StremioQuickSearchTrace",
+                                "phase=DETAIL_RENDER type=$type key=${page.url.hashCode()}" +
+                                    " argumentName=${fragment.arguments?.getString("name")}" +
+                                    " pageTitle=${page.title} displayedTitle=$shown")
+                        }
+                    }
+                }
                 refreshGenres(page)
             }
             if (isNative) {

@@ -712,8 +712,15 @@ private class NativeDetailSearchHook(private val app: Application) : Application
             root.resources.getIdentifier("result_title", "id", root.context.packageName)
                 .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
         private val click = View.OnClickListener {
-            val title = titleView?.text?.toString()?.trim().orEmpty()
-                .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }
+            val shown = titleView?.text?.toString()?.trim().orEmpty()
+            val argument = fragment.arguments?.getString("name")?.trim().orEmpty()
+            val title = shown.ifEmpty { argument }
+            val type = fragment.arguments?.getString("url")
+                ?.substringAfter("/meta/", "")?.substringBefore('/')
+            if (!type.isNullOrBlank() && type != "movie" && type != "series")
+                android.util.Log.i("StremioQuickSearchTrace",
+                    "phase=ELEVATE_SEARCH_CLICK type=$type displayedTitle=$shown" +
+                        " argumentName=$argument query=$title")
             openSearch(fragment, root, title)
         }
         private val tree = root.viewTreeObserver
