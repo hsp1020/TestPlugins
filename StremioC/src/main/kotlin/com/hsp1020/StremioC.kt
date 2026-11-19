@@ -6105,8 +6105,10 @@ open class StremioC(
             if (finalPoster == null) finalPoster = tmdbData?.fetchedPoster
             if (finalGenre.isNullOrEmpty()) finalGenre = tmdbData?.fetchedGenres
             val finalBackground = addonBackground ?: tmdbData?.fetchedBackdrop
-            val finalName = originalName?.takeIf { it.isNotBlank() }
-                ?: tmdbData?.fetchedTitle?.takeIf { it.isNotBlank() } ?: "Unknown Content"
+            val finalName = (if (nonstandardType) tmdbData?.fetchedTitle else originalName)
+                ?.takeIf { it.isNotBlank() }
+                ?: (if (nonstandardType) originalName else tmdbData?.fetchedTitle)
+                    ?.takeIf { it.isNotBlank() } ?: "Unknown Content"
             if (nonstandardType) android.util.Log.i("StremioQuickSearchTrace",
                 "phase=META_TITLE type=$finalType key=${provider.getUnifiedMetaUrl(finalType ?: "other", this@CatalogEntry.id ?: "").hashCode()}" +
                     " metaName=${detailedEntry.name} metaTitle=${detailedEntry.title}" +
