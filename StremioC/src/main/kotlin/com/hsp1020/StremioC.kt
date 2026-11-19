@@ -6308,7 +6308,7 @@ open class StremioC(
                     .groupBy({ it.first }, { it.second })
                     .mapValues { (_, videos) -> videos.size }
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
-                val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
+                val resolvedMovieId = if (finalType != "movie" && finalType != "series" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
                     movieId
