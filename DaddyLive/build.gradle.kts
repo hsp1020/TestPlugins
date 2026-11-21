@@ -26,3 +26,8 @@ cloudstream {
 //dependencies{
 //    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 //}
+
+dependencies {
+    // Per-frame document-start instrumentation for DaddyLive browser response diagnostics.
+    implementation("androidx.webkit:webkit:1.14.0")
+}

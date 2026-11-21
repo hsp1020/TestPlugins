@@ -12,6 +12,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
@@ -51,6 +53,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -1075,6 +1078,101 @@ class DaddyLiveExtractor : ExtractorApi() {
 
     private object DaddyLiveDembed {
         private const val EMBED_ORIGIN = "https://dembed.st"
+
+        // Document-start injection executes inside dembed.st's iframe, before daddy.min.js.
+        // Copy only token/manifest/ticket responses; never consume or replace the originals.
+        private val responseProbe = """
+            (function() {
+              if (window.__daddyResponseProbe) return;
+              window.__daddyResponseProbe = true;
+              var bridge = window.DaddyResponseTrace;
+              function emit(x) { try { if (bridge) bridge.postMessage(JSON.stringify(x)); } catch (_) {} }
+              function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
+              function kindOf(raw, method) {
+                var p = pathOf(raw);
+                if (p === "/api/playlist-token") return "token";
+                if (/\.m3u8$/i.test(p) && p.indexOf("/premium") !== -1) return "manifest";
+                if (p.indexOf("/premiumtv/") === 0 && String(method).toUpperCase() === "POST") return "ticket";
+                return "";
+              }
+              function observed(kind, method, raw, status, type, response, elapsed, headers) {
+                var max = kind === "manifest" ? 262144 : 32768;
+                var x = {stage:"response", kind:kind, method:String(method), url:String(raw),
+                  http:status, responseType:String(type || ""), elapsedMs:Math.round(elapsed),
+                  headers:String(headers || ""), length:response ? response.length : 0,
+                  truncated:!!(response && response.length > max),
+                  body:typeof response === "string" ? response.slice(0, max) : ""};
+                emit(x);
+              }
+              function observedError(kind, method, raw, stage, err) {
+                emit({stage:stage, kind:kind, method:String(method), url:String(raw),
+                  error:String(err && err.name || "unavailable")});
+              }
+              function headerNames(h) {
+                try { var keys=[]; h.forEach(function(v,k){keys.push(k)}); return keys.join(","); }
+                catch (_) { return ""; }
+              }
+              if (typeof window.fetch === "function") {
+                var nativeFetch = window.fetch;
+                window.fetch = function(input, init) {
+                  var url = typeof input === "string" ? input : input && input.url || "";
+                  var method = init && init.method || input && input.method || "GET";
+                  var kind = kindOf(url, method);
+                  var start = performance.now();
+                  var promise = nativeFetch.apply(this, arguments);
+                  if (kind) Promise.resolve(promise).then(function(r) {
+                    var ms = performance.now()-start;
+                    try {
+                      var copy = r.clone();
+                      copy.text().then(function(body) {
+                        observed(kind,method,r.url || url,r.status,r.type,body,ms,headerNames(r.headers));
+                      },function(e){ observedError(kind,method,url,"read_error",e); });
+                    } catch(e){ observedError(kind,method,url,"clone_error",e); }
+                  },function(e){ observedError(kind,method,url,"network_error",e); });
+                  return promise;
+                };
+              } else emit({stage:"install_error",error:"fetch_missing"});
+              if (window.XMLHttpRequest && XMLHttpRequest.prototype) {
+                var open = XMLHttpRequest.prototype.open;
+                var send = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open = function(method,url) {
+                  this.__daddyProbe = {kind:kindOf(url,method),url:String(url),method:String(method)};
+                  return open.apply(this,arguments);
+                };
+                XMLHttpRequest.prototype.send = function() {
+                  var self=this, entry=this.__daddyProbe;
+                  if (entry && entry.kind) {
+                    var start=performance.now();
+                    this.addEventListener("loadend",function() {
+                      var body="",readError="";
+                      try {
+                        if (self.responseType === "" || self.responseType === "text") body=self.responseText;
+                        else if (self.responseType === "arraybuffer" && self.response) {
+                          var bytes=new Uint8Array(self.response);
+                          if (bytes.byteLength <= 262144) body=new TextDecoder().decode(bytes);
+                          else readError="arraybuffer_too_large";
+                        } else readError="unsupported_response_type_"+self.responseType;
+                      } catch(e){ readError=String(e && e.name || "read_failed"); }
+                      if (readError) observedError(entry.kind,entry.method,entry.url,"read_error",readError);
+                      var h="";try{h=self.getAllResponseHeaders().split("\n").map(function(v){return v.split(":")[0]}).join(",");}catch(_){}
+                      observed(entry.kind,entry.method,self.responseURL || entry.url,
+                        self.status,self.responseType,body,performance.now()-start,h);
+                    });
+                  }
+                  return send.apply(this,arguments);
+                };
+              } else emit({stage:"install_error",error:"xhr_missing"});
+              window.addEventListener("error",function(e) {
+                emit({stage:"js_error",error:String(e.message || "script_error").slice(0,180),
+                    source:String(e.filename || ""),line:e.lineno || 0});
+              });
+              window.addEventListener("unhandledrejection",function(e) {
+                var r=e.reason;
+                emit({stage:"promise_error",error:String(r && (r.message || r.name) || "rejection").slice(0,180)});
+              });
+              emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
+            })();
+        """.trimIndent()
         private val main = Handler(Looper.getMainLooper())
         private val sessions = ConcurrentHashMap<String, Session>()
         private val io = CoroutineScope(Dispatchers.IO)
@@ -1098,6 +1196,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var authHttpError: Int? = null
             @Volatile var manifestHttpError: Int? = null
             @Volatile var authRequestCount = 0
+            @Volatile var probeAvailable = false
+            @Volatile var probeInstalled = false
+            @Volatile var browserManifestBody: String? = null
+            @Volatile var browserManifestUrl: String = ""
+            @Volatile var browserTokenHttp = -1
+            @Volatile var browserTicketHttp = -1
+            val browserManifestReady = CompletableDeferred<Boolean>()
             val headers: Map<String, String>
                 get() = mutableMapOf(
                     "Origin" to EMBED_ORIGIN,
@@ -1121,6 +1226,103 @@ class DaddyLiveExtractor : ExtractorApi() {
                     }
                 }
 
+            private fun responseState(kind: String, status: Int, address: String, body: String, truncated: Boolean) {
+                val code = if (status in 200..299) "OK" else if (status == 0) "NETWORK_OR_CORS" else "HTTP_FAIL"
+                val reason = if (status in 200..299) "none" else Trace.bodyReason(body)
+                Trace.event("BROWSER_RESPONSE", code,
+                    "sid=${id.take(8)} kind=$kind http=$status target=${Trace.target(address)} " +
+                        "bodyChars=${body.length} truncated=$truncated reason=$reason")
+                when (kind) {
+                    "ticket" -> {
+                        browserTicketHttp = status
+                        Trace.event("AUTH_TICKET", code, "sid=${id.take(8)} http=$status reason=$reason")
+                    }
+                    "token" -> {
+                        browserTokenHttp = status
+                        authHttpError = status.takeIf { it !in 200..299 }
+                        Trace.event("AUTH_RESPONSE", if (status in 200..299) "BROWSER_HTTP_OK" else "BROWSER_HTTP_FAIL",
+                            "sid=${id.take(8)} http=$status chars=${body.length} " +
+                                "reason=$reason truncated=$truncated")
+                        if (status in 200..299 && !truncated) onToken(body.toByteArray(Charsets.UTF_8))
+                    }
+                    "manifest" -> {
+                        manifestHttpError = status.takeIf { it !in 200..299 }
+                        val decoded = body.trimStart().startsWith("#EXTM3U")
+                        val signed = runCatching { !Uri.parse(address).getQueryParameter("t").isNullOrBlank() }
+                            .getOrDefault(false)
+                        Trace.event("HLS_BROWSER", code,
+                            "sid=${id.take(8)} http=$status signed=$signed extm3u=$decoded " +
+                                "chars=${body.length} truncated=$truncated reason=$reason")
+                        if (status in 200..299 && !truncated && body.isNotEmpty()) {
+                            if (browserManifestBody == null || signed ||
+                                Uri.parse(browserManifestUrl).getQueryParameter("t").isNullOrBlank()) {
+                                browserManifestBody = body
+                                browserManifestUrl = address
+                                if (!browserManifestReady.isCompleted) browserManifestReady.complete(true)
+                            }
+                        }
+                    }
+                }
+            }
+
+            fun onBrowserMessage(raw: String) {
+                if (raw.length > 300000) {
+                    Trace.event("RESPONSE_BRIDGE", "REJECT", "sid=${id.take(8)} reason=message_over_limit bytes=${raw.length}")
+                    return
+                }
+                val message = runCatching { JSONObject(raw) }.getOrNull()
+                if (message == null) {
+                    Trace.event("RESPONSE_BRIDGE", "ERROR", "sid=${id.take(8)} reason=invalid_json")
+                    return
+                }
+                val stage = message.optString("stage")
+                when (stage) {
+                    "installed" -> {
+                        probeInstalled = true
+                        Trace.event("RESPONSE_BRIDGE", "INSTALLED", "sid=${id.take(8)} type=${message.optString("kind")}")
+                    }
+                    "response" -> {
+                        val kind = message.optString("kind")
+                        if (kind !in setOf("token", "manifest", "ticket")) return
+                        val target = message.optString("url")
+                        val urlPath = runCatching { URL(target).path }.getOrDefault("")
+                        if (kind == "token" && urlPath != "/api/playlist-token" ||
+                            kind == "manifest" && !urlPath.endsWith(".m3u8", true) ||
+                            kind == "ticket" && !urlPath.startsWith("/premiumtv/")) {
+                            Trace.event("RESPONSE_BRIDGE", "REJECT",
+                                "sid=${id.take(8)} kind=$kind reason=wrong_endpoint")
+                            return
+                        }
+                        val body = message.optString("body")
+                        val status = message.optInt("http", -1)
+                        val truncated = message.optBoolean("truncated", false)
+                        val method = message.optString("method")
+                        Trace.event("RESPONSE_BRIDGE", "RECEIVED",
+                            "sid=${id.take(8)} kind=$kind method=$method http=$status " +
+                                "transport=${message.optString("responseType")} elapsedMs=${message.optLong("elapsedMs")} " +
+                                "reportedChars=${message.optInt("length")} truncated=$truncated " +
+                                "headers=${message.optString("headers").take(180)}")
+                        responseState(kind, status, target, body, truncated)
+                    }
+                    "network_error", "read_error", "clone_error", "install_error", "js_error", "promise_error" -> {
+                        val error = message.optString("error").lowercase()
+                        val category = when {
+                            "turnstile" in error || "captcha" in error -> "turnstile"
+                            "cors" in error -> "cors"
+                            "security" in error -> "security"
+                            "fetch" in error || "network" in error -> "network"
+                            "timeout" in error -> "timeout"
+                            "invalid" in error -> "invalid"
+                            else -> "other"
+                        }
+                        Trace.event("RESPONSE_BRIDGE", "ERROR",
+                            "sid=${id.take(8)} stage=$stage kind=${message.optString("kind")} " +
+                                "category=$category errorClass=${message.optString("error").substringBefore(':').take(50)} " +
+                                "source=${Trace.target(message.optString("source"))} line=${message.optInt("line")}")
+                    }
+                }
+            }
+
             fun onToken(response: ByteArray) {
                 val data = runCatching { JSONObject(String(response, Charsets.UTF_8)) }.getOrNull()
                 if (data == null) {
@@ -1137,7 +1339,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val current = data.optString("token").ifBlank { data.optString("t") }
                 if (current.isNotBlank()) token = current
                 Trace.event("AUTH_TOKEN", if (current.isNotBlank() || key != null) "ACQUIRED" else "MISSING",
-                    "sid=${id.take(8)} ticketFieldPresent=${current.isNotBlank()} keyBytes=${key?.size ?: 0} responseBytes=${response.size}")
+                    "sid=${id.take(8)} ticketFieldPresent=${current.isNotBlank()} keyBytes=${key?.size ?: 0} " +
+                        "responseBytes=${response.size} fieldNames=${data.keys().asSequence().toList().sorted().joinToString(",")}")
             }
 
             fun captureManifest(request: WebResourceRequest) {
@@ -1246,6 +1449,34 @@ class DaddyLiveExtractor : ExtractorApi() {
                             view.settings.domStorageEnabled = true
                             view.settings.mediaPlaybackRequiresUserGesture = false
                             CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+                            val origins = setOf(EMBED_ORIGIN)
+                            session.probeAvailable = WebViewFeature.isFeatureSupported(
+                                WebViewFeature.WEB_MESSAGE_LISTENER
+                            ) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+                            if (session.probeAvailable) {
+                                try {
+                                    WebViewCompat.addWebMessageListener(
+                                        view, "DaddyResponseTrace", origins,
+                                        WebViewCompat.WebMessageListener { _, message, sourceOrigin, _, _ ->
+                                            if (sourceOrigin.scheme == "https" && sourceOrigin.host == "dembed.st") {
+                                                session.onBrowserMessage(message.data.orEmpty())
+                                            }
+                                        }
+                                    )
+                                    WebViewCompat.addDocumentStartJavaScript(view, responseProbe, origins)
+                                    Trace.event("RESPONSE_BRIDGE", "READY",
+                                        "sid=${session.id.take(8)} origin=$EMBED_ORIGIN " +
+                                            "webview=${WebViewCompat.getCurrentWebViewPackage(context)?.versionName ?: "unknown"}")
+                                } catch (e: Exception) {
+                                    session.probeAvailable = false
+                                    Trace.event("RESPONSE_BRIDGE", "INSTALL_FAILED",
+                                        "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
+                                }
+                            } else {
+                                Trace.event("RESPONSE_BRIDGE", "UNSUPPORTED",
+                                    "sid=${session.id.take(8)} documentStart=${WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)} " +
+                                        "webMessage=${WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)}")
+                            }
                             view.webChromeClient = object : WebChromeClient() {
                                 override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
                                     val raw = message?.message().orEmpty()
@@ -1271,7 +1502,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                             view.webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
-                                        "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())}")
+                                        "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())} " +
+                                        "probeAvailable=${session.probeAvailable} installed=${session.probeInstalled}")
                                 }
 
                                 override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -1387,7 +1619,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                 session.close()
                 return null
             }
-            val actual = session.url.ifBlank { captured }
+            if (session.probeAvailable) {
+                val capturedByBrowser = withTimeoutOrNull(if (session.probeInstalled) 6500L else 3000L) {
+                    session.browserManifestReady.await()
+                } == true
+                Trace.event("RESPONSE_BRIDGE",
+                    if (capturedByBrowser) "MANIFEST_CAPTURED" else "MANIFEST_UNAVAILABLE",
+                    "sid=${session.id.take(8)} installed=${session.probeInstalled} " +
+                        "browserTokenHttp=${session.browserTokenHttp} ticketHttp=${session.browserTicketHttp} " +
+                        "browserManifestHttp=${session.manifestHttpError ?: -1} " +
+                        "reason=${if (capturedByBrowser) "browser_response_body_ready" else if (!session.probeInstalled) "probe_not_installed" else "no_successful_readable_manifest"}")
+            } else {
+                Trace.event("RESPONSE_BRIDGE", "SKIPPED",
+                    "sid=${session.id.take(8)} reason=document_start_or_web_message_not_available")
+            }
+            val actual = session.browserManifestUrl.ifBlank { session.url.ifBlank { captured } }
             val signed = !Uri.parse(actual).getQueryParameter("t").isNullOrBlank()
             Trace.event("PLAYER_URL", "FOUND",
                 "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
@@ -1409,29 +1655,42 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             return try {
                 val requestHeaders = session.headers
-                Trace.event("HLS_FETCH", "CLIENT_REQUEST",
-                    "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
-                        "headerNames=${requestHeaders.keys.sorted().joinToString(",")} " +
-                        "cookiePresent=${requestHeaders.keys.any { it.equals("cookie", true) }}")
-                val response = app.get(actual, headers = requestHeaders, timeout = 5)
-                val errorReason = if (!response.isSuccessful) Trace.bodyReason(response.text) else "none"
-                Trace.event("HLS_FETCH", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
-                    "sid=${session.id.take(8)} target=${Trace.target(actual)} http=${response.code} " +
-                        "reason=$errorReason browserHlsHttpError=${session.manifestHttpError ?: -1} " +
-                        "browserAuthHttpError=${session.authHttpError ?: -1} " +
-                        "headerNames=${response.headers.names().sorted().joinToString(",")} " +
-                        "contentType=${response.headers["Content-Type"].orEmpty().substringBefore(';')}")
-                if (!response.isSuccessful) {
+                val browserBody = session.browserManifestBody
+                val response = if (browserBody == null) {
+                    Trace.event("HLS_FETCH", "CLIENT_REQUEST",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
+                            "headerNames=${requestHeaders.keys.sorted().joinToString(",")} " +
+                            "cookiePresent=${requestHeaders.keys.any { it.equals("cookie", true) }}")
+                    app.get(actual, headers = requestHeaders, timeout = 5)
+                } else null
+                if (response != null) {
+                    Trace.event("HLS_FETCH", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} http=${response.code} " +
+                            "reason=${if (response.isSuccessful) "none" else Trace.bodyReason(response.text)} " +
+                            "browserHlsHttpError=${session.manifestHttpError ?: -1} " +
+                            "browserAuthHttpError=${session.authHttpError ?: -1} browserTokenHttp=${session.browserTokenHttp} " +
+                            "headerNames=${response.headers.names().sorted().joinToString(",")} " +
+                            "contentType=${response.headers["Content-Type"].orEmpty().substringBefore(';')}")
+                } else {
+                    Trace.event("HLS_FETCH", "BROWSER_REUSED",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} " +
+                            "chars=${browserBody?.length ?: 0} reason=original_webview_http_200_no_replay")
+                }
+                val body = browserBody ?: response?.takeIf { it.isSuccessful }?.text
+                if (body == null) {
+                    Trace.event("HLS_DECODE", "NOT_REACHED",
+                        "sid=${session.id.take(8)} reason=manifest_http_failed " +
+                            "browserStatus=${session.manifestHttpError ?: -1} clientStatus=${response?.code ?: -1}")
                     session.close()
                     null
                 } else {
-                    val playlist = decodePlaylist(response.text, session.key)
+                    val playlist = decodePlaylist(body, session.key)
                     if (playlist == null || !playlist.trimStart().startsWith("#EXTM3U")) {
                         Trace.event("HLS_DECODE", "FAILED", "sid=${session.id.take(8)} keyPresent=${session.key != null} reason=invalid_playlist")
                         session.close()
                         null
                     } else {
-                        Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!response.text.trimStart().startsWith("#EXTM3U")}")
+                        Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!body.trimStart().startsWith("#EXTM3U")}")
                         if (!signed && session.key == null && directCompatible(playlist, actual, session.headers)) {
                             Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                             // Probe a media segment before bypassing the wrapper decoder.
