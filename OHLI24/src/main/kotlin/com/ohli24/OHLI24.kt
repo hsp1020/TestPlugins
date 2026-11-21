@@ -1,6 +1,17 @@
 package com.ohli24
 
 import android.util.Log
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.os.Handler
+import android.os.Looper
+import com.lagradost.cloudstream3.CloudStreamApp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import org.json.JSONTokener
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -323,6 +334,97 @@ class OHLI24 : MainAPI() {
         return runCatching { URLDecoder.decode(encoded, "UTF-8").trim() }.getOrDefault(encoded.trim())
     }
 
+    @android.annotation.SuppressLint("SetJavaScriptEnabled")
+    private suspend fun findRenderedVideoFrame(url: String, trace: Long): String? =
+        withContext(Dispatchers.Main) {
+            val context = CloudStreamApp.context ?: return@withContext null
+            suspendCancellableCoroutine { cont ->
+                val handler = Handler(Looper.getMainLooper())
+                var webView: WebView? = null
+                var completed = false
+                var poll: Runnable? = null
+                var timeout: Runnable? = null
+
+                fun complete(result: String?) {
+                    if (completed) return
+                    completed = true
+                    poll?.let(handler::removeCallbacks)
+                    timeout?.let(handler::removeCallbacks)
+                    webView?.stopLoading()
+                    webView?.destroy()
+                    webView = null
+                    if (cont.isActive) cont.resume(result)
+                }
+
+                fun isVideoFrame(candidate: String): Boolean = runCatching {
+                    val uri = URI(candidate)
+                    (uri.host.equals("michealcdn.com", true) || uri.host.equals("cdndania.com", true)) &&
+                        uri.path.orEmpty().startsWith("/video/")
+                }.getOrDefault(false)
+
+                try {
+                    val view = WebView(context)
+                    webView = view
+                    view.settings.javaScriptEnabled = true
+                    view.settings.domStorageEnabled = true
+                    view.settings.userAgentString = view.settings.userAgentString
+                        .replace("Version/4.0 ", "").replace("; wv", "")
+                    poll = object : Runnable {
+                        override fun run() {
+                            if (completed) return
+                            view.evaluateJavascript(
+                                """(function(){
+                                    var frame = document.querySelector('iframe[data-player-frame], iframe[src*="michealcdn.com/video/"], iframe[src*="cdndania.com/video/"]');
+                                    return frame ? (frame.src || frame.getAttribute('src') || '') : '';
+                                })()"""
+                            ) { raw ->
+                                if (completed) return@evaluateJavascript
+                                val candidate = runCatching {
+                                    JSONTokener(raw).nextValue() as? String
+                                }.getOrNull().orEmpty()
+                                if (isVideoFrame(candidate)) {
+                                    Log.i("OHLI24Trace", "phase=WEBVIEW_DOM_FOUND trace=" + trace +
+                                        " frame=" + ohliSafeUrl(candidate))
+                                    complete(candidate)
+                                } else handler.postDelayed(this, 350L)
+                            }
+                        }
+                    }
+                    view.webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                            if (!completed) {
+                                Log.i("OHLI24Trace", "phase=WEBVIEW_DOM_READY trace=" + trace)
+                                poll?.let { handler.removeCallbacks(it); handler.post(it) }
+                            }
+                        }
+                        override fun shouldInterceptRequest(
+                            view: WebView?, request: WebResourceRequest?
+                        ): android.webkit.WebResourceResponse? {
+                            val candidate = request?.url?.toString().orEmpty()
+                            if (isVideoFrame(candidate)) {
+                                handler.post {
+                                    Log.i("OHLI24Trace", "phase=WEBVIEW_REQUEST_FOUND trace=" + trace +
+                                        " frame=" + ohliSafeUrl(candidate))
+                                    complete(candidate)
+                                }
+                            }
+                            return null
+                        }
+                    }
+                    timeout = Runnable {
+                        Log.w("OHLI24Trace", "phase=WEBVIEW_DOM_TIMEOUT trace=" + trace)
+                        complete(null)
+                    }
+                    timeout?.let { handler.postDelayed(it, 10000L) }
+                    view.loadUrl(url, headers)
+                } catch (error: Exception) {
+                    Log.w("OHLI24Trace", "phase=WEBVIEW_DOM_EXCEPTION trace=" + trace, error)
+                    complete(null)
+                }
+                cont.invokeOnCancellation { handler.post { complete(null) } }
+            }
+        }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -359,10 +461,7 @@ class OHLI24 : MainAPI() {
             if (player.isBlank()) {
                 Log.i("OHLI24Trace", "phase=WEBVIEW_IFRAME_START trace=" + trace)
                 player = try {
-                    WebViewResolver(
-                        Regex("""https?://(?:cdndania|michealcdn)\.com/video/[^\s]+""", RegexOption.IGNORE_CASE),
-                        userAgent = null, useOkhttp = false, timeout = 12000L
-                    ).resolveUsingWebView(data, headers = headers).first?.url?.toString().orEmpty()
+                    findRenderedVideoFrame(data, trace).orEmpty()
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     Log.w("OHLI24Trace", "phase=WEBVIEW_IFRAME_ERROR trace=" + trace, e)
