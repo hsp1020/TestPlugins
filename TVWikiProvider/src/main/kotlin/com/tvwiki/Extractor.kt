@@ -19,6 +19,8 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -73,9 +75,6 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        val timingStart = android.os.SystemClock.elapsedRealtime()
-        fun timing(phase: String, detail: String = "") = android.util.Log.d("TVWikiTiming", "phase=$phase elapsedMs=${android.os.SystemClock.elapsedRealtime() - timingStart} $detail")
-        timing("START")
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = if (referer.isNullOrEmpty() || (referer.contains("tvwiki") && !referer.contains(TVWiki.currentMainUrl))) {
             TVWiki.currentMainUrl + "/"
@@ -86,7 +85,6 @@ class BunnyPoorCdn : ExtractorApi() {
         if (!cleanUrl.contains("/v/")) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
-                timing("IFRAME_HTTP", "status=${refRes.code}")
                 val iframeUrl = refRes.document.selectFirst("iframe#view_iframe")?.attr("src")
                     ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
                 if (iframeUrl != null) cleanUrl = iframeUrl
@@ -102,9 +100,7 @@ class BunnyPoorCdn : ExtractorApi() {
         val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
 
         if (!cleanUrl.contains("/c.html")) {
-            timing("WEBVIEW_START")
             val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
-            timing("WEBVIEW_END", "captured=${webViewResult != null} keys=${currentSessionKeys.size}")
             if (webViewResult != null) capturedUrl = webViewResult
         }
 
@@ -122,17 +118,13 @@ class BunnyPoorCdn : ExtractorApi() {
 
             try {
                 var requestUrl = capturedUrl!!.substringBefore("#")
-                timing("PLAYLIST_FETCH_START")
                 var response = app.get(requestUrl, headers = headers)
-                timing("PLAYLIST_FETCH_END", "status=${response.code}")
                 var content = response.text.trim()
 
                 if (!content.startsWith("#EXTM3U")) {
                     Regex("""https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?""").find(content)?.let {
                         requestUrl = it.value
-                        timing("PLAYLIST_EXTRA_FETCH_START")
                         content = app.get(requestUrl, headers = headers).text.trim()
-                        timing("PLAYLIST_EXTRA_FETCH_END")
                     }
                 }
                 if (!content.startsWith("#EXTM3U")) {
@@ -149,7 +141,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
 
                 val playlistLines = content.lines()
-                timing("PLAYLIST_PARSED", "bytes=${content.length} lines=${playlistLines.size}")
                 val isKey7 = playlistLines.any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
 
                 if (isKey7) {
@@ -203,29 +194,24 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                     }
                     
-                    timing("PROXY_SESSION_START", "capturedKeys=${currentSessionKeys.size}")
                     newProxy.addSession(sessionId, sb.toString(), currentSessionKeys, headers,
                         parsedIv, keyUrlForSession, testSegmentForSession)
                     
                     val finalUrl = "${prefix}/$videoId/playlist.m3u8"
                     
-                    timing("PROXY_LINK_READY")
                     callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = "$playerOrigin/"; this.headers = headers
                     })
                     return true
                 } else {
-                    timing("DIRECT_LINK_READY")
                     callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                         this.referer = "$playerOrigin/"; this.headers = headers
                     })
                     return true
                 }
             } catch (e: Exception) {
-                timing("ERROR", "type=${e.javaClass.simpleName}")
             }
         }
-        timing("NO_LINK")
         return false
     }
 
@@ -334,7 +320,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                         cont.resume(detectedCUrl)
                                     }
-                                }, 5000)
+                                }, 500)
                             }
                         }
                         return super.shouldInterceptRequest(view, request)
@@ -465,51 +451,44 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private suspend fun verifyMultipleKeys(session: Session): ByteArray? {
-            val started = android.os.SystemClock.elapsedRealtime()
-            fun timing(phase: String, detail: String = "") = android.util.Log.d("TVWikiTiming", "phase=$phase verifyMs=${android.os.SystemClock.elapsedRealtime() - started} $detail")
-            timing("VERIFY_START", "capturedKeys=${session.capturedKeys.size}")
             val url = session.segmentUrl ?: return null
             val iv = session.iv
             return try {
-                val response = app.get(url, headers = session.headers + ("Range" to "bytes=0-575"))
-                timing("SEGMENT_HTTP", "status=${response.code}")
-                val prefix = ByteArray(576)
-                var count = 0
-                response.body.byteStream().use { input ->
-                    while (count < prefix.size) {
-                        val n = input.read(prefix, count, prefix.size - count)
-                        if (n <= 0) break
-                        count += n
+                coroutineScope {
+                    val keyRequest = async(Dispatchers.IO) {
+                        session.keyUrl?.let { keyUrl ->
+                            try {
+                                val response = app.get(keyUrl, headers = session.headers)
+                                val payload = response.body.bytes()
+                                if (payload.size == 16) payload else decodeLevel7Key(payload)
+                            } catch (_: Exception) { null }
+                        }
                     }
-                }
-                val bytes = prefix.copyOf(count - count % 16)
-                if (bytes.size < 16) return null
-                timing("SEGMENT_READ", "bytes=${bytes.size}")
-                val captured = synchronized(session.capturedKeys) { session.capturedKeys.toList() }
-                val candidates = captured.filter { it.matches(Regex("[0-9a-fA-F]{32}")) }
-                    .map { it.hexToByteArray() }.toMutableList()
-                session.keyUrl?.let { keyUrl ->
-                    try {
-                        val keyResponse = app.get(keyUrl, headers = session.headers)
-                        val rawKey = keyResponse.body.bytes()
-                        timing("KEY_HTTP", "status=${keyResponse.code} bytes=${rawKey.size}")
-                        if (rawKey.size == 16) candidates.add(rawKey)
-                        else decodeLevel7Key(rawKey)?.let { candidates.add(it) }
-                    } catch (e: Exception) {
+                    val response = app.get(url, headers = session.headers + ("Range" to "bytes=0-575"))
+                    val prefix = ByteArray(576)
+                    var count = 0
+                    response.body.byteStream().use { input ->
+                        while (count < prefix.size) {
+                            val n = input.read(prefix, count, prefix.size - count)
+                            if (n <= 0) break
+                            count += n
+                        }
                     }
-                }
-                timing("VERIFY_CANDIDATES", "count=${candidates.size}")
-                for ((idx, key) in candidates.withIndex()) {
-                    if (looksLikeMedia(decryptAES(bytes, key, iv))) {
-                        timing("VERIFY_SUCCESS", "candidateIndex=$idx")
-                        synchronized(session.capturedKeys) { session.capturedKeys.clear() }
-                        return key
+                    val bytes = prefix.copyOf(count - count % 16)
+                    if (bytes.size < 16) return@coroutineScope null
+                    val captured = synchronized(session.capturedKeys) { session.capturedKeys.toList() }
+                    val candidates = captured.filter { it.matches(Regex("[0-9a-fA-F]{32}")) }
+                        .map { it.hexToByteArray() }.toMutableList()
+                    keyRequest.await()?.let { candidates.add(it) }
+                    for (key in candidates) {
+                        if (looksLikeMedia(decryptAES(bytes, key, iv))) {
+                            synchronized(session.capturedKeys) { session.capturedKeys.clear() }
+                            return@coroutineScope key
+                        }
                     }
+                    null
                 }
-                timing("VERIFY_FAILED")
-                null
             } catch (e: Exception) {
-                timing("VERIFY_ERROR", "type=${e.javaClass.simpleName}")
                 null
             }
         }
