@@ -19,6 +19,7 @@ import android.text.TextWatcher
 import android.text.Editable
 import android.text.TextUtils
 import android.widget.TextView
+import com.google.android.material.button.MaterialButton
 import android.util.TypedValue
 import androidx.preference.PreferenceManager
 import androidx.lifecycle.Observer
@@ -97,6 +98,7 @@ internal class ElevatePlayerPanel(
         val richText: Boolean = false, val selected: Boolean = false,
         val header: Boolean = false, val refreshUrl: String? = null)
     private val ctx = overlay.context
+    private var restoreNativeSpeedup: (() -> Unit)? = null
     private val dp: (Int) -> Int = { (it * ctx.resources.displayMetrics.density + .5f).toInt() }
     private val textColor = episodeTitle?.currentTextColor ?: Color.WHITE
     private val tvControls = isLayout(TV or EMULATOR)
@@ -981,7 +983,45 @@ internal class ElevatePlayerPanel(
         fallbackFromHiddenTab()
     }
 
+    private fun styleNativeSpeedup() {
+        if (restoreNativeSpeedup != null) return
+        val button = root.findViewById<MaterialButton>(R.id.player_speedup_button) ?: return
+        val icon = button.icon
+        val text = button.text
+        val font = button.typeface
+        val colors = button.textColors
+        val radius = button.cornerRadius
+        val gravity = button.gravity
+        val insetTop = button.insetTop
+        val insetBottom = button.insetBottom
+        val start = button.paddingStart
+        val top = button.paddingTop
+        val end = button.paddingEnd
+        val bottom = button.paddingBottom
+        restoreNativeSpeedup = {
+            button.icon = icon
+            button.text = text
+            button.typeface = font
+            button.setTextColor(colors)
+            button.cornerRadius = radius
+            button.gravity = gravity
+            button.insetTop = insetTop
+            button.insetBottom = insetBottom
+            button.setPaddingRelative(start, top, end, bottom)
+        }
+        button.icon = null
+        button.text = "2X"
+        button.applyElevateNativeFont(bold = true)
+        button.iconTint?.let { button.setTextColor(it) }
+        button.insetTop = 0
+        button.insetBottom = 0
+        button.setPaddingRelative(0, 0, 0, 0)
+        button.cornerRadius = dp(23)
+        button.gravity = Gravity.CENTER
+    }
+
     fun attach() {
+        styleNativeSpeedup()
         updateAvailableTabs()
         nativeWidth = overlay.layoutParams.width
         // TV's native 400dp episode list must fit inside the padded overlay.
@@ -1025,6 +1065,8 @@ internal class ElevatePlayerPanel(
     }
 
     fun detach() {
+        restoreNativeSpeedup?.invoke()
+        restoreNativeSpeedup = null
         ElevateJavaAllocationProfile.traceHook("ElevatePlayerPanel", "DETACH", fragment.activity, fragment)
         cancelSyncCueRetry()
         stopSyncPosition()
