@@ -1,5 +1,7 @@
 package com.ohli24
 
+import android.util.Log
+
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -322,28 +324,68 @@ class OHLI24 : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (data.isBlank()) return false
-        val doc = app.get(data, headers = headers, timeout = 20).document
-        val player = sequenceOf(
-            doc.select("iframe[src]").firstOrNull { iframe ->
-                val src = iframe.attr("src")
-                src.contains("cdndania.com/video/", true) || src.contains("michealcdn.com/video/", true)
-            }?.attr("src"),
-            doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
-            doc.select("a[href]").firstOrNull {
+        val trace = android.os.SystemClock.elapsedRealtimeNanos()
+        val started = android.os.SystemClock.elapsedRealtime()
+        var links = 0
+        var subtitles = 0
+        Log.i("OHLI24Trace", "phase=LINK_START trace=" + trace + " input=" + ohliSafeUrl(data) + " casting=" + isCasting)
+        try {
+            if (data.isBlank()) {
+                Log.w("OHLI24Trace", "phase=LINK_EMPTY_INPUT trace=" + trace)
+                return false
+            }
+            val pageResponse = app.get(data, headers = headers, timeout = 20)
+            val doc = pageResponse.document
+            val iframe = doc.selectFirst("iframe[src]")?.attr("src")
+            val vurl = doc.selectFirst("form.tt input[name=vurl]")?.attr("value")
+            val cdnAnchor = doc.select("a[href]").firstOrNull {
                 val href = it.attr("href")
                 href.contains("cdndania.com/video/", true) || href.contains("michealcdn.com", true)
-            }?.attr("href"),
-            doc.selectFirst("iframe[src]")?.attr("src")
-        ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
-            ?.let(::absoluteUrl).orEmpty()
-        if (player.isBlank()) return false
-
-        if (player.contains("cdndania.com/video/", true)) {
-            Cdndania().getUrl(player, mainUrl, subtitleCallback, callback)
-        } else {
-            loadExtractor(player, mainUrl, subtitleCallback, callback)
+            }?.attr("href")
+            Log.i("OHLI24Trace", "phase=EPISODE_HTML trace=" + trace +
+                " http=" + pageResponse.code + " length=" + pageResponse.text.length +
+                " iframeCount=" + doc.select("iframe[src]").size +
+                " inertia=" + (doc.selectFirst("script[data-page=app]") != null) +
+                " iframe=" + ohliSafeUrl(iframe) +
+                " vurl=" + ohliSafeUrl(vurl) + " cdnAnchor=" + ohliSafeUrl(cdnAnchor))
+            val player = sequenceOf(iframe, vurl, cdnAnchor)
+                .filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
+                ?.let(::absoluteUrl).orEmpty()
+            Log.i("OHLI24Trace", "phase=PLAYER_SELECTED trace=" + trace +
+                " selected=" + ohliSafeUrl(player) +
+                " mode=" + if (player.contains("cdndania.com/video/", true)) "CdndaniaDirect" else "loadExtractor")
+            if (player.isBlank()) {
+                Log.w("OHLI24Trace", "phase=NO_PLAYER trace=" + trace)
+                return false
+            }
+            val trackSubtitle: (SubtitleFile) -> Unit = { item ->
+                subtitles++
+                Log.i("OHLI24Trace", "phase=SUBTITLE_CALLBACK trace=" + trace + " count=" + subtitles)
+                subtitleCallback(item)
+            }
+            val trackLink: (ExtractorLink) -> Unit = { link ->
+                links++
+                Log.i("OHLI24Trace", "phase=STREAM_CALLBACK trace=" + trace +
+                    " count=" + links + " link=" + ohliSafeUrl(link.url))
+                callback(link)
+            }
+            if (player.contains("cdndania.com/video/", true)) {
+                Log.i("OHLI24Trace", "phase=DISPATCH_DIRECT trace=" + trace)
+                Cdndania().getUrl(player, mainUrl, trackSubtitle, trackLink)
+            } else {
+                Log.i("OHLI24Trace", "phase=DISPATCH_GENERIC trace=" + trace)
+                loadExtractor(player, mainUrl, trackSubtitle, trackLink)
+            }
+            if (links == 0) Log.w("OHLI24Trace", "phase=EXTRACTOR_NO_LINK trace=" + trace)
+            Log.i("OHLI24Trace", "phase=LINK_RETURN trace=" + trace + " result=true links=" + links + " subtitles=" + subtitles)
+            return true
+        } catch (error: Throwable) {
+            Log.e("OHLI24Trace", "phase=LINK_EXCEPTION trace=" + trace, error)
+            throw error
+        } finally {
+            Log.i("OHLI24Trace", "phase=LINK_END trace=" + trace +
+                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started) +
+                " links=" + links + " subtitles=" + subtitles)
         }
-        return true
     }
 }

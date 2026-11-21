@@ -1,6 +1,7 @@
 package com.ohli24
 
 import android.util.Log
+
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -30,60 +31,81 @@ open class Cdndania : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val host= getBaseUrl(url)
-        
+        val trace = android.os.SystemClock.elapsedRealtimeNanos()
+        val started = android.os.SystemClock.elapsedRealtime()
+        Log.i("OHLI24Trace", "phase=CDN_START trace=" + trace + " extractor=" + name +
+            " input=" + ohliSafeUrl(url) + " referer=" + ohliSafeUrl(referer))
+        val host = getBaseUrl(url)
+
         if (url.contains("/video/")) {
             try {
-                // 기존 로직 유지 (자막 추출)
-                val doc = app.get(url, referer = referer).document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
+                val videoResponse = app.get(url, referer = referer)
+                val script = videoResponse.document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
                 val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
-                val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
+                val srtUrl = srtRegex.find(script)?.groupValues?.get(1) ?: ""
+                Log.i("OHLI24Trace", "phase=CDN_PAGE trace=" + trace +
+                    " http=" + videoResponse.code + " htmlLength=" + videoResponse.text.length +
+                    " subtitleScript=" + script.isNotBlank() + " srtFound=" + srtUrl.isNotBlank())
 
                 val extractedHash = url.substringAfterLast("/")
                 val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
-                val header= mapOf("x-requested-with" to "XMLHttpRequest")
-                
-                // referer가 null일 경우 "null" 문자열이 들어가는 것 방지
+                val header = mapOf("x-requested-with" to "XMLHttpRequest")
                 val safeReferer = referer ?: ""
-                val formdata= mapOf("hash" to extractedHash, "r" to safeReferer)
-                
-                val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
-                
-                (response?.securedLink?.takeIf { it.isNotBlank() }
-                    ?: response?.videoSource?.takeIf { it.isNotBlank() })?.let { m3u8 ->
+                val formdata = mapOf("hash" to extractedHash, "r" to safeReferer)
+                Log.w("OHLI24Trace", "phase=HASH_INPUT trace=" + trace +
+                    " pathIdLength=" + url.substringBefore('?').substringAfterLast('/').length +
+                    " sentHashLength=" + extractedHash.length +
+                    " includesQuery=" + extractedHash.contains('?') +
+                    " queryKeys=" + ohliSafeUrl(url).substringAfter("queryKeys=", "") +
+                    " postRefererPresent=" + safeReferer.isNotBlank())
 
-                    // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
+                val postResponse = app.post(m3u8Url, headers = header, data = formdata)
+                val response = postResponse.parsedSafe<Response>()
+                Log.i("OHLI24Trace", "phase=CDN_POST trace=" + trace +
+                    " http=" + postResponse.code + " bodyLength=" + postResponse.text.length +
+                    " parsed=" + (response != null) +
+                    " rawHasVideoSource=" + postResponse.text.contains("\"videoSource\"") +
+                    " rawHasSecuredLink=" + postResponse.text.contains("\"securedLink\"") +
+                    " videoSourcePresent=" + !response?.videoSource.isNullOrBlank() +
+                    " securedLinkPresent=" + !response?.securedLink.isNullOrBlank())
+
+                response?.videoSource?.let { m3u8 ->
                     val streamHeaders = mapOf(
                         "User-Agent" to DESKTOP_UA,
-                        "Referer" to url, // 빈값("") 대신 실제 비디오 iframe 주소를 삽입
+                        "Referer" to url,
                         "Origin" to host,
                         "Accept" to "*/*",
                         "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
                     )
-
                     var finalUrl = m3u8
-
-                    // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
+                    Log.i("OHLI24Trace", "phase=HLS_CANDIDATE trace=" + trace +
+                        " source=videoSource url=" + ohliSafeUrl(m3u8) +
+                        " headers=" + streamHeaders.keys.joinToString(","))
                     try {
                         val m3u8Res = app.get(m3u8, headers = streamHeaders)
-                        
                         val content = try {
                             m3u8Res.text.trim()
                         } catch (e: Exception) {
+                            Log.w("OHLI24Trace", "phase=HLS_TEXT_FALLBACK trace=" + trace, e)
                             m3u8Res.document.text().trim()
                         }
-                        
-                        // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
+                        var embedded = false
                         if (!content.startsWith("#EXTM3U")) {
                             val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
                             innerM3u8Regex.find(content)?.let {
                                 finalUrl = it.groupValues[1]
+                                embedded = true
                             }
                         }
+                        Log.i("OHLI24Trace", "phase=HLS_CHECK trace=" + trace +
+                            " http=" + m3u8Res.code + " bodyLength=" + content.length +
+                            " isM3u8=" + content.startsWith("#EXTM3U") +
+                            " embeddedLink=" + embedded +
+                            " final=" + ohliSafeUrl(finalUrl))
                     } catch (e: Exception) {
+                        Log.w("OHLI24Trace", "phase=HLS_CHECK_ERROR trace=" + trace +
+                            " fallbackToOriginal=true", e)
                     }
-
-                    // 추출기 링크 생성 및 콜백
                     callback(
                         newExtractorLink(
                             "CDN",
@@ -96,22 +118,25 @@ open class Cdndania : ExtractorApi() {
                             this.quality = Qualities.P1080.value
                         }
                     )
+                    Log.i("OHLI24Trace", "phase=CDN_LINK_EMITTED trace=" + trace +
+                        " link=" + ohliSafeUrl(finalUrl))
 
                     if (srtUrl.isNotBlank()) {
-                        subtitleCallback.invoke(
-                            newSubtitleFile(
-                                "Korean",
-                                srtUrl
-                            )
-                        )
+                        subtitleCallback.invoke(newSubtitleFile("Korean", srtUrl))
+                        Log.i("OHLI24Trace", "phase=CDN_SUBTITLE_EMITTED trace=" + trace)
                     }
                 } ?: run {
-                    Log.w("OHLI24", "CDN response has no playable URL")
+                    Log.w("OHLI24Trace", "phase=CDN_NO_VIDEO_SOURCE trace=" + trace +
+                        " parsed=" + (response != null))
                 }
             } catch (e: Exception) {
-                Log.w("OHLI24", "CDN extraction failed", e)
+                Log.e("OHLI24Trace", "phase=CDN_EXCEPTION trace=" + trace, e)
             }
+        } else {
+            Log.w("OHLI24Trace", "phase=CDN_UNSUPPORTED_PATH trace=" + trace)
         }
+        Log.i("OHLI24Trace", "phase=CDN_END trace=" + trace +
+            " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started))
     }
 
     private fun getBaseUrl(url: String): String {
@@ -119,12 +144,26 @@ open class Cdndania : ExtractorApi() {
     }
 }
 
+
+internal fun ohliSafeUrl(raw: String?): String {
+    if (raw.isNullOrBlank()) return "NONE"
+    return runCatching {
+        val parsed = URI(raw)
+        val firstSegment = parsed.path.orEmpty().trimStart('/').substringBefore('/')
+        val queryNames = parsed.rawQuery.orEmpty().split('&')
+            .filter { it.isNotBlank() }.joinToString(",") { it.substringBefore('=') }
+        "host=" + (parsed.host ?: "?") +
+            " pathGroup=" + firstSegment + " pathLength=" + parsed.path.orEmpty().length +
+            " queryKeys=" + queryNames
+    }.getOrDefault("urlParseFailed length=" + raw.length)
+}
+
 data class Response(
-    val hls: Boolean? = null,
-    val videoImage: String? = null,
-    val videoSource: String? = null,
-    val securedLink: String? = null,
-    val downloadLinks: List<Any?>? = null,
-    val attachmentLinks: List<Any?>? = null,
-    val ck: String? = null,
+    val hls: Boolean,
+    val videoImage: String,
+    val videoSource: String,
+    val securedLink: String,
+    val downloadLinks: List<Any?>,
+    val attachmentLinks: List<Any?>,
+    val ck: String,
 )
