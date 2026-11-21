@@ -16,6 +16,8 @@ class MichealCDN : Cdndania() {
 }
 
 open class Cdndania : ExtractorApi() {
+    private fun trace(stage: String, detail: String) = android.util.Log.i("OhliPlaybackTrace", "stage=$stage $detail")
+
     override val name = "CDNdania"
     override val mainUrl = "https://cdndania.com"
     override val requiresReferer = true
@@ -29,12 +31,16 @@ open class Cdndania : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val start = android.os.SystemClock.elapsedRealtime()
+        trace("CDN_START", "host=${getBaseUrl(url)}")
         val host= getBaseUrl(url)
         
         if (url.contains("/video/")) {
             try {
                 // 기존 로직 유지 (자막 추출)
+                val pageStart = android.os.SystemClock.elapsedRealtime()
                 val doc = app.get(url, referer = referer).document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
+                trace("CDN_PAGE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - pageStart}")
                 val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
                 val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
 
@@ -46,8 +52,11 @@ open class Cdndania : ExtractorApi() {
                 val safeReferer = referer ?: ""
                 val formdata= mapOf("hash" to extractedHash, "r" to safeReferer)
                 
+                val apiStart = android.os.SystemClock.elapsedRealtime()
+                trace("CDN_API_START", "ms=${apiStart - start}")
                 val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
                 
+                trace("CDN_API_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - apiStart} found=${response?.videoSource != null}")
                 response?.videoSource?.let { m3u8 ->
 
                     // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
@@ -63,8 +72,11 @@ open class Cdndania : ExtractorApi() {
 
                     // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
                     try {
+                        val manifestStart = android.os.SystemClock.elapsedRealtime()
+                        trace("CDN_MANIFEST_START", "ms=${manifestStart - start}")
                         val m3u8Res = app.get(m3u8, headers = streamHeaders)
                         
+                        trace("CDN_MANIFEST_HTTP", "ms=${android.os.SystemClock.elapsedRealtime() - manifestStart} status=${m3u8Res.code}")
                         val content = try {
                             m3u8Res.text.trim()
                         } catch (e: Exception) {
@@ -82,6 +94,7 @@ open class Cdndania : ExtractorApi() {
                     }
 
                     // 추출기 링크 생성 및 콜백
+                    trace("CDN_CALLBACK", "ms=${android.os.SystemClock.elapsedRealtime() - start} urlChanged=${finalUrl != m3u8}")
                     callback(
                         newExtractorLink(
                             "CDN",
@@ -106,6 +119,7 @@ open class Cdndania : ExtractorApi() {
                 } ?: run {
                 }
             } catch (e: Exception) {
+                trace("CDN_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
             }
         }
     }

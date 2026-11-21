@@ -15,6 +15,8 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 class Kotbc : MainAPI() {
+    private fun trace(stage: String, detail: String) = android.util.Log.i("KotbcPlaybackTrace", "stage=$stage $detail")
+
     companion object {
         private const val DEFAULT_DOMAIN = "https://k01.kotbc2.com"
         private const val PREFS_NAME = "Kotbc_Domain_Cache_v2"
@@ -671,10 +673,14 @@ class Kotbc : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val start = android.os.SystemClock.elapsedRealtime()
+        trace("LINK_START", "casting=$isCasting")
         val raw = data.trim()
         if (raw.isEmpty()) return false
 
+        trace("LINK_INPUT", "packed=${raw.startsWith("KOTBC_PLAYER:")}")
         unpackPlayerData(raw)?.let { payload ->
+            trace("BRANCH", "type=packed ms=${android.os.SystemClock.elapsedRealtime() - start}")
             KotbcExtractor().getUrlFromKotbcPage(
                 pageUrl = payload.refererUrl,
                 expectedPlayerUrl = payload.playerUrl,
@@ -688,6 +694,7 @@ class Kotbc : MainAPI() {
             (raw.startsWith("http://") || raw.startsWith("https://")) &&
             !raw.contains("kotbc2.com", ignoreCase = true)
         ) {
+            trace("BRANCH", "type=external ms=${android.os.SystemClock.elapsedRealtime() - start}")
             KotbcExtractor().getUrl(
                 raw,
                 mainUrl,
@@ -697,6 +704,7 @@ class Kotbc : MainAPI() {
             return true
         }
 
+        trace("BRANCH", "type=page ms=${android.os.SystemClock.elapsedRealtime() - start}")
         KotbcExtractor().getUrlFromKotbcPage(
             pageUrl = normalizeTargetUrl(raw),
             expectedPlayerUrl = null,
@@ -704,6 +712,7 @@ class Kotbc : MainAPI() {
             callback = callback
         )
 
+        trace("LINK_END", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         return true
     }
 

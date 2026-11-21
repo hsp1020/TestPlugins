@@ -38,6 +38,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 class OHLI24 : MainAPI() {
+    private fun trace(stage: String, detail: String) = android.util.Log.i("OhliPlaybackTrace", "stage=$stage $detail")
+
     override var mainUrl = "https://ani.ohli24.com"
     override var name = "OHLI24"
     override val hasMainPage = true
@@ -328,6 +330,8 @@ class OHLI24 : MainAPI() {
 
     @android.annotation.SuppressLint("SetJavaScriptEnabled")
     private suspend fun findVideoIframe(url: String): String? = withContext(Dispatchers.Main) {
+        val start = android.os.SystemClock.elapsedRealtime()
+        trace("IFRAME_START", "host=${runCatching { java.net.URL(url).host }.getOrDefault("unknown")}")
         val context = CloudStreamApp.context ?: return@withContext null
         suspendCancellableCoroutine { continuation ->
             val handler = Handler(Looper.getMainLooper())
@@ -336,6 +340,7 @@ class OHLI24 : MainAPI() {
             var timeout: Runnable? = null
 
             fun finish(result: String?) {
+                trace("IFRAME_END", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${result != null}")
                 if (finished) return
                 finished = true
                 timeout?.let(handler::removeCallbacks)
@@ -383,7 +388,10 @@ class OHLI24 : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (data.isBlank()) return false
+        val start = android.os.SystemClock.elapsedRealtime()
+        trace("LINK_START", "casting=$isCasting")
         val doc = app.get(data, headers = headers, timeout = 20).document
+        trace("PAGE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         var player = sequenceOf(
             doc.selectFirst("iframe[src]")?.attr("src"),
             doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
@@ -393,14 +401,17 @@ class OHLI24 : MainAPI() {
             }?.attr("href")
         ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
             ?.let(::absoluteUrl).orEmpty()
+        trace("PARSE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${player.isNotBlank()}")
         if (player.isBlank()) player = findVideoIframe(data).orEmpty()
         if (player.isBlank()) return false
 
+        trace("EXTRACT_START", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${runCatching { java.net.URL(player).host }.getOrDefault("unknown")}")
         if (player.contains("cdndania.com/video/", true)) {
             Cdndania().getUrl(player, mainUrl, subtitleCallback, callback)
         } else {
             loadExtractor(player, mainUrl, subtitleCallback, callback)
         }
+        trace("LINK_END", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         return true
     }
 }

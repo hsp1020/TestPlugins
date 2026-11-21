@@ -15,6 +15,8 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 class Anilife : MainAPI() {
+    private fun trace(stage: String, detail: String) = android.util.Log.i("AnilifePlaybackTrace", "stage=$stage $detail")
+
     companion object {
         private const val BASE = "https://anilife01.tv"
         private const val PREFS = "Anilife_Domain_Cache"
@@ -240,15 +242,20 @@ class Anilife : MainAPI() {
         data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val start = android.os.SystemClock.elapsedRealtime()
+        trace("LINK_START", "casting=$isCasting")
         checkAndUpdateDomain()
+        trace("DOMAIN_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         val episodeUrl = freshUrl(data.substringBefore("?ref="))
         return try {
             // ArtPlayer uses a blob: video element: capture its real signed HLS request.
+            trace("WEBVIEW_START", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
             val (match, subtitleRequests) = WebViewResolver(
                 Regex("""https?://[^\s]+\.m3u8(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE),
                 additionalUrls = listOf(Regex("""https?://[^\s]+\.(?:vtt|srt)(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE)),
                 userAgent = userAgent, useOkhttp = false, timeout = 18000L
             ).resolveUsingWebView(episodeUrl, headers = headers)
+            trace("WEBVIEW_END", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${match != null} subtitles=${subtitleRequests.size}")
             subtitleRequests.distinctBy { it.url.toString() }.forEach { request ->
                 if (request.url.encodedPath.endsWith(".vtt", true) || request.url.encodedPath.endsWith(".srt", true)) {
                     subtitleCallback(newSubtitleFile("Korean", request.url.toString()) {
@@ -259,12 +266,14 @@ class Anilife : MainAPI() {
             if (match == null) {
                 return false
             }
+            trace("LINK_CALLBACK", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${match.url.host}")
             callback(newExtractorLink(name, name, match.url.toString(), ExtractorLinkType.M3U8) {
                 this.referer = mainUrl + "/"
                 this.headers = match.headers.toMap() + ("Referer" to (mainUrl + "/"))
             })
             true
         } catch (e: Exception) {
+            trace("LINK_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
             if (e is CancellationException) throw e
             false
         }
