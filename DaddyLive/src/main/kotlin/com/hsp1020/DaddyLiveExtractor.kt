@@ -1,6 +1,19 @@
 package com.hsp1020
 
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.util.Base64
+import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
@@ -10,15 +23,51 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import java.io.BufferedReader
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.GZIPInputStream
+import java.util.zip.InflaterInputStream
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.resume
 import kotlin.math.ceil
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 
 class DaddyLiveExtractor : ExtractorApi() {
+    private object Trace {
+        private const val TAG = "DaddyLiveTrace"
+        fun target(raw: String): String = try {
+            val parsed = URL(raw)
+            parsed.host + parsed.path
+        } catch (_: Exception) { "invalid-url" }
+        fun event(phase: String, status: String, detail: String = "") {
+            android.util.Log.i(TAG, "phase=$phase status=$status $detail")
+        }
+    }
+
     override var mainUrl = "https://thedaddy.li"
     override val name = "DaddyLive"
     override val requiresReferer = false
@@ -58,7 +107,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         currentCoroutineContext().ensureActive()
-
+        Trace.event("PLAYER_ENTRY", "START", "target=${Trace.target(url)}")
         val selected = try {
             mapper.readValue<ExtractorChannelSelection>(url)
         } catch (_: Exception) {
@@ -71,6 +120,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sourceName = name,
                 parentReferer = referer
             )
+            Trace.event("MEDIA3_LINK", if (direct != null) "EMITTED" else "NO_LINK", "mode=direct_entry")
             if (direct != null) callback(direct)
             return
         }
@@ -85,12 +135,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             entryUrl = entryUrl,
             streamId = selected.streamId
         )
-
+        Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
 
         for (candidate in candidates) {
             currentCoroutineContext().ensureActive()
 
             val sourceName = "${selected.channelName} - ${candidate.player}"
+            Trace.event("PLAYER_CANDIDATE", "TRY", "player=${candidate.player} target=${Trace.target(candidate.url)}")
 
             val link = extractVideo(
                 url = candidate.url,
@@ -99,11 +150,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
+                Trace.event("MEDIA3_LINK", "EMITTED", "player=${candidate.player} mode=${if (link.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(link.url)}")
                 callback(link)
                 return
             }
+            Trace.event("PLAYER_CANDIDATE", "FALLBACK", "player=${candidate.player} reason=no_valid_link")
         }
-
+        Trace.event("PLAYER_DISCOVERY", "EXHAUSTED", "candidates=${candidates.size} reason=all_failed")
     }
 
     /*
@@ -130,6 +183,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
+            Trace.event("PLAYER_DISCOVERY", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                "target=${Trace.target(entryUrl)} http=${response.code}")
             if (response.isSuccessful) {
                 val html = response.text
 
@@ -197,6 +252,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("PLAYER_DISCOVERY", "ERROR", "reason=${e.javaClass.simpleName}")
         }
 
         /*
@@ -211,6 +267,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
         }
 
+        Trace.event("PLAYER_DISCOVERY", "DONE", "players=${discovered.keys.joinToString(",")} count=${discovered.size}")
         return players.mapNotNull { player ->
             discovered[player]?.let { PlayerCandidate(player, it) }
         }
@@ -238,8 +295,11 @@ class DaddyLiveExtractor : ExtractorApi() {
 
 
             val targetOrigin = originOf(url) ?: mainUrl
+            Trace.event("PLAYER_PAGE", "START", "target=${Trace.target(url)}")
             if (targetOrigin == "https://dembed.st") {
+                Trace.event("PLAYER_PAGE", "DEMBED_ROUTE", "target=${Trace.target(url)}")
                 DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName)?.let { return it }
+                Trace.event("PLAYER_PAGE", "DEMBED_FALLBACK", "reason=extractor_returned_null")
             }
             val referer = parentReferer ?: "$targetOrigin/"
             val refererOrigin = originOf(referer) ?: targetOrigin
@@ -254,6 +314,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
+            Trace.event("PLAYER_PAGE", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                "target=${Trace.target(url)} http=${response.code}")
             if (!response.isSuccessful) {
                 return null
             }
@@ -266,18 +328,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 visited = linkedSetOf()
             )
 
-            if (link != null) {
-                return link
-            }
-
-            return null
+            Trace.event("PLAYER_PAGE", if (link != null) "LINK_FOUND" else "NO_LINK",
+                "target=${Trace.target(url)}")
+            return link
         } catch (e: CancellationException) {
             throw e
         } catch (e: SocketTimeoutException) {
+            Trace.event("PLAYER_PAGE", "TIMEOUT", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: IOException) {
+            Trace.event("PLAYER_PAGE", "IO_ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: Exception) {
+            Trace.event("PLAYER_PAGE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         }
     }
@@ -407,20 +470,18 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
+                Trace.event("HLS_VALIDATE", "HTTP_FAIL", "target=${Trace.target(url)} http=${response.code}")
                 return false
             }
-
             val body = response.text.trimStart()
             val valid = body.startsWith("#EXTM3U")
-
-            if (valid) {
-            } else {
-            }
-
+            Trace.event("HLS_VALIDATE", if (valid) "VALID" else "INVALID",
+                "target=${Trace.target(url)} http=${response.code} chars=${body.length} reason=${if (valid) "extm3u" else "missing_extm3u"}")
             valid
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("HLS_VALIDATE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             false
         }
     }
@@ -433,8 +494,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         origin: String,
         headers: Map<String, String> = hlsHeaders(origin, referer)
     ): ExtractorLink? {
-        if (!validateHls(url, headers)) return null
-
+        if (!validateHls(url, headers)) {
+            Trace.event("MEDIA3_LINK", "REJECTED", "target=${Trace.target(url)} reason=playlist_validation_failed")
+            return null
+        }
+        Trace.event("MEDIA3_LINK", "BUILD", "mode=direct target=${Trace.target(url)} headerNames=${headers.keys.joinToString(",")}")
         return newExtractorLink(
             source = sourceName,
             name = displayName,
@@ -587,8 +651,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             pageHtml = pageHtml
         )
 
-        if (nestedCandidates.isNotEmpty()) {
-        }
+        Trace.event("PLAYER_NESTED", "FOUND", "parent=${Trace.target(pageUrl)} count=${nestedCandidates.size} depth=$depth")
 
         for (nestedUrl in nestedCandidates) {
             currentCoroutineContext().ensureActive()
@@ -765,11 +828,16 @@ class DaddyLiveExtractor : ExtractorApi() {
         depth: Int,
         visited: MutableSet<String>
     ): ExtractorLink? {
-        if (childUrl in visited) return null
-
+        if (childUrl in visited) {
+            Trace.event("PLAYER_NESTED", "SKIP", "reason=already_visited target=${Trace.target(childUrl)}")
+            return null
+        }
+        Trace.event("PLAYER_NESTED", "TRY", "target=${Trace.target(childUrl)} depth=$depth")
         val parentOrigin = originOf(parentUrl) ?: return null
         if (originOf(childUrl) == "https://dembed.st") {
+            Trace.event("PLAYER_NESTED", "DEMBED_ROUTE", "target=${Trace.target(childUrl)}")
             DaddyLiveDembed.extract(childUrl, parentUrl, sourceName)?.let { return it }
+            Trace.event("PLAYER_NESTED", "DEMBED_FALLBACK", "reason=extractor_returned_null")
         }
 
         return try {
@@ -786,9 +854,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
+                Trace.event("PLAYER_NESTED", "HTTP_FAIL", "target=${Trace.target(childUrl)} http=${response.code}")
                 return null
             }
-
+            Trace.event("PLAYER_NESTED", "HTTP_OK", "target=${Trace.target(childUrl)} http=${response.code}")
             parseAndExtract(
                 pageUrl = childUrl,
                 pageHtml = response.text,
@@ -799,6 +868,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("PLAYER_NESTED", "ERROR", "target=${Trace.target(childUrl)} reason=${e.javaClass.simpleName}")
             null
         }
     }
@@ -983,6 +1053,761 @@ class DaddyLiveExtractor : ExtractorApi() {
             throw e
         } catch (e: Exception) {
             null
+        }
+    }
+
+    private object DaddyLiveDembed {
+        private const val EMBED_ORIGIN = "https://dembed.st"
+        private val main = Handler(Looper.getMainLooper())
+        private val sessions = ConcurrentHashMap<String, Session>()
+        private val io = CoroutineScope(Dispatchers.IO)
+        private val attribute = Regex("""URI="([^"]+)"""")
+        private var server: ServerSocket? = null
+        @Volatile private var port = 0
+
+        private class Resource(val url: String, val playlist: Boolean)
+        private class Session(val parent: String) {
+            val id: String = UUID.randomUUID().toString().replace("-", "")
+            val resources = ConcurrentHashMap<String, Resource>()
+            @Volatile var browser: WebView? = null
+            @Volatile var url: String = ""
+            @Volatile var token: String = ""
+            @Volatile var key: ByteArray? = null
+            @Volatile var pending: CompletableDeferred<String>? = null
+            @Volatile var firstPlaylist: String? = null
+            @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
+            @Volatile var userAgent = "Mozilla/5.0"
+            val headers: Map<String, String>
+                get() = mutableMapOf(
+                    "Origin" to EMBED_ORIGIN,
+                    "Referer" to "$EMBED_ORIGIN/",
+                    "User-Agent" to userAgent,
+                    "Accept" to "*/*"
+                ).also { map ->
+                    if (url.isNotBlank()) {
+                        CookieManager.getInstance().getCookie(url)?.let { map["Cookie"] = it }
+                    }
+                }
+
+            fun onToken(response: ByteArray) {
+                val data = runCatching { JSONObject(String(response, Charsets.UTF_8)) }.getOrNull()
+                if (data == null) {
+                    Trace.event("AUTH_TOKEN", "PARSE_FAIL", "sid=${id.take(8)} bytes=${response.size} reason=invalid_json")
+                    return
+                }
+                val encoded = data.optString("k")
+                if (encoded.isNotBlank()) {
+                    val decoded = runCatching {
+                        Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP)
+                    }.getOrNull()
+                    if (decoded != null && decoded.size in setOf(16, 24, 32)) key = decoded
+                }
+                val current = data.optString("token").ifBlank { data.optString("t") }
+                if (current.isNotBlank()) token = current
+                Trace.event("AUTH_TOKEN", if (current.isNotBlank() || key != null) "ACQUIRED" else "MISSING",
+                    "sid=${id.take(8)} ticketFieldPresent=${current.isNotBlank()} keyBytes=${key?.size ?: 0} responseBytes=${response.size}")
+            }
+
+            fun captureManifest(address: String) {
+                Trace.event("PLAYER_URL", "CAPTURED", "sid=${id.take(8)} target=${Trace.target(address)} signed=${Uri.parse(address).getQueryParameter("t") != null}")
+                url = address
+                val t = Uri.parse(address).getQueryParameter("t")
+                if (!t.isNullOrBlank()) token = t
+            }
+
+            fun record(text: String) {
+                if (!text.startsWith("DADDY_TOKEN:")) return
+                val value = text.substringAfter("DADDY_TOKEN:")
+                if (value.isNotBlank()) token = value
+                pending?.complete(value)
+                pending = null
+            }
+
+            suspend fun renew(): String {
+                Trace.event("AUTH_REFRESH", "START", "sid=${id.take(8)}")
+                val promise = CompletableDeferred<String>()
+                pending = promise
+                main.post {
+                    browser?.evaluateJavascript(
+                        "try { fetchPlaylistToken().then(function(t) { console.log('DADDY_TOKEN:' + (t || '')) })" +
+                            ".catch(function(){console.log('DADDY_TOKEN:')}) } catch(e) { console.log('DADDY_TOKEN:') }",
+                        null
+                    ) ?: promise.complete("")
+                }
+                return withTimeoutOrNull(4500L) { promise.await() }.orEmpty().also {
+                    Trace.event("AUTH_REFRESH", if (it.isNotBlank()) "OK" else "FAILED",
+                        "sid=${id.take(8)} reason=${if (it.isBlank()) "empty_or_timeout" else "new_token"}")
+                    if (pending === promise) pending = null
+                }
+            }
+
+            fun signed(address: String): String {
+                if (token.isBlank() || !address.substringBefore('?').endsWith(".m3u8", true)) return address
+                val input = Uri.parse(address)
+                val out = input.buildUpon().clearQuery()
+                input.queryParameterNames.filterNot { it == "t" || it == "_" }.forEach { name ->
+                    input.getQueryParameters(name).forEach { out.appendQueryParameter(name, it) }
+                }
+                out.appendQueryParameter("t", token)
+                out.appendQueryParameter("_", System.currentTimeMillis().toString())
+                return out.build().toString()
+            }
+
+            fun reference(target: String, manifest: Boolean): String {
+                val key = UUID.randomUUID().toString().replace("-", "")
+                resources[key] = Resource(target, manifest)
+                return "http://127.0.0.1:$port/$id/$key"
+            }
+
+            fun close() {
+                val player = browser
+                browser = null
+                main.post { runCatching { player?.stopLoading(); player?.destroy() } }
+            }
+        }
+
+        private fun fetchToken(request: WebResourceRequest, session: Session): WebResourceResponse? {
+            val url = request.url.toString()
+            Trace.event("AUTH_REQUEST", "START", "sid=${session.id.take(8)} method=${request.method} target=${Trace.target(url)} hasTk=${request.url.getQueryParameter("tk")?.isNotBlank() == true}")
+            val connection = (URL(url).openConnection() as? HttpURLConnection) ?: return null
+            return try {
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.setRequestProperty("Accept-Encoding", "identity")
+                request.requestHeaders.forEach { (k, v) ->
+                    if (!k.equals("Host", true) && !k.equals("Accept-Encoding", true)) {
+                        connection.setRequestProperty(k, v)
+                    }
+                }
+                connection.setRequestProperty("Origin", EMBED_ORIGIN)
+                connection.setRequestProperty("Referer", "$EMBED_ORIGIN/")
+                CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
+                val status = connection.responseCode
+                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                val bytes = stream?.use { it.readBytes().takeIf { b -> b.size <= 16384 } } ?: ByteArray(0)
+                if (status in 200..299) session.onToken(bytes)
+                Trace.event("AUTH_RESPONSE", if (status in 200..299) "HTTP_OK" else "HTTP_FAIL",
+                    "sid=${session.id.take(8)} http=$status bytes=${bytes.size}")
+                val headers = connection.headerFields
+                    .mapNotNull { (key, values) ->
+                        if (key == null || key.equals("Content-Length", true) || key.equals("Content-Encoding", true)) null
+                        else key to values.firstOrNull().orEmpty()
+                    }.toMap().toMutableMap()
+                headers["Access-Control-Allow-Origin"] = EMBED_ORIGIN
+                headers["Cache-Control"] = "no-store"
+                WebResourceResponse(
+                    "application/json", "UTF-8", status.coerceIn(100, 599),
+                    if (status in 200..299) "OK" else "Upstream Error",
+                    headers, ByteArrayInputStream(bytes)
+                )
+            } catch (e: Exception) {
+                Trace.event("AUTH_RESPONSE", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
+                null
+            } finally {
+                connection.disconnect()
+            }
+        }
+
+        suspend fun extract(embedded: String, parent: String, name: String): ExtractorLink? {
+            if (!embedded.startsWith("https://dembed.st/")) return null
+            val session = Session(parent)
+            val startMs = android.os.SystemClock.elapsedRealtime()
+            Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
+            val captured = withTimeoutOrNull(20000L) {
+                suspendCancellableCoroutine<String?> { continuation ->
+                    var web: WebView? = null
+                    val timeout = Runnable {
+                        Trace.event("PLAYER_URL", "TIMEOUT", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                        if (continuation.isActive) continuation.resume(null)
+                    }
+                    continuation.invokeOnCancellation {
+                        main.post {
+                            main.removeCallbacks(timeout)
+                            runCatching { web?.destroy() }
+                        }
+                    }
+                    main.post {
+                        try {
+                            val context = (CloudStreamApp.context ?: app) as android.content.Context
+                            web = WebView(context)
+                            val view = web!!
+                            Trace.event("AUTH_WEBVIEW", "CREATED", "sid=${session.id.take(8)}")
+                            session.browser = view
+                            session.userAgent = view.settings.userAgentString
+                            view.settings.javaScriptEnabled = true
+                            view.settings.domStorageEnabled = true
+                            view.settings.mediaPlaybackRequiresUserGesture = false
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+                            view.webChromeClient = object : WebChromeClient() {
+                                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                                    val raw = message?.message().orEmpty()
+                                    if (raw.startsWith("DADDY_TOKEN:")) {
+                                        Trace.event("AUTH_WEBVIEW", "JS_TOKEN_CALLBACK", "sid=${session.id.take(8)} hasValue=${raw.length > 12}")
+                                    }
+                                    session.record(raw)
+                                    return false
+                                }
+                            }
+                            view.webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
+                                        "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())}")
+                                }
+
+                                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                    if (request?.isForMainFrame == true || request?.url?.path?.contains("/premium") == true) {
+                                        Trace.event("AUTH_WEBVIEW", "LOAD_ERROR",
+                                            "sid=${session.id.take(8)} target=${Trace.target(request?.url?.toString().orEmpty())} code=${error?.errorCode}")
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?
+                                ) {
+                                    val target = request?.url?.toString().orEmpty()
+                                    if (request?.isForMainFrame == true || request?.url?.path?.contains("/premium") == true ||
+                                        request?.url?.path?.contains("playlist-token") == true) {
+                                        Trace.event("AUTH_WEBVIEW", "HTTP_ERROR",
+                                            "sid=${session.id.take(8)} target=${Trace.target(target)} http=${errorResponse?.statusCode}")
+                                    }
+                                }
+
+                                override fun shouldInterceptRequest(
+                                    view: WebView?, request: WebResourceRequest?
+                                ): WebResourceResponse? {
+                                    if (request == null) return null
+                                    val uri = request.url
+                                    val address = uri.toString()
+                                    if (uri.scheme == "https" && uri.path == "/api/playlist-token" &&
+                                        uri.getQueryParameter("slug")?.startsWith("premium") == true
+                                    ) {
+                                        return fetchToken(request, session)
+                                    }
+                                    if (uri.scheme == "https" && uri.path?.endsWith(".m3u8") == true &&
+                                        uri.path?.contains("/premium") == true &&
+                                        uri.path?.substringAfterLast("/") == "index.m3u8"
+                                    ) {
+                                        session.captureManifest(address)
+                                        main.post {
+                                            if (continuation.isActive) {
+                                                main.removeCallbacks(timeout)
+                                                continuation.resume(address)
+                                            }
+                                        }
+                                    }
+                                    return null
+                                }
+                            }
+                            main.postDelayed(timeout, 19000L)
+                            val url = if (parent.startsWith("https://") && !parent.contains("dembed.st")) parent else ""
+                            if (url.isNotBlank()) {
+                                Trace.event("AUTH_WEBVIEW", "LOAD_PARENT", "sid=${session.id.take(8)} target=${Trace.target(url)}")
+                                view.loadUrl(url)
+                            } else {
+                                // The player explicitly requires an iframe (it rejects top-level navigation).
+                                val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
+                                val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
+                                Trace.event("AUTH_WEBVIEW", "LOAD_EMBED_IFRAME", "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
+                                view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
+                            }
+                        } catch (e: Exception) {
+                            Trace.event("AUTH_WEBVIEW", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
+                            main.removeCallbacks(timeout)
+                            if (continuation.isActive) continuation.resume(null)
+                        }
+                    }
+                }
+            }
+            if (captured.isNullOrBlank()) {
+                Trace.event("PLAYER_URL", "NOT_FOUND", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs} reason=no_manifest_request")
+                session.close()
+                return null
+            }
+            Trace.event("PLAYER_URL", "FOUND", "sid=${session.id.take(8)} target=${Trace.target(captured)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+            return try {
+                val response = app.get(captured, headers = session.headers, timeout = 5)
+                Trace.event("HLS_FETCH", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                    "sid=${session.id.take(8)} target=${Trace.target(captured)} http=${response.code}")
+                if (!response.isSuccessful) {
+                    session.close()
+                    null
+                } else {
+                    val playlist = decodePlaylist(response.text, session.key)
+                    if (playlist == null || !playlist.trimStart().startsWith("#EXTM3U")) {
+                        Trace.event("HLS_DECODE", "FAILED", "sid=${session.id.take(8)} keyPresent=${session.key != null} reason=invalid_playlist")
+                        session.close()
+                        null
+                    } else {
+                        Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!response.text.trimStart().startsWith("#EXTM3U")}")
+                        val signed = Uri.parse(captured).getQueryParameter("t") != null
+                        if (!signed && session.key == null && directCompatible(playlist, captured, session.headers)) {
+                            Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                            // Probe a media segment before bypassing the wrapper decoder.
+                            session.close()
+                            newExtractorLink(name, name, captured, ExtractorLinkType.M3U8) {
+                                referer = "$EMBED_ORIGIN/"
+                                quality = Qualities.Unknown.value
+                                headers = session.headers
+                            }
+                        } else {
+                            val openPort = startServer()
+                            if (openPort == 0) {
+                                Trace.event("MEDIA3_LINK", "FAILED", "sid=${session.id.take(8)} reason=proxy_bind_failed")
+                                session.close()
+                                null
+                            } else {
+                                Trace.event("MEDIA3_LINK", "PROXY", "sid=${session.id.take(8)} signed=$signed keyPresent=${session.key != null} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                                session.firstPlaylist = playlist
+                                sessions[session.id] = session
+                                val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
+                                newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
+                                    referer = "$EMBED_ORIGIN/"
+                                    quality = Qualities.Unknown.value
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (cancel: CancellationException) {
+                session.close()
+                throw cancel
+            } catch (e: Exception) {
+                Trace.event("DEMBED", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                session.close()
+                null
+            }
+        }
+
+        /** A normal unsigned playlist goes directly to Media3 only when its first media
+         * segment is genuine TS/fMP4, not a disguised image or a nested playlist. */
+        private suspend fun directCompatible(
+            playlist: String, base: String, headers: Map<String, String>
+        ): Boolean {
+            val first = playlist.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+                ?: run {
+                    Trace.event("SEGMENT_PROBE", "SKIP", "reason=no_media_uri")
+                    return false
+                }
+            val url = absolute(base, first) ?: run {
+                Trace.event("SEGMENT_PROBE", "SKIP", "reason=unresolved_url")
+                return false
+            }
+            if (url.substringBefore('?').endsWith(".m3u8", true)) {
+                Trace.event("SEGMENT_PROBE", "SKIP", "reason=nested_playlist target=${Trace.target(url)}")
+                return false
+            }
+            return try {
+                val response = app.get(url, headers = headers + ("Range" to "bytes=0-575"), timeout = 4)
+                if (!response.isSuccessful) {
+                    Trace.event("SEGMENT_PROBE", "HTTP_FAIL", "target=${Trace.target(url)} http=${response.code}")
+                    return false
+                }
+                val prefix = ByteArray(376)
+                var count = 0
+                response.body.byteStream().use { input ->
+                    while (count < prefix.size) {
+                        val read = input.read(prefix, count, prefix.size - count)
+                        if (read <= 0) break
+                        count += read
+                    }
+                }
+                val ordinary = count >= 189 && prefix[0] == 0x47.toByte() && prefix[188] == 0x47.toByte() ||
+                    (count >= 8 && String(prefix, 4, 4, Charsets.US_ASCII) in setOf("ftyp", "styp", "moof"))
+                Trace.event("SEGMENT_PROBE", if (ordinary) "DIRECT_OK" else "PROXY_REQUIRED",
+                    "target=${Trace.target(url)} http=${response.code} bytes=$count first=${prefix.take(4).joinToString("") { (it.toInt() and 255).toString(16).padStart(2,'0') }}")
+                ordinary
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                Trace.event("SEGMENT_PROBE", "ERROR", "reason=${e.javaClass.simpleName}")
+                false
+            }
+        }
+
+        @Synchronized private fun startServer(): Int {
+            if (server?.isClosed == false) {
+                Trace.event("PROXY", "REUSE", "port=$port")
+                return port
+            }
+            return try {
+                val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+                socket.soTimeout = 15000
+                server = socket
+                port = socket.localPort
+                Trace.event("PROXY", "LISTEN", "binding=127.0.0.1 port=$port")
+                io.launch {
+                    while (!socket.isClosed) {
+                        try {
+                            val client = socket.accept()
+                            launch { serve(client) }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) {
+                        }
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        sessions.forEach { (key, session) ->
+                            if (now - session.lastUse > 15 * 60 * 1000L && sessions.remove(key, session)) {
+                                session.close()
+                            }
+                        }
+                        if (sessions.isEmpty()) {
+                            runCatching { socket.close() }
+                            synchronized(DaddyLiveDembed) {
+                                if (server === socket) { server = null; port = 0 }
+                            }
+                        }
+                    }
+                }
+                port
+            } catch (e: Exception) {
+                Trace.event("PROXY", "BIND_FAIL", "reason=${e.javaClass.simpleName}")
+                0
+            }
+        }
+
+        private fun absolute(base: String, relative: String): String? = runCatching {
+            URL(URL(base), relative).toString().takeIf { target ->
+                val url = URL(target)
+                url.protocol == "https" && url.host.isNotBlank() &&
+                    url.host != "localhost" && url.host != "127.0.0.1" &&
+                    !url.host.endsWith(".local")
+            }
+        }.getOrNull()
+
+        private fun rewrite(playlist: String, source: String, session: Session): String =
+            playlist.lineSequence().joinToString("\n") { line ->
+                if (line.startsWith("#")) {
+                    attribute.replace(line) { match ->
+                        val absolute = absolute(source, match.groupValues[1])
+                        if (absolute == null) match.value
+                        else "URI=\"${session.reference(absolute, absolute.substringBefore('?').endsWith(".m3u8", true))}\""
+                    }
+                } else if (line.isBlank()) line else {
+                    val target = absolute(source, line.trim())
+                    if (target == null) line
+                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))
+                }
+            } + "\n"
+
+        private fun decodePlaylist(body: String, key: ByteArray?): String? {
+            if (body.trimStart().startsWith("#EXTM3U")) {
+                Trace.event("HLS_DECRYPT", "SKIP", "reason=plain_extm3u")
+                return body
+            }
+            if (key == null) {
+                Trace.event("HLS_DECRYPT", "FAILED", "reason=missing_aes_key chars=${body.length}")
+                return null
+            }
+            Trace.event("HLS_DECRYPT", "START", "keyBytes=${key.size} chars=${body.length}")
+            val sequence = Regex("""(?m)^#EXT-X-MEDIA-SEQUENCE:\s*(\d+)""")
+                .find(body)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+            var counter = sequence
+            val output = StringBuilder()
+            for (raw in body.lineSequence()) {
+                val line = raw.trim()
+                if (line.isBlank() || line.startsWith("#")) {
+                    output.append(line).append('\n')
+                    continue
+                }
+                val bytes = runCatching { Base64.decode(line, Base64.URL_SAFE or Base64.NO_WRAP) }.getOrNull()
+                    ?: run {
+                        Trace.event("HLS_DECRYPT", "FAILED", "reason=base64_invalid sequence=$counter")
+                        return null
+                    }
+                val iv = ByteBuffer.allocate(16).putLong(8, counter).array()
+                val decrypted = runCatching {
+                    val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                    String(cipher.doFinal(bytes), StandardCharsets.UTF_8)
+                }.getOrNull() ?: run {
+                    Trace.event("HLS_DECRYPT", "FAILED", "reason=aes_ctr_decrypt_error sequence=$counter")
+                    return null
+                }
+                output.append(decrypted).append('\n')
+                counter++
+            }
+            return output.toString().takeIf { it.trimStart().startsWith("#EXTM3U") }.also {
+                Trace.event("HLS_DECRYPT", if (it != null) "OK" else "FAILED",
+                    "reason=${if (it != null) "aes_ctr_complete" else "not_extm3u"}")
+            }
+        }
+
+        private suspend fun loadManifest(session: Session, resource: Resource?): Pair<String, String>? {
+            val original = resource?.url ?: session.url
+            for (attempt in 0..1) {
+                if (attempt == 1) {
+                    if (session.renew().isBlank()) {
+                        Trace.event("HLS_REFRESH", "FAILED", "sid=${session.id.take(8)} reason=token_refresh_failed")
+                        return null
+                    }
+                }
+                val target = session.signed(original)
+                Trace.event("HLS_REFRESH", "REQUEST", "sid=${session.id.take(8)} attempt=$attempt target=${Trace.target(target)}")
+                val response = runCatching { app.get(target, headers = session.headers, timeout = 5) }.getOrNull()
+                if (response?.isSuccessful == true) {
+                    val decoded = decodePlaylist(response.text, session.key)
+                    if (decoded != null) {
+                        Trace.event("HLS_REFRESH", "OK", "sid=${session.id.take(8)} attempt=$attempt chars=${decoded.length}")
+                        return target to decoded
+                    }
+                }
+                Trace.event("HLS_REFRESH", "RETRY", "sid=${session.id.take(8)} attempt=$attempt http=${response?.code ?: -1} reason=${if (response == null) "request_exception" else "invalid_or_denied"}")
+            }
+            return null
+        }
+
+        private suspend fun serve(client: Socket) {
+            try {
+                client.use { socket ->
+                    socket.soTimeout = 12000
+                    val request = BufferedReader(InputStreamReader(socket.getInputStream())).readLine().orEmpty()
+                    val fields = request.split(' ')
+                    val path = fields.getOrNull(1)?.substringBefore('?').orEmpty()
+                    val parts = path.trimStart('/').split('/')
+                    val session = sessions[parts.firstOrNull().orEmpty()]
+                    var data: ByteArray? = null
+                    var type = "application/octet-stream"
+                    if (fields.firstOrNull() == "GET" && session != null && parts.size == 2) {
+                        val start = android.os.SystemClock.elapsedRealtime()
+                        session.lastUse = android.os.SystemClock.elapsedRealtime()
+                        val resource = session.resources[parts[1]]
+                        when {
+                            parts[1] == "index.m3u8" || resource?.playlist == true -> {
+                                val first = if (resource == null) session.firstPlaylist else null
+                                val original = if (resource == null) session.url else resource.url
+                                val manifest = if (first != null) {
+                                    session.firstPlaylist = null
+                                    original to first
+                                } else loadManifest(session, resource)
+                                if (manifest != null) {
+                                    data = rewrite(manifest.second, manifest.first, session).toByteArray()
+                                    type = "application/vnd.apple.mpegurl"
+                                }
+                                Trace.event("PROXY_PLAYLIST", if (data != null) "OK" else "FAILED",
+                                    "sid=${session.id.take(8)} chars=${data?.size ?: 0} reason=${if (data == null) "manifest_unavailable" else "rewritten"}")
+
+                            }
+                            resource != null -> {
+                                val response = runCatching {
+                                    app.get(resource.url, headers = session.headers, timeout = 8)
+                                }.getOrNull()
+                                if (response?.isSuccessful == true) {
+                                    val bytes = response.body.bytes()
+                                    data = DaddyLiveSegment.unwrap(bytes)
+                                    type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
+                                    else "application/octet-stream"
+                                    Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "FAILED",
+                                        "sid=${session.id.take(8)} target=${Trace.target(resource.url)} in=${bytes.size} out=${data?.size ?: 0} format=$type elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                } else {
+                                    Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
+                                        "sid=${session.id.take(8)} target=${Trace.target(resource.url)} http=${response?.code ?: -1} elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                }
+                            }
+                        }
+                    }
+                    val status = if (data == null) "502 Bad Gateway" else "200 OK"
+                    if (data == null) Trace.event("PROXY", "NO_DATA", "request=${fields.firstOrNull()} sessionPresent=${session != null} parts=${parts.size}")
+                    val payload = data ?: ByteArray(0)
+                    val header = "HTTP/1.1 $status\r\nContent-Type: $type\r\n" +
+                        "Connection: close\r\nCache-Control: no-store\r\nContent-Length: ${payload.size}\r\n\r\n"
+                    socket.getOutputStream().apply {
+                        write(header.toByteArray(StandardCharsets.US_ASCII))
+                        write(payload)
+                        flush()
+                    }
+                }
+            } catch (e: Exception) {
+                Trace.event("PROXY", "ERROR", "reason=${e.javaClass.simpleName}")
+                runCatching { client.close() }
+            }
+        }
+    }
+
+    private object DaddyLiveSegment {
+        private val pngMagic = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47)
+        private val rawMarker = "TIKTIKRAW".toByteArray()
+        private val gzipMarker = "TIKTIKTSGZ".toByteArray()
+        private val pixelMarker = "TIKTIKPX".toByteArray()
+        private const val MAX_BYTES = 32 * 1024 * 1024
+
+        private fun matches(bytes: ByteArray, at: Int, pattern: ByteArray): Boolean =
+            at >= 0 && at + pattern.size <= bytes.size &&
+                pattern.indices.all { bytes[at + it] == pattern[it] }
+
+        private fun index(bytes: ByteArray, pattern: ByteArray): Int {
+            for (at in 0..(bytes.size - pattern.size).coerceAtLeast(-1)) {
+                if (matches(bytes, at, pattern)) return at
+            }
+            return -1
+        }
+
+        private fun ts(bytes: ByteArray, at: Int): Boolean =
+            at >= 0 && at + 188 < bytes.size &&
+                bytes[at] == 0x47.toByte() && bytes[at + 188] == 0x47.toByte()
+
+        private fun be32(bytes: ByteArray, at: Int): Int =
+            (bytes[at].toInt() and 255 shl 24) or
+                (bytes[at + 1].toInt() and 255 shl 16) or
+                (bytes[at + 2].toInt() and 255 shl 8) or (bytes[at + 3].toInt() and 255)
+
+        private fun le32(bytes: ByteArray, at: Int): Int =
+            (bytes[at].toInt() and 255) or ((bytes[at + 1].toInt() and 255) shl 8) or
+                ((bytes[at + 2].toInt() and 255) shl 16) or ((bytes[at + 3].toInt() and 255) shl 24)
+
+        private fun unzip(bytes: ByteArray, offset: Int, length: Int): ByteArray? = runCatching {
+            GZIPInputStream(ByteArrayInputStream(bytes, offset, length)).use { it.readLimited() }
+                .takeIf { it.isNotEmpty() && it[0] == 0x47.toByte() }
+        }.getOrNull()
+
+        private fun java.io.InputStream.readLimited(): ByteArray {
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = read(buffer)
+                if (count < 0) break
+                if (out.size() + count > MAX_BYTES) return ByteArray(0)
+                out.write(buffer, 0, count)
+            }
+            return out.toByteArray()
+        }
+
+        fun unwrap(bytes: ByteArray): ByteArray? {
+            if (bytes.size < 8 || bytes.size > MAX_BYTES) {
+                Trace.event("SEGMENT_FORMAT", "FAILED", "reason=invalid_length bytes=${bytes.size}")
+                return null
+            }
+            if (ts(bytes, 0)) {
+                Trace.event("SEGMENT_FORMAT", "PASSTHROUGH", "format=mpegts bytes=${bytes.size}")
+                return bytes
+            }
+            if (matches(bytes, 0, pngMagic)) {
+                val result = png(bytes)
+                Trace.event("SEGMENT_FORMAT", if (result != null) "UNWRAPPED" else "FAILED",
+                    "format=png in=${bytes.size} out=${result?.size ?: 0} reason=${if (result == null) "png_wrapper_unrecognized" else "ts_recovered"}")
+                return result
+            }
+            if (matches(bytes, 0, "RIFF".toByteArray()) && matches(bytes, 8, "WEBP".toByteArray())) {
+                var at = 12
+                while (at + 8 <= bytes.size) {
+                    val size = le32(bytes, at + 4)
+                    if (size < 0 || size > bytes.size - at - 8) break
+                    if (matches(bytes, at, "EXIF".toByteArray())) {
+                        val payload = at + 8
+                        val result = bytes.copyOfRange(payload, payload + size).takeIf { ts(it, 0) }
+                        Trace.event("SEGMENT_FORMAT", if (result != null) "UNWRAPPED" else "FAILED",
+                            "format=webp_exif in=${bytes.size} out=${result?.size ?: 0}")
+                        return result
+                    }
+                    at += 8 + size + (size and 1)
+                }
+                Trace.event("SEGMENT_FORMAT", "FAILED", "format=webp reason=exif_ts_not_found bytes=${bytes.size}")
+                return null
+            }
+            val raw = index(bytes, rawMarker)
+            if (raw >= 0 && ts(bytes, raw + rawMarker.size)) {
+                Trace.event("SEGMENT_FORMAT", "UNWRAPPED", "format=raw_marker bytes=${bytes.size}")
+                return bytes.copyOfRange(raw + rawMarker.size, bytes.size)
+            }
+            val zip = index(bytes, gzipMarker)
+            if (zip >= 0) {
+                val result = unzip(bytes, zip + gzipMarker.size, bytes.size - zip - gzipMarker.size)
+                Trace.event("SEGMENT_FORMAT", if (result != null) "UNWRAPPED" else "FAILED",
+                    "format=gzip_marker in=${bytes.size} out=${result?.size ?: 0}")
+                return result
+            }
+            for (at in 0 until bytes.size - 188) {
+                if (ts(bytes, at)) {
+                    Trace.event("SEGMENT_FORMAT", "UNWRAPPED", "format=embedded_ts offset=$at bytes=${bytes.size}")
+                    return bytes.copyOfRange(at, bytes.size)
+                }
+            }
+            Trace.event("SEGMENT_FORMAT", "PASSTHROUGH", "format=unknown bytes=${bytes.size}")
+            // Preserve supported non-TS formats (e.g. fMP4) rather than altering ordinary streams.
+            return bytes
+        }
+
+        private fun png(bytes: ByteArray): ByteArray? {
+            var at = 8
+            var width = 0
+            var height = 0
+            var depth = 0
+            var color = 0
+            var interlace = 0
+            val compressed = ByteArrayOutputStream()
+            while (at + 12 <= bytes.size) {
+                val size = be32(bytes, at)
+                if (size < 0 || size > bytes.size - at - 12) return null
+                val payload = at + 8
+                when {
+                    matches(bytes, at + 4, "IHDR".toByteArray()) && size >= 13 -> {
+                        width = be32(bytes, payload)
+                        height = be32(bytes, payload + 4)
+                        depth = bytes[payload + 8].toInt() and 255
+                        color = bytes[payload + 9].toInt() and 255
+                        interlace = bytes[payload + 12].toInt() and 255
+                    }
+                    matches(bytes, at + 4, "IDAT".toByteArray()) -> {
+                        if (compressed.size() + size > MAX_BYTES) return null
+                        compressed.write(bytes, payload, size)
+                    }
+                    matches(bytes, at + 4, "IEND".toByteArray()) -> {
+                        val end = payload + size + 4
+                        if (ts(bytes, end)) return bytes.copyOfRange(end, bytes.size)
+                        break
+                    }
+                }
+                at += size + 12
+            }
+            if (width < 1 || height < 1 || width.toLong() * height > 2_000_000L ||
+                depth != 8 || interlace != 0 || (color != 2 && color != 6)) return null
+            val step = if (color == 6) 4 else 3
+            val rowSize = width * step
+            val inflated = runCatching {
+                InflaterInputStream(ByteArrayInputStream(compressed.toByteArray())).use { it.readLimited() }
+            }.getOrNull() ?: return null
+            if (inflated.size < (rowSize + 1L) * height) return null
+            val rgb = ByteArray(width * height * 3)
+            var position = 0
+            var output = 0
+            var previous = ByteArray(rowSize)
+            repeat(height) {
+                val filter = inflated[position++].toInt() and 255
+                val line = ByteArray(rowSize)
+                for (i in 0 until rowSize) {
+                    val left = if (i >= step) line[i - step].toInt() and 255 else 0
+                    val up = previous[i].toInt() and 255
+                    val upperLeft = if (i >= step) previous[i - step].toInt() and 255 else 0
+                    val predictor = when (filter) {
+                        0 -> 0
+                        1 -> left
+                        2 -> up
+                        3 -> (left + up) / 2
+                        4 -> {
+                            val p = left + up - upperLeft
+                            val a = kotlin.math.abs(p - left)
+                            val b = kotlin.math.abs(p - up)
+                            val c = kotlin.math.abs(p - upperLeft)
+                            if (a <= b && a <= c) left else if (b <= c) up else upperLeft
+                        }
+                        else -> return null
+                    }
+                    line[i] = ((inflated[position++].toInt() and 255) + predictor).toByte()
+                }
+                for (i in 0 until rowSize step step) {
+                    rgb[output++] = line[i]
+                    rgb[output++] = line[i + 1]
+                    rgb[output++] = line[i + 2]
+                }
+                previous = line
+            }
+            val marker = index(rgb, pixelMarker)
+            if (marker < 0 || marker + pixelMarker.size + 4 > rgb.size) return null
+            val lengthAt = marker + pixelMarker.size
+            val length = be32(rgb, lengthAt)
+            val gzipAt = lengthAt + 4
+            if (length < 2 || length > rgb.size - gzipAt) return null
+            return unzip(rgb, gzipAt, length)
         }
     }
 }
