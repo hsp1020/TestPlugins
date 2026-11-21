@@ -266,7 +266,7 @@ class Anilife : MainAPI() {
             if (match == null) {
                 return false
             }
-            trace("LINK_CALLBACK", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${match.url.host} query=${match.url.query != null} requestHeaders=${match.headers.keys.joinToString(",")}")
+            trace("LINK_CALLBACK", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${match.url.host} query=${match.url.query != null} requestHeaders=${match.headers.names().joinToString(",")}")
             callback(newExtractorLink(name, name, match.url.toString(), ExtractorLinkType.M3U8) {
                 this.referer = mainUrl + "/"
                 this.headers = match.headers.toMap() + ("Referer" to (mainUrl + "/"))
