@@ -325,12 +325,16 @@ class OHLI24 : MainAPI() {
         if (data.isBlank()) return false
         val doc = app.get(data, headers = headers, timeout = 20).document
         val player = sequenceOf(
-            doc.selectFirst("iframe[src]")?.attr("src"),
+            doc.select("iframe[src]").firstOrNull { iframe ->
+                val src = iframe.attr("src")
+                src.contains("cdndania.com/video/", true) || src.contains("michealcdn.com/video/", true)
+            }?.attr("src"),
             doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
             doc.select("a[href]").firstOrNull {
                 val href = it.attr("href")
                 href.contains("cdndania.com/video/", true) || href.contains("michealcdn.com", true)
-            }?.attr("href")
+            }?.attr("href"),
+            doc.selectFirst("iframe[src]")?.attr("src")
         ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
             ?.let(::absoluteUrl).orEmpty()
         if (player.isBlank()) return false

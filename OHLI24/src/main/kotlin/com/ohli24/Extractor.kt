@@ -1,5 +1,6 @@
 package com.ohli24
 
+import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -48,7 +49,8 @@ open class Cdndania : ExtractorApi() {
                 
                 val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
                 
-                response?.videoSource?.let { m3u8 ->
+                (response?.securedLink?.takeIf { it.isNotBlank() }
+                    ?: response?.videoSource?.takeIf { it.isNotBlank() })?.let { m3u8 ->
 
                     // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
                     val streamHeaders = mapOf(
@@ -104,8 +106,10 @@ open class Cdndania : ExtractorApi() {
                         )
                     }
                 } ?: run {
+                    Log.w("OHLI24", "CDN response has no playable URL")
                 }
             } catch (e: Exception) {
+                Log.w("OHLI24", "CDN extraction failed", e)
             }
         }
     }
@@ -116,11 +120,11 @@ open class Cdndania : ExtractorApi() {
 }
 
 data class Response(
-    val hls: Boolean,
-    val videoImage: String,
-    val videoSource: String,
-    val securedLink: String,
-    val downloadLinks: List<Any?>,
-    val attachmentLinks: List<Any?>,
-    val ck: String,
+    val hls: Boolean? = null,
+    val videoImage: String? = null,
+    val videoSource: String? = null,
+    val securedLink: String? = null,
+    val downloadLinks: List<Any?>? = null,
+    val attachmentLinks: List<Any?>? = null,
+    val ck: String? = null,
 )
