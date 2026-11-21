@@ -340,8 +340,8 @@ class OHLI24 : MainAPI() {
             var timeout: Runnable? = null
 
             fun finish(result: String?) {
-                trace("IFRAME_END", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${result != null}")
                 if (finished) return
+                trace("IFRAME_END", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${result != null}")
                 finished = true
                 timeout?.let(handler::removeCallbacks)
                 webView?.stopLoading()
@@ -366,13 +366,15 @@ class OHLI24 : MainAPI() {
                             (uri.host.equals("michealcdn.com", true) ||
                                 uri.host.equals("cdndania.com", true))
                         ) {
+                            trace("IFRAME_CAPTURE", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${uri.host}")
                             handler.post { finish(uri.toString()) }
                         }
                         return null
                     }
                 }
-                timeout = Runnable { finish(null) }
+                timeout = Runnable { trace("IFRAME_TIMEOUT", "ms=${android.os.SystemClock.elapsedRealtime() - start}"); finish(null) }
                 handler.postDelayed(timeout, 10000L)
+                trace("IFRAME_LOAD_URL", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                 view.loadUrl(url, headers)
             } catch (_: Exception) {
                 finish(null)
@@ -401,11 +403,15 @@ class OHLI24 : MainAPI() {
             }?.attr("href")
         ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
             ?.let(::absoluteUrl).orEmpty()
-        trace("PARSE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${player.isNotBlank()}")
-        if (player.isBlank()) player = findVideoIframe(data).orEmpty()
+        trace("PARSE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${player.isNotBlank()} iframe=${doc.selectFirst("iframe[src]") != null} form=${doc.selectFirst("form.tt input[name=vurl]") != null} cdnAnchor=${doc.select("a[href]").any { it.attr("href").contains("cdndania.com/video/", true) || it.attr("href").contains("michealcdn.com", true) }}")
+        if (player.isBlank()) {
+            trace("IFRAME_FALLBACK", "reason=no_static_candidate")
+            player = findVideoIframe(data).orEmpty()
+        }
         if (player.isBlank()) return false
 
         trace("EXTRACT_START", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${runCatching { java.net.URL(player).host }.getOrDefault("unknown")}")
+        trace("EXTRACT_BRANCH", "customCdn=${player.contains("cdndania.com/video/", true)}")
         if (player.contains("cdndania.com/video/", true)) {
             Cdndania().getUrl(player, mainUrl, subtitleCallback, callback)
         } else {

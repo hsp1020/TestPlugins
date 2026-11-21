@@ -190,8 +190,10 @@ class KotbcExtractor : ExtractorApi() {
 
             view.evaluateJavascript(js) { result ->
                 if (result.contains("CLICKED")) {
+                    trace("POPUP_CLICKED", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                     clicked.set(true)
                 } else if (!finished.get()) {
+                    trace("POPUP_BUTTON_RETRY", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                     handler.postDelayed(
                         { clickPlaybackButton(view) },
                         300L
@@ -202,7 +204,10 @@ class KotbcExtractor : ExtractorApi() {
 
         fun captureWrapper(url: String?) {
             val value = url.orEmpty()
-            if (isGlamovWrapper(value)) finish(value)
+            if (isGlamovWrapper(value)) {
+                trace("POPUP_WRAPPER_CAPTURE", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${runCatching { java.net.URL(value).host }.getOrDefault("unknown")}")
+                finish(value)
+            }
         }
 
         cont.invokeOnCancellation {
@@ -276,8 +281,9 @@ class KotbcExtractor : ExtractorApi() {
                     }
                 }
 
-                handler.postDelayed({ finish(null) }, 12000L)
+                handler.postDelayed({ trace("POPUP_TIMEOUT", "ms=${android.os.SystemClock.elapsedRealtime() - start}"); finish(null) }, 12000L)
 
+                trace("POPUP_LOAD_URL", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                 parentView.loadUrl(
                     pageUrl,
                     mapOf("User-Agent" to desktopUa)
@@ -334,16 +340,16 @@ class KotbcExtractor : ExtractorApi() {
     ) {
         val start = android.os.SystemClock.elapsedRealtime()
         trace("WRAPPER_WEBVIEW_START", "player=${playerUrl != null}")
+        trace("WRAPPER_INPUT", "wrapperHost=${runCatching { java.net.URL(wrapperUrl).host }.getOrDefault("unknown")} playerHost=${runCatching { java.net.URL(playerUrl ?: "").host }.getOrDefault("none")}")
         val captured = runMediaWebView(
             startUrl = wrapperUrl,
             initialReferer = pageReferer,
             expectedPlayerUrl = playerUrl,
             startIsPlayer = false,
             timeoutMs = 15000L
-        ) ?: return
+        ) ?: run { trace("WRAPPER_WEBVIEW_EMPTY", "ms=${android.os.SystemClock.elapsedRealtime() - start}"); return }
 
         trace("WRAPPER_WEBVIEW_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
-        trace("DIRECT_WEBVIEW_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         resolveCapturedUrl(captured)?.let {
             emitLink(it, callback)
         }
@@ -362,8 +368,9 @@ class KotbcExtractor : ExtractorApi() {
             expectedPlayerUrl = playerUrl,
             startIsPlayer = true,
             timeoutMs = 10000L
-        ) ?: return
+        ) ?: run { trace("DIRECT_WEBVIEW_EMPTY", "ms=${android.os.SystemClock.elapsedRealtime() - start}"); return }
 
+        trace("DIRECT_WEBVIEW_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         resolveCapturedUrl(captured)?.let {
             emitLink(it, callback)
         }
@@ -475,7 +482,7 @@ class KotbcExtractor : ExtractorApi() {
                             expectedMatch ||
                             lower.contains("nnmo0oi1.com/video/")
                         ) {
-                            playerSeen.set(true)
+                            if (playerSeen.compareAndSet(false, true)) trace("MEDIA_PLAYER_SEEN", "ms=${android.os.SystemClock.elapsedRealtime() - start} expected=$expectedMatch")
                         }
 
                         if (!playerSeen.get()) {
@@ -505,7 +512,7 @@ class KotbcExtractor : ExtractorApi() {
                                 )
 
                         if (isManifest || isLegacyPlaylist) {
-                            trace("MEDIA_CAPTURE", "ms=${android.os.SystemClock.elapsedRealtime() - start} manifest=$isManifest legacy=$isLegacyPlaylist")
+                            trace("MEDIA_CAPTURE", "ms=${android.os.SystemClock.elapsedRealtime() - start} manifest=$isManifest legacy=$isLegacyPlaylist host=${request?.url?.host}")
                             finish(
                                 InterceptResult(
                                     requestUrl,
@@ -521,7 +528,7 @@ class KotbcExtractor : ExtractorApi() {
                     }
                 }
 
-                handler.postDelayed({ finish(null) }, timeoutMs)
+                handler.postDelayed({ trace("MEDIA_TIMEOUT", "ms=${android.os.SystemClock.elapsedRealtime() - start} playerSeen=${playerSeen.get()}"); finish(null) }, timeoutMs)
 
                 val headers = mutableMapOf(
                     "User-Agent" to desktopUa
@@ -531,6 +538,7 @@ class KotbcExtractor : ExtractorApi() {
                     headers["Referer"] = initialReferer
                 }
 
+                trace("MEDIA_LOAD_URL", "ms=${android.os.SystemClock.elapsedRealtime() - start} player=$startIsPlayer")
                 view.loadUrl(startUrl, headers)
             } catch (_: Exception) {
                 finish(null)
@@ -549,6 +557,7 @@ class KotbcExtractor : ExtractorApi() {
             lower.contains(".m3u8") ||
             lower.contains(".mpd")
         ) {
+            trace("CAPTURE_DIRECT", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
             return captured
         }
 
@@ -564,6 +573,7 @@ class KotbcExtractor : ExtractorApi() {
                 .replace("\\u002F", "/")
                 .replace("\\u0026", "&")
 
+            trace("CAPTURE_CLASS", "ms=${android.os.SystemClock.elapsedRealtime() - start} isM3u8=${body.trimStart().startsWith("#EXTM3U")} chars=${body.length}")
             if (body.trimStart().startsWith("#EXTM3U")) {
                 captured
             } else {
@@ -572,11 +582,13 @@ class KotbcExtractor : ExtractorApi() {
                     RegexOption.IGNORE_CASE
                 ).find(body)?.value
 
+                trace("CAPTURE_EMBEDDED", "found=${manifest != null}")
                 manifest?.let {
                     InterceptResult(it, captured.headers)
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            trace("CAPTURE_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
             null
         }
     }

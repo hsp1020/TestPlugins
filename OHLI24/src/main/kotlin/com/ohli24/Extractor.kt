@@ -43,6 +43,7 @@ open class Cdndania : ExtractorApi() {
                 trace("CDN_PAGE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - pageStart}")
                 val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
                 val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
+                trace("CDN_SUBTITLE_PARSE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${srtUrl.isNotBlank()}")
 
                 val extractedHash = url.substringAfterLast("/").substringBefore('?')
                 val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
@@ -83,6 +84,7 @@ open class Cdndania : ExtractorApi() {
                             m3u8Res.document.text().trim()
                         }
                         
+                        trace("CDN_MANIFEST_CLASS", "ms=${android.os.SystemClock.elapsedRealtime() - start} isM3u8=${content.startsWith("#EXTM3U")} chars=${content.length}")
                         // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
                         if (!content.startsWith("#EXTM3U")) {
                             val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
@@ -91,6 +93,7 @@ open class Cdndania : ExtractorApi() {
                             }
                         }
                     } catch (e: Exception) {
+                        trace("CDN_MANIFEST_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
                     }
 
                     // 추출기 링크 생성 및 콜백
@@ -117,6 +120,7 @@ open class Cdndania : ExtractorApi() {
                         )
                     }
                 } ?: run {
+                    trace("CDN_API_EMPTY", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                 }
             } catch (e: Exception) {
                 trace("CDN_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
