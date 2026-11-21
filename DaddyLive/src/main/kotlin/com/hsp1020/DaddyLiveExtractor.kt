@@ -12,8 +12,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
+import android.webkit.JavascriptInterface
+import java.net.HttpURLConnection
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
@@ -1086,7 +1086,7 @@ class DaddyLiveExtractor : ExtractorApi() {
               if (window.__daddyResponseProbe) return;
               window.__daddyResponseProbe = true;
               var bridge = window.DaddyResponseTrace;
-              function emit(x) { try { if (bridge) bridge.postMessage(JSON.stringify(x)); } catch (_) {} }
+              function emit(x) { try { if (bridge) { x.origin = location.origin; bridge.postMessage(JSON.stringify(x)); } } catch (_) {} }
               function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
               function kindOf(raw, method) {
                 var p = pathOf(raw);
@@ -1173,6 +1173,87 @@ class DaddyLiveExtractor : ExtractorApi() {
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
             })();
         """.trimIndent()
+        /** Intercept only the embedded player's JavaScript, not its auth or media API.
+         * Prepend the response probe before daddy.min.js runs while retaining the script body. */
+        private fun instrumentPlayerScript(request: WebResourceRequest, session: Session): WebResourceResponse? {
+            val address = request.url.toString()
+            val begun = android.os.SystemClock.elapsedRealtime()
+            Trace.event("RESPONSE_BRIDGE", "SCRIPT_FETCH",
+                "sid=${session.id.take(8)} target=${Trace.target(address)} mode=original_js_with_probe")
+            var connection: HttpURLConnection? = null
+            return try {
+                val active = URL(address).openConnection() as HttpURLConnection
+                connection = active
+                active.connectTimeout = 4500
+                active.readTimeout = 4500
+                active.setRequestProperty("Accept-Encoding", "identity")
+                request.requestHeaders.forEach { (name, value) ->
+                    if (!name.equals("Host", true) && !name.equals("Accept-Encoding", true) &&
+                        !name.equals("Content-Length", true) && value.isNotBlank()) {
+                        active.setRequestProperty(name, value)
+                    }
+                }
+                if (request.requestHeaders.keys.none { it.equals("Referer", true) }) {
+                    active.setRequestProperty("Referer", session.embedded)
+                }
+                if (request.requestHeaders.keys.none { it.equals("User-Agent", true) }) {
+                    active.setRequestProperty("User-Agent", session.userAgent)
+                }
+                runCatching { CookieManager.getInstance().getCookie(address) }.getOrNull()?.let {
+                    active.setRequestProperty("Cookie", it)
+                }
+                val status = active.responseCode
+                if (status != 200 || !active.url.host.equals("dembed.st", true)) {
+                    Trace.event("RESPONSE_BRIDGE", "SCRIPT_HTTP_FAIL",
+                        "sid=${session.id.take(8)} http=$status redirectedHost=${active.url.host} " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun} fallback=browser_native")
+                    return null
+                }
+                val stream = if (active.contentEncoding.equals("gzip", true)) {
+                    GZIPInputStream(active.inputStream)
+                } else active.inputStream
+                val out = ByteArrayOutputStream()
+                stream.use { input ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        if (out.size() + n > 2 * 1024 * 1024) {
+                            Trace.event("RESPONSE_BRIDGE", "SCRIPT_TOO_LARGE",
+                                "sid=${session.id.take(8)} fallback=browser_native")
+                            return null
+                        }
+                        out.write(buffer, 0, n)
+                    }
+                }
+                val original = out.toByteArray()
+                if (original.isEmpty()) {
+                    Trace.event("RESPONSE_BRIDGE", "SCRIPT_EMPTY",
+                        "sid=${session.id.take(8)} fallback=browser_native")
+                    return null
+                }
+                val probeBytes = (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8)
+                val result = ByteArray(probeBytes.size + original.size)
+                System.arraycopy(probeBytes, 0, result, 0, probeBytes.size)
+                System.arraycopy(original, 0, result, probeBytes.size, original.size)
+                Trace.event("RESPONSE_BRIDGE", "SCRIPT_INJECTED",
+                    "sid=${session.id.take(8)} originalBytes=${original.size} " +
+                        "probeBytes=${probeBytes.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun}")
+                WebResourceResponse(
+                    "application/javascript", "UTF-8",
+                    200, "OK", mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(result)
+                )
+            } catch (e: Exception) {
+                Trace.event("RESPONSE_BRIDGE", "SCRIPT_ERROR",
+                    "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun} fallback=browser_native")
+                null
+            } finally {
+                connection?.disconnect()
+            }
+        }
+
         private val main = Handler(Looper.getMainLooper())
         private val sessions = ConcurrentHashMap<String, Session>()
         private val io = CoroutineScope(Dispatchers.IO)
@@ -1265,6 +1346,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
+            @JavascriptInterface
+            fun postMessage(raw: String) = onBrowserMessage(raw)
+
             fun onBrowserMessage(raw: String) {
                 if (raw.length > 300000) {
                     Trace.event("RESPONSE_BRIDGE", "REJECT", "sid=${id.take(8)} reason=message_over_limit bytes=${raw.length}")
@@ -1273,6 +1357,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val message = runCatching { JSONObject(raw) }.getOrNull()
                 if (message == null) {
                     Trace.event("RESPONSE_BRIDGE", "ERROR", "sid=${id.take(8)} reason=invalid_json")
+                    return
+                }
+                if (message.optString("origin") != EMBED_ORIGIN) {
+                    Trace.event("RESPONSE_BRIDGE", "REJECT",
+                        "sid=${id.take(8)} reason=invalid_frame_origin")
                     return
                 }
                 val stage = message.optString("stage")
@@ -1449,34 +1538,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                             view.settings.domStorageEnabled = true
                             view.settings.mediaPlaybackRequiresUserGesture = false
                             CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
-                            val origins = setOf(EMBED_ORIGIN)
-                            session.probeAvailable = WebViewFeature.isFeatureSupported(
-                                WebViewFeature.WEB_MESSAGE_LISTENER
-                            ) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-                            if (session.probeAvailable) {
-                                try {
-                                    WebViewCompat.addWebMessageListener(
-                                        view, "DaddyResponseTrace", origins,
-                                        WebViewCompat.WebMessageListener { _, message, sourceOrigin, _, _ ->
-                                            if (sourceOrigin.scheme == "https" && sourceOrigin.host == "dembed.st") {
-                                                session.onBrowserMessage(message.data.orEmpty())
-                                            }
-                                        }
-                                    )
-                                    WebViewCompat.addDocumentStartJavaScript(view, responseProbe, origins)
-                                    Trace.event("RESPONSE_BRIDGE", "READY",
-                                        "sid=${session.id.take(8)} origin=$EMBED_ORIGIN " +
-                                            "webview=${WebViewCompat.getCurrentWebViewPackage(context)?.versionName ?: "unknown"}")
-                                } catch (e: Exception) {
-                                    session.probeAvailable = false
-                                    Trace.event("RESPONSE_BRIDGE", "INSTALL_FAILED",
-                                        "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
-                                }
-                            } else {
-                                Trace.event("RESPONSE_BRIDGE", "UNSUPPORTED",
-                                    "sid=${session.id.take(8)} documentStart=${WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)} " +
-                                        "webMessage=${WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)}")
-                            }
+                            // Android framework bridge: available to isolated CloudStream plugins
+                            // without depending on AndroidX WebKit classes at runtime.
+                            session.probeAvailable = true
+                            view.addJavascriptInterface(session, "DaddyResponseTrace")
+                            Trace.event("RESPONSE_BRIDGE", "READY",
+                                "sid=${session.id.take(8)} mode=framework_js_interface " +
+                                    "injection=player_js_prepend")
                             view.webChromeClient = object : WebChromeClient() {
                                 override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
                                     val raw = message?.message().orEmpty()
@@ -1561,6 +1629,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     if (request == null) return null
                                     val uri = request.url
                                     val address = uri.toString()
+                                    if (request.method.equals("GET", true) &&
+                                        uri.scheme == "https" && uri.host.equals("dembed.st", true) &&
+                                        uri.path?.equals("/premiumtv/daddy.min.js", true) == true) {
+                                        return instrumentPlayerScript(request, session)
+                                    }
                                     if (uri.scheme == "https" && uri.path == "/api/playlist-token" &&
                                         (uri.getQueryParameter("slug")?.startsWith("premium") == true ||
                                             uri.getQueryParameter("channel")?.startsWith("premium") == true ||
