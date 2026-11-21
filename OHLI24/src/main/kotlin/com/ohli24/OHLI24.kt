@@ -1,6 +1,11 @@
 package com.ohli24
 
 import android.util.Log
+import com.lagradost.cloudstream3.network.WebViewResolver
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CancellationException
 
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -348,9 +353,24 @@ class OHLI24 : MainAPI() {
                 " inertia=" + (doc.selectFirst("script[data-page=app]") != null) +
                 " iframe=" + ohliSafeUrl(iframe) +
                 " vurl=" + ohliSafeUrl(vurl) + " cdnAnchor=" + ohliSafeUrl(cdnAnchor))
-            val player = sequenceOf(iframe, vurl, cdnAnchor)
+            var player = sequenceOf(iframe, vurl, cdnAnchor)
                 .filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
                 ?.let(::absoluteUrl).orEmpty()
+            if (player.isBlank()) {
+                Log.i("OHLI24Trace", "phase=WEBVIEW_IFRAME_START trace=" + trace)
+                player = try {
+                    WebViewResolver(
+                        Regex("""https?://(?:cdndania|michealcdn)\.com/video/[^\s]+""", RegexOption.IGNORE_CASE),
+                        userAgent = null, useOkhttp = false, timeout = 12000L
+                    ).resolveUsingWebView(data, headers = headers).first?.url?.toString().orEmpty()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w("OHLI24Trace", "phase=WEBVIEW_IFRAME_ERROR trace=" + trace, e)
+                    ""
+                }
+                Log.i("OHLI24Trace", "phase=WEBVIEW_IFRAME_RESULT trace=" + trace +
+                    " selected=" + ohliSafeUrl(player))
+            }
             Log.i("OHLI24Trace", "phase=PLAYER_SELECTED trace=" + trace +
                 " selected=" + ohliSafeUrl(player) +
                 " mode=" + if (player.contains("cdndania.com/video/", true)) "CdndaniaDirect" else "loadExtractor")
@@ -375,6 +395,29 @@ class OHLI24 : MainAPI() {
             } else {
                 Log.i("OHLI24Trace", "phase=DISPATCH_GENERIC trace=" + trace)
                 loadExtractor(player, mainUrl, trackSubtitle, trackLink)
+            }
+            if (links == 0 && (player.contains("cdndania.com/video/", true) || player.contains("michealcdn.com/video/", true))) {
+                Log.i("OHLI24Trace", "phase=WEBVIEW_HLS_START trace=" + trace)
+                try {
+                    val request = WebViewResolver(
+                        Regex("""https?://[^\s]+\.m3u8(?:\?[^\s]*)?""", RegexOption.IGNORE_CASE),
+                        userAgent = null, useOkhttp = false, timeout = 12000L
+                    ).resolveUsingWebView(player, referer = data).first
+                    if (request != null) {
+                        val origin = URI(player).let { "${it.scheme}://${it.host}" }
+                        val stream = request.url.toString()
+                        trackLink(newExtractorLink("CDN", "CDN", stream, ExtractorLinkType.M3U8) {
+                            this.headers = request.headers.toMap() + mapOf("Referer" to player, "Origin" to origin)
+                            this.referer = player
+                            this.quality = Qualities.P1080.value
+                        })
+                    }
+                    Log.i("OHLI24Trace", "phase=WEBVIEW_HLS_RESULT trace=" + trace +
+                        " found=" + (request != null) + " links=" + links)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w("OHLI24Trace", "phase=WEBVIEW_HLS_ERROR trace=" + trace, e)
+                }
             }
             if (links == 0) Log.w("OHLI24Trace", "phase=EXTRACTOR_NO_LINK trace=" + trace)
             Log.i("OHLI24Trace", "phase=LINK_RETURN trace=" + trace + " result=true links=" + links + " subtitles=" + subtitles)
