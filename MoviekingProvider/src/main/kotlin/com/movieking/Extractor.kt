@@ -88,6 +88,9 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val timingStart = android.os.SystemClock.elapsedRealtime()
+        fun timing(phase: String, detail: String = "") = android.util.Log.d("MovieKingTiming", "phase=$phase elapsedMs=${android.os.SystemClock.elapsedRealtime() - timingStart} $detail")
+        timing("START")
         try {
             val uri = URI(url)
             val hostUrl = "${uri.scheme}://${uri.host}"
@@ -100,10 +103,13 @@ class BcbcRedExtractor : ExtractorApi() {
             )
 
             var playerRes = app.get(url, headers = playerHeaders)
+            timing("PLAYER_HTTP", "status=${playerRes.code}")
             var m3u8Url = extractM3u8Url(playerRes.text, url)
             if (m3u8Url == null && pageReferer.trimEnd('/') != hostUrl.trimEnd('/')) {
                 val selfHeaders = playerHeaders + mapOf("Referer" to "$hostUrl/", "Origin" to hostUrl)
+                timing("PLAYER_RETRY_START")
                 val response = app.get(url, headers = selfHeaders)
+                timing("PLAYER_RETRY_END", "status=${response.code}")
                 val candidate = extractM3u8Url(response.text, url)
                 if (candidate != null) {
                     playerRes = response
@@ -111,8 +117,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
             if (m3u8Url == null) {
+                timing("NO_PLAYLIST_URL")
                 return
             }
+            timing("PLAYLIST_URL_FOUND")
 
             val mediaHeaders = mapOf(
                 "Referer" to playerRes.url,
@@ -122,6 +130,7 @@ class BcbcRedExtractor : ExtractorApi() {
             )
             val playlistResponse = app.get(m3u8Url, headers = mediaHeaders)
             val playlist = playlistResponse.text
+            timing("PLAYLIST_HTTP", "status=${playlistResponse.code} bytes=${playlist.length}")
             if (!playlist.trimStart().startsWith("#EXTM3U")) {
                 return
             }
@@ -151,8 +160,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
 
+            timing("SECTIONS_PARSED", "count=${sections.size}")
             // No AES key: preserve the original URL and let Media3 fetch the playlist directly.
             if (sections.isEmpty()) {
+                timing("DIRECT_LINK")
                 callback(newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.headers = mediaHeaders
                     this.referer = playerRes.url
@@ -162,18 +173,23 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val payloadCache = HashMap<String, ByteArray>()
             for ((position, section) in sections.withIndex()) {
+                timing("KEY_FETCH_START", "section=$position cached=${payloadCache.containsKey(section.keyUrl)}")
                 val keyPayload = payloadCache[section.keyUrl] ?: app.get(section.keyUrl, headers = mediaHeaders)
                     .body.bytes().also { payloadCache[section.keyUrl] = it }
+                timing("KEY_FETCH_END", "section=$position bytes=${keyPayload.size}")
                 if (keyPayload.size == 16) {
                     section.plainKey = true
                     continue
                 }
                 val candidates = withContext(Dispatchers.Default) { solveKeyCandidatesCombinatorial(keyPayload) }
+                timing("KEY_CANDIDATES", "section=$position count=${candidates.size}")
                 val segmentUrl = section.sampleSegment
                 if (segmentUrl == null || candidates.isEmpty()) {
                     return
                 }
+                timing("SEGMENT_FETCH_START", "section=$position")
                 val encrypted = segmentPrefix(segmentUrl, mediaHeaders)
+                timing("SEGMENT_FETCH_END", "section=$position bytes=${encrypted.size}")
                 if (encrypted.size < 16) {
                     return
                 }
@@ -196,6 +212,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         }
                     }
                 }
+                timing("AES_VERIFY_END", "section=$position success=${winner != null} candidates=${candidates.size} ivs=${ivs.size}")
                 if (winner == null) {
                     return
                 }
@@ -204,6 +221,7 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             if (sections.all { it.plainKey }) {
+                timing("PLAIN_KEY_DIRECT_LINK")
                 callback(newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.headers = mediaHeaders
                     this.referer = playerRes.url
@@ -246,11 +264,13 @@ class BcbcRedExtractor : ExtractorApi() {
             }.joinToString("\n")
 
             proxy.addSession(sessionId, rewritten, keys)
+            timing("PROXY_READY", "playlistBytes=${rewritten.length} keys=${keys.size}")
             callback(newExtractorLink(name, name, "$prefix/playlist.m3u8", ExtractorLinkType.M3U8) {
                 this.headers = mediaHeaders
                 this.referer = playerRes.url
             })
         } catch (error: Exception) {
+            timing("ERROR", "type=${error.javaClass.simpleName}")
             if (error is CancellationException) throw error
         }
     }
