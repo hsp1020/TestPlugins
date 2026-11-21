@@ -261,16 +261,20 @@ class TVMon : MainAPI() {
 
         val iframe = doc.selectFirst("iframe#view_iframe")
         if (iframe != null) {
-            val playerUrl = iframe.attr("data-player1").ifEmpty { iframe.attr("data-player2") }.ifEmpty { iframe.attr("src") }
-            if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
+            val playerUrl = iframe.attr("src").ifEmpty { iframe.attr("data-player1") }.ifEmpty { iframe.attr("data-player2") }
+            if (playerUrl.startsWith("https://") || playerUrl.startsWith("http://")) {
+                if (BunnyPoorCdn().extract(playerUrl.replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
+            }
         }
 
         try {
-            val webViewDoc = app.get(targetData, headers = commonHeaders, interceptor = WebViewResolver(Regex("bunny-frame|googleapis"), timeout = 15000L)).document
+            val webViewDoc = app.get(targetData, headers = commonHeaders, interceptor = WebViewResolver(Regex("bunny-frame|bunny-video|poorcdn|googleapis"), timeout = 15000L)).document
             val wbIframe = webViewDoc.selectFirst("iframe#view_iframe") ?: webViewDoc.selectFirst("iframe[src*='bunny-frame']")
             if (wbIframe != null) {
                 val playerUrl = wbIframe.attr("src")
-                if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
+                if (playerUrl.startsWith("https://") || playerUrl.startsWith("http://")) {
+                    if (BunnyPoorCdn().extract(playerUrl.replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
+                }
             }
         } catch (e: Exception) { if (e is CancellationException) throw e }
 
@@ -299,7 +303,9 @@ class TVMon : MainAPI() {
             val json = app.post("$mainUrl/api/create_session.php", headers = headers, requestBody = sessionData.toRequestBody("application/json".toMediaTypeOrNull())).parsedSafe<SessionResponse>()
             if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
                 val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
-                if (fullUrl.contains("player.bunny-frame.online")) return BunnyPoorCdn().extract(fullUrl, refererUrl, subtitleCallback, callback, null)
+                if (fullUrl.startsWith("https://") || fullUrl.startsWith("http://")) {
+                    return BunnyPoorCdn().extract(fullUrl, refererUrl, subtitleCallback, callback, null)
+                }
             }
         } catch (e: Exception) { if (e is CancellationException) throw e }
         return false
