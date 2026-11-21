@@ -1420,7 +1420,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         "reason=$errorReason browserHlsHttpError=${session.manifestHttpError ?: -1} " +
                         "browserAuthHttpError=${session.authHttpError ?: -1} " +
                         "headerNames=${response.headers.names().sorted().joinToString(",")} " +
-                        "contentType=${response.header("Content-Type").orEmpty().substringBefore(';')}")
+                        "contentType=${response.headers["Content-Type"].orEmpty().substringBefore(';')}")
                 if (!response.isSuccessful) {
                     session.close()
                     null
