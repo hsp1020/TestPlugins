@@ -234,8 +234,7 @@ class TVMon : MainAPI() {
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val href = fixUrl(li.selectFirst("a.ep-link")?.attr("href") ?: return@mapNotNull null)
             val epName = li.selectFirst(".clamp")?.text()?.trim() ?: li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
-            val epThumb = li.selectFirst(".img-container img")?.let { it.attr("data-src").ifEmpty { it.attr("src") } }
-            newEpisode(href) { this.name = epName; this.posterUrl = fixUrl(epThumb ?: "") }
+            newEpisode(href) { this.name = epName }
         }.reversed()
 
 
