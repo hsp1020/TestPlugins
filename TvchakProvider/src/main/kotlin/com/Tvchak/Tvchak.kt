@@ -405,8 +405,9 @@ class TvchakProvider : MainAPI() {
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
         val isDirectBcdn = rawUrl.contains("b-cdn.net")
         trace("LINK_PARSED", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} wrapper=$isChakttWrapper bcdn=$isDirectBcdn rawHost=${runCatching { java.net.URL(rawUrl).host }.getOrDefault("unknown")}")
+        if (isDirectBcdn && !isChakttWrapper) trace("HANDSHAKE_SKIPPED", "reason=direct_bcdn")
 
-        if (isChakttWrapper || isDirectBcdn) {
+        if (isChakttWrapper) {
             var detectDomain = "https://ckp.wiselife.blog" 
 
             if (rawUrl.contains("chaktt.php") || rawUrl.contains("wiselife")) {
