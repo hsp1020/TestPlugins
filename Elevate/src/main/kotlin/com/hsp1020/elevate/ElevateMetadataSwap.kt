@@ -1622,6 +1622,15 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                 it.second == mappedTmdbSeason }
                                 .map { it.third }.maxOrNull() else null
                         val fromEpisode = mapping?.tmdbFromEpisode ?: priorEnd?.plus(1) ?: 1
+                        val sourceFromEpisode = mapping?.run {
+                            when {
+                                imdbSeason == appSeason && imdbFromEpisode != null -> imdbFromEpisode
+                                tvdbSeason == appSeason && tvdbFromEpisode != null -> tvdbFromEpisode
+                                traktSeason == appSeason && traktFromEpisode != null -> traktFromEpisode
+                                tmdbSeason == appSeason && tmdbFromEpisode != null -> tmdbFromEpisode
+                                else -> this.fromEpisode
+                            }
+                        } ?: 1
                         if (mappedTmdbSeason != null)
                             Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=OFFSET" +
                                 " season=$appSeason tmdb=$targetId:S$mappedTmdbSeason" +
@@ -1649,7 +1658,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             val aioTarget = if (isSpecial) 0 to number else
                                 range?.let { it.season to absolute!! }
                                 ?: mapping?.tmdbSeason?.let {
-                                    it to (fromEpisode + number - (mapping.fromEpisode ?: 1))
+                                    it to (fromEpisode + number - sourceFromEpisode)
                                 }
                                 ?: if (!anime) appSeason to number else null
                             val aioData = aioTarget?.let { targets[it.first]?.get(it.second) }

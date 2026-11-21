@@ -26,7 +26,8 @@ internal object ElevateAnimeIdResolver {
         val imdbSeason: Int? = null, val tmdbFromEpisode: Int? = null,
         val tmdbRanges: List<TmdbRange> = emptyList(),
         val tvdbFromEpisode: Int? = null, val tvdbAbsoluteOrder: Boolean? = null,
-        val tvdbRanges: List<TvdbRange> = emptyList()
+        val tvdbRanges: List<TvdbRange> = emptyList(),
+        val imdbFromEpisode: Int? = null, val traktFromEpisode: Int? = null
     ) {
         fun matchesSeason(season: Int): Boolean =
             ElevateWatchHistoryRules.consistentSeason(season,
@@ -612,7 +613,9 @@ internal object ElevateAnimeIdResolver {
                                 if (tvdb.has("absoluteOrder") && !tvdb.isNull("absoluteOrder"))
                                     tvdb.optBoolean("absoluteOrder") else null
                             },
-                            tvdbRanges
+                            tvdbRanges,
+                            data.optJSONObject("imdb")?.optInt("fromEpisode")?.takeIf { it > 0 },
+                            data.optJSONObject("trakt")?.optInt("fromEpisode")?.takeIf { it > 0 }
                         )
                         if (allowSplitSeasons) android.util.Log.i("MetaEpisodeMap",
                             "phase=AIO_ACCEPT season=$season host=$host ranges=${ranges.size} kitsu=$kitsu elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestedAt}")
