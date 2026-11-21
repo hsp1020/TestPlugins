@@ -515,7 +515,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             session.keys[parts[2].removeSuffix(".bin")]
                         else -> null
                     }
-                    if (data != null) session.lastAccess = android.os.SystemClock.elapsedRealtime()
+                    if (data != null) session?.lastAccess = android.os.SystemClock.elapsedRealtime()
                     val type = if (path.endsWith(".m3u8")) "application/vnd.apple.mpegurl" else "application/octet-stream"
                     val status = if (data == null) "404 Not Found" else "200 OK"
                     val payload = data ?: ByteArray(0)

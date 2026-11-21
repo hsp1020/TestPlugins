@@ -451,7 +451,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                         else -> null
                     }
-                    if (data != null) session.lastAccess = android.os.SystemClock.elapsedRealtime()
+                    if (data != null) session?.lastAccess = android.os.SystemClock.elapsedRealtime()
                     val type = if (path.endsWith(".m3u8")) "application/vnd.apple.mpegurl" else "application/octet-stream"
                     val status = when {
                         session == null -> "404 Not Found"
