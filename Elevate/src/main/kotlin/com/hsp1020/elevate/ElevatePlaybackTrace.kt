@@ -8,11 +8,13 @@ import android.os.Bundle
 internal class ElevatePlaybackTrace(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private var running = false
+    private val hlsStartupTrace = ElevateHlsStartupTrace()
     fun start() {
         if (running) return
         running = true
         application.registerActivityLifecycleCallbacks(this)
         ElevateActivityResultOwner.bootstrap()
+        hlsStartupTrace.start()
     }
 
     fun stop() {
@@ -20,6 +22,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         running = false
         application.unregisterActivityLifecycleCallbacks(this)
         ElevateActivityResultOwner.reset()
+        hlsStartupTrace.stop()
 
     }
 
@@ -28,6 +31,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
     override fun onActivityPostCreated(activity: Activity, state: Bundle?) {
         ElevateActivityResultOwner.track(activity, "POST_CREATE")
         DownloadedPlayerLeakCleanup.trackLivePlayers(activity)
+        hlsStartupTrace.track(activity)
     }
 
     override fun onActivityPreDestroyed(activity: Activity) {
@@ -40,6 +44,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         ElevateActivityResultOwner.onDestroy(activity)
         // Fallback on older Android versions; callback removal is idempotent.
         DownloadedPlayerLeakCleanup.onDestroy(activity)
+        hlsStartupTrace.untrack(activity)
         ReceiverRegistrationTrace.snapshot(activity, "DESTROYED")
         ElevateJavaAllocationProfile.checkpoint(application, "ACTIVITY_DESTROY")
     }
@@ -48,6 +53,7 @@ internal class ElevatePlaybackTrace(private val application: Application) :
         // Also covers Android versions without onActivityPostCreated().
         ElevateActivityResultOwner.track(activity, "STARTED")
         DownloadedPlayerLeakCleanup.trackLivePlayers(activity)
+        hlsStartupTrace.track(activity)
     }
     override fun onActivityResumed(activity: Activity) {
         ReceiverRegistrationTrace.snapshot(activity, "RESUMED")
