@@ -47,7 +47,7 @@ class TvchakProvider : MainAPI() {
         "4" to "애니"
     )
 
-    private val trailingYear = Regex("""\s*\(\d{4}\)\s*$""")
+    private val trailingYear = Regex("""\s*[\(（]\s*\d{4}\s*[\)）]""")
     private fun cleanTitle(title: String) = title.trim().replace(trailingYear, "").trim()
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
@@ -315,8 +315,7 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         
         val realUrl = url.substringBefore("?poster=")
-        val isMovieCategory = url.substringAfter("?poster=", "").contains("&tvchakMovie=1")
-        val encodedPoster = url.substringAfter("?poster=", "").substringBefore("&tvchakMovie=")
+        val encodedPoster = url.substringAfter("?poster=", "")
         val passedPoster = if (encodedPoster.isNotBlank()) {
             URLDecoder.decode(encodedPoster, "UTF-8")
         } else null
@@ -338,7 +337,7 @@ class TvchakProvider : MainAPI() {
             }
         }.sortedBy { it.episode }
 
-        if (isMovieCategory && episodes.size == 1 && episodes[0].name == "바로보기") {
+        if (episodes.size == 1 && episodes[0].name == "바로보기") {
             return newMovieLoadResponse(title, realUrl, TvType.Movie, episodes[0].data) {
                 this.posterUrl = poster
                 this.plot = plot
@@ -462,7 +461,7 @@ class TvchakProvider : MainAPI() {
             }
 
             val encodedPoster = URLEncoder.encode(poster, "UTF-8")
-            val finalUrl = "$href?poster=$encodedPoster" + if (isMovie) "&tvchakMovie=1" else ""
+            val finalUrl = "$href?poster=$encodedPoster"
             val type = if (isMovie) TvType.Movie else TvType.TvSeries
 
             newTvSeriesSearchResponse(title, finalUrl, type) {
