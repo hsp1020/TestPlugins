@@ -47,20 +47,41 @@ open class Cdndania : ExtractorApi() {
                     " http=" + videoResponse.code + " htmlLength=" + videoResponse.text.length +
                     " subtitleScript=" + script.isNotBlank() + " srtFound=" + srtUrl.isNotBlank())
 
-                val extractedHash = url.substringAfterLast("/")
+                val extractedHash = url.substringAfterLast("/").substringBefore('?')
                 val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
                 val header = mapOf("x-requested-with" to "XMLHttpRequest")
                 val safeReferer = referer ?: ""
                 val formdata = mapOf("hash" to extractedHash, "r" to safeReferer)
-                Log.w("OHLI24Trace", "phase=HASH_INPUT trace=" + trace +
+                Log.i("OHLI24Trace", "phase=HASH_INPUT trace=" + trace +
                     " pathIdLength=" + url.substringBefore('?').substringAfterLast('/').length +
                     " sentHashLength=" + extractedHash.length +
-                    " includesQuery=" + extractedHash.contains('?') +
+                    " queryStripped=" + url.substringAfterLast('/').contains('?') +
                     " queryKeys=" + ohliSafeUrl(url).substringAfter("queryKeys=", "") +
                     " postRefererPresent=" + safeReferer.isNotBlank())
+                Log.i("OHLI24Trace", "phase=CDN_REQUEST trace=" + trace +
+                    " method=POST endpoint=" + ohliSafeUrl(m3u8Url) +
+                    " getDataLength=" + extractedHash.length +
+                    " postHashLength=" + formdata["hash"]?.length +
+                    " postFields=" + formdata.keys.joinToString(",") +
+                    " headerKeys=" + header.keys.joinToString(","))
 
                 val postResponse = app.post(m3u8Url, headers = header, data = formdata)
                 val response = postResponse.parsedSafe<Response>()
+                val body = postResponse.text
+                val jsonKeys = runCatching {
+                    org.json.JSONObject(body).keys().asSequence().toList().joinToString(",")
+                }.getOrDefault("NOT_OBJECT")
+                val contentType = postResponse.okhttpResponse.header("Content-Type").orEmpty()
+                Log.i("OHLI24Trace", "phase=CDN_BODY_DIAGNOSTIC trace=" + trace +
+                    " type=" + contentType.substringBefore(';').take(50) +
+                    " bodyKind=" + when {
+                        body.isBlank() -> "EMPTY"
+                        body.trimStart().startsWith("{") -> "OBJECT"
+                        body.trimStart().startsWith("[") -> "ARRAY"
+                        body.trimStart().startsWith("<") -> "HTML"
+                        else -> "OTHER"
+                    } + " jsonKeys=" + jsonKeys +
+                    " responseHeaderKeys=" + postResponse.okhttpResponse.headers.names().joinToString(","))
                 Log.i("OHLI24Trace", "phase=CDN_POST trace=" + trace +
                     " http=" + postResponse.code + " bodyLength=" + postResponse.text.length +
                     " parsed=" + (response != null) +

@@ -390,10 +390,58 @@ class OHLI24 : MainAPI() {
                             }
                         }
                     }
+
+                    view.webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(message: android.webkit.ConsoleMessage?): Boolean {
+                            if (message != null && (
+                                message.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR ||
+                                message.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.WARNING
+                            )) {
+                                val detail = message.message().replace(Regex("""https?://[^\s"']+"""), "[URL]")
+                                    .replace(Regex("""(?i)(?:token|md5|signature|hash|expires|t)=[^\s&]+"""), "[REDACTED]")
+                                    .take(180)
+                                Log.w("OHLI24Trace", "phase=WEBVIEW_JS_CONSOLE trace=" + trace +
+                                    " severity=" + message.messageLevel() + " line=" + message.lineNumber() +
+                                    " source=" + ohliSafeUrl(message.sourceId()) + " detail=" + detail)
+                            }
+                            return false
+                        }
+                    }
                     view.webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: android.graphics.Bitmap?) {
+                            Log.i("OHLI24Trace", "phase=WEBVIEW_NAV_START trace=" + trace +
+                                " url=" + ohliSafeUrl(startedUrl))
+                        }
+                        override fun onReceivedError(
+                            view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?
+                        ) {
+                            if (request?.isForMainFrame == true || request?.url?.host?.contains("ohli24") == true) {
+                                Log.w("OHLI24Trace", "phase=WEBVIEW_RESOURCE_ERROR trace=" + trace +
+                                    " url=" + ohliSafeUrl(request?.url?.toString()) +
+                                    " mainFrame=" + (request?.isForMainFrame == true) +
+                                    " code=" + error?.errorCode)
+                            }
+                        }
+                        override fun onReceivedHttpError(
+                            view: WebView?, request: WebResourceRequest?, response: android.webkit.WebResourceResponse?
+                        ) {
+                            if (request?.isForMainFrame == true || response?.statusCode != 404) {
+                                Log.w("OHLI24Trace", "phase=WEBVIEW_HTTP_ERROR trace=" + trace +
+                                    " url=" + ohliSafeUrl(request?.url?.toString()) +
+                                    " status=" + response?.statusCode + " mainFrame=" + (request?.isForMainFrame == true))
+                            }
+                        }
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             if (!completed) {
-                                Log.i("OHLI24Trace", "phase=WEBVIEW_DOM_READY trace=" + trace)
+                                Log.i("OHLI24Trace", "phase=WEBVIEW_DOM_READY trace=" + trace +
+                                    " url=" + ohliSafeUrl(finishedUrl))
+                                view?.evaluateJavascript(
+                                    """document.readyState + '|frames=' + document.querySelectorAll('iframe').length +
+                                       '|scripts=' + document.scripts.length"""
+                                ) { raw ->
+                                    Log.i("OHLI24Trace", "phase=WEBVIEW_DOM_STATE trace=" + trace +
+                                        " summary=" + raw.take(100))
+                                }
                                 poll?.let { handler.removeCallbacks(it); handler.post(it) }
                             }
                         }
@@ -402,6 +450,9 @@ class OHLI24 : MainAPI() {
                         ): android.webkit.WebResourceResponse? {
                             val candidate = request?.url?.toString().orEmpty()
                             if (isVideoFrame(candidate)) {
+                                Log.i("OHLI24Trace", "phase=WEBVIEW_REQUEST_OBSERVED trace=" + trace +
+                                    " method=" + request?.method + " frame=" + ohliSafeUrl(candidate) +
+                                    " headerKeys=" + request?.requestHeaders?.keys?.joinToString(","))
                                 handler.post {
                                     Log.i("OHLI24Trace", "phase=WEBVIEW_REQUEST_FOUND trace=" + trace +
                                         " frame=" + ohliSafeUrl(candidate))
@@ -498,13 +549,31 @@ class OHLI24 : MainAPI() {
             if (links == 0 && (player.contains("cdndania.com/video/", true) || player.contains("michealcdn.com/video/", true))) {
                 Log.i("OHLI24Trace", "phase=WEBVIEW_HLS_START trace=" + trace)
                 try {
-                    val request = WebViewResolver(
+                    val (request, observedGetVideo) = WebViewResolver(
                         Regex("""https?://[^\s]+\.m3u8(?:\?[^\s]*)?""", RegexOption.IGNORE_CASE),
+                        additionalUrls = listOf(
+                            Regex("""https?://(?:cdndania|michealcdn)\.com/player/index\.php\?[^\s]*do=getVideo""", RegexOption.IGNORE_CASE)
+                        ),
                         userAgent = null, useOkhttp = false, timeout = 12000L
-                    ).resolveUsingWebView(player, referer = data).first
+                    ).resolveUsingWebView(player, referer = data)
+                    observedGetVideo.forEach { seen ->
+                        Log.i("OHLI24Trace", "phase=BROWSER_GETVIDEO_REQUEST trace=" + trace +
+                            " method=" + seen.method +
+                            " url=" + ohliSafeUrl(seen.url.toString()) +
+                            " dataLength=" + (seen.url.queryParameter("data")?.length ?: -1) +
+                            " headerKeys=" + seen.headers.names().joinToString(",") +
+                            " refererPresent=" + (seen.header("Referer") != null) +
+                            " originPresent=" + (seen.header("Origin") != null))
+                    }
+                    Log.i("OHLI24Trace", "phase=BROWSER_REQUEST_SUMMARY trace=" + trace +
+                        " getVideoCount=" + observedGetVideo.size +
+                        " hlsFound=" + (request != null))
                     if (request != null) {
                         val origin = URI(player).let { "${it.scheme}://${it.host}" }
                         val stream = request.url.toString()
+                        Log.i("OHLI24Trace", "phase=BROWSER_HLS_REQUEST trace=" + trace +
+                            " method=" + request.method + " url=" + ohliSafeUrl(stream) +
+                            " headerKeys=" + request.headers.names().joinToString(","))
                         trackLink(newExtractorLink("CDN", "CDN", stream, ExtractorLinkType.M3U8) {
                             this.headers = request.headers.toMap() + mapOf("Referer" to player, "Origin" to origin)
                             this.referer = player
