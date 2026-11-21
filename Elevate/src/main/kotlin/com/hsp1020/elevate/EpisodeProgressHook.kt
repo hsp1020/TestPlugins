@@ -28,6 +28,7 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.NEXT_WATCH_EPISODE_PERCENTAGE
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
+import com.lagradost.cloudstream3.ui.result.getDisplayPosition
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper.getVideoWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
@@ -365,7 +366,17 @@ internal class EpisodeProgressHook(
             // Keep the latest horizontal thumbnail progress design.
             // Without update() the newly created SlimProgressView remains GONE
             // and CloudStream's original circular overlay stays visible.
-            state.update()
+            val episodeAdapter = adapter as? EpisodeAdapter
+            val adapterPosition = list?.getChildViewHolder(row)?.bindingAdapterPosition
+                ?: RecyclerView.NO_POSITION
+            val episode = if (episodeAdapter != null && adapterPosition != RecyclerView.NO_POSITION)
+                episodeAdapter.getItemOrNull(adapterPosition - episodeAdapter.headers) else null
+            val completed = episode?.let {
+                it.videoWatchState == VideoWatchState.Watched ||
+                    getVideoWatchState(it.id) == VideoWatchState.Watched ||
+                    (it.duration > 0 && it.getDisplayPosition() >= it.duration)
+            } == true
+            state.update(completed)
 
         }
     }
@@ -407,9 +418,13 @@ internal class EpisodeProgressHook(
     ) {
         private val originalOverlayVisibility = overlay.visibility
 
-        fun update() {
-            val visible = native.visibility == View.VISIBLE && native.max > 0 && native.progress > 0
-            val amount = if (visible) (native.progress.toFloat() / native.max * 1000f).toInt().coerceIn(0, 1000) else 0
+        fun update(completed: Boolean) {
+            val visible = completed || (native.visibility == View.VISIBLE && native.max > 0 && native.progress > 0)
+            val amount = when {
+                completed -> 1000
+                visible -> (native.progress.toFloat() / native.max * 1000f).toInt().coerceIn(0, 1000)
+                else -> 0
+            }
             if (horizontal.progress != amount) horizontal.progress = amount
             val target = if (visible) View.VISIBLE else View.GONE
             if (horizontal.visibility != target) horizontal.visibility = target
