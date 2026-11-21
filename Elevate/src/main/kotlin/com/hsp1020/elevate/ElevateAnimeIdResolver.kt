@@ -293,7 +293,7 @@ internal object ElevateAnimeIdResolver {
         }
         val visited = mutableSetOf(seed)
         var frontier = listOf(seed)
-        for (depth in 0..3) {
+        for (depth in 0..5) {
             val links = mutableListOf<Pair<String, String>>()
             val matches = mutableListOf<VerifiedEpisode>()
             for (id in frontier) {
@@ -309,7 +309,7 @@ internal object ElevateAnimeIdResolver {
                         matches.add(VerifiedEpisode(candidate!!, local, "KITSU_FRANCHISE"))
                     audit(feature, "FRANCHISE_CHECK", "depth=$depth kitsu=$id tvdb=${candidate?.tvdb} season=${candidate?.tvdbSeason} local=$local valid=${local != null && hasLocal(meta, id, local)}")
                 }
-                if (depth == 3) continue
+                if (depth == 5) continue
                 val array = meta.optJSONArray("links") ?: continue
                 for (index in 0 until array.length()) {
                     val link = array.optJSONObject(index) ?: continue
@@ -332,7 +332,7 @@ internal object ElevateAnimeIdResolver {
             if (matches.size == 1) return matches.single().also {
                 audit(feature, "FRANCHISE_RESULT", "status=MATCH depth=$depth kitsu=${it.mapping.kitsu} local=${it.localEpisode}")
             }
-            if (depth == 3) break
+            if (depth == 5) break
             val next = mutableListOf<String>()
             for ((id, _) in (if (preferred == null) links else
                 links.sortedBy { if (it.second == preferred) 0 else 1 })) {
