@@ -53,7 +53,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -63,7 +63,8 @@ class DaddyLiveExtractor : ExtractorApi() {
         private const val TAG = "DaddyLiveTrace"
         fun target(raw: String): String = try {
             val parsed = URL(raw)
-            parsed.host + parsed.path
+            val path = parsed.path
+            parsed.host + if (path.length > 160) path.take(52) + "/[opaquePathChars=${path.length}]" else path
         } catch (_: Exception) { "invalid-url" }
         fun event(phase: String, status: String, detail: String = "") {
             android.util.Log.i(TAG, "phase=$phase status=$status $detail")
@@ -1170,6 +1171,58 @@ class DaddyLiveExtractor : ExtractorApi() {
                 var r=e.reason;
                 emit({stage:"promise_error",error:String(r && (r.message || r.name) || "rejection").slice(0,180)});
               });
+              // Proxy requests run in the original authenticated iframe, not a new HTTP session.
+              window.addEventListener("message", function(ev) {
+                if (ev.source !== window.parent || ev.origin !== "https://thedaddy.li") return;
+                var cmd = ev.data;
+                if (!cmd || cmd.daddyProxy !== 1 ||
+                    !/^[a-f0-9]{32}$/.test(String(cmd.id)) ||
+                    (cmd.kind !== "manifest" && cmd.kind !== "segment")) return;
+                (async function() {
+                  var target = new URL(cmd.url);
+                  if (target.protocol !== "https:" || !/^\/premium/.test(target.pathname)) throw Error("invalid_resource_url");
+                  if (cmd.kind === "manifest") {
+                    // Refresh in the dembed iframe rather than the unrelated parent page.
+                    var renew = typeof fetchPlaylistToken === "function" ? fetchPlaylistToken :
+                      (typeof window.fetchPlaylistToken === "function" ? window.fetchPlaylistToken : null);
+                    if (renew) {
+                      try {
+                        var next = await renew();
+                        var valid = typeof next === "string" && !!next;
+                        if (valid) {
+                          target.searchParams.set("t", next);
+                          target.searchParams.set("_", String(Date.now()));
+                        }
+                        emit({stage:"proxy_refresh_info", available:true, token:valid});
+                      } catch (e) { emit({stage:"proxy_refresh_error", error:String(e && e.name || "refresh_failed")}); }
+                    } else emit({stage:"proxy_refresh_info", available:false, token:false});
+                  }
+                  var response = await fetch(target.toString(), {cache:"no-store", credentials:"omit"});
+                  if (!response.ok) {
+                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                      url:target.toString(),error:"upstream_http_"+response.status});
+                    return;
+                  }
+                  if (cmd.kind === "manifest") {
+                    var text = await response.text();
+                    if (text.length > 262144) throw Error("manifest_too_large");
+                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                      url:target.toString(),body:text});
+                  } else {
+                    var buffer = await response.arrayBuffer();
+                    if (buffer.byteLength > 4*1024*1024) throw Error("segment_too_large");
+                    var bytes = new Uint8Array(buffer), pieces = [], step = 8192;
+                    for (var i=0; i<bytes.length; i+=step) {
+                      pieces.push(String.fromCharCode.apply(null, bytes.subarray(i,i+step)));
+                    }
+                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                      url:target.toString(),data:btoa(pieces.join(""))});
+                  }
+                })().catch(function(e) {
+                  emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                    error:String(e && e.name || e || "browser_request_failed")});
+                });
+              });
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
             })();
         """.trimIndent()
@@ -1262,14 +1315,17 @@ class DaddyLiveExtractor : ExtractorApi() {
         @Volatile private var port = 0
 
         private class Resource(val url: String, val playlist: Boolean)
+        private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
         private class Session(val parent: String, val embedded: String) {
             val id: String = UUID.randomUUID().toString().replace("-", "")
             val resources = ConcurrentHashMap<String, Resource>()
+            private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
+            val manifestMutex = Mutex()
+            val failedSegments = ConcurrentHashMap<String, Long>()
             @Volatile var browser: WebView? = null
             @Volatile var url: String = ""
             @Volatile var token: String = ""
             @Volatile var key: ByteArray? = null
-            @Volatile var pending: CompletableDeferred<String>? = null
             @Volatile var firstPlaylist: String? = null
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
             @Volatile var userAgent = "Mozilla/5.0"
@@ -1281,6 +1337,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var probeInstalled = false
             @Volatile var browserManifestBody: String? = null
             @Volatile var browserManifestUrl: String = ""
+            @Volatile var browserManifestAt = 0L
             @Volatile var browserTokenHttp = -1
             @Volatile var browserTicketHttp = -1
             val browserManifestReady = CompletableDeferred<Boolean>()
@@ -1339,6 +1396,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 Uri.parse(browserManifestUrl).getQueryParameter("t").isNullOrBlank()) {
                                 browserManifestBody = body
                                 browserManifestUrl = address
+                                browserManifestAt = android.os.SystemClock.elapsedRealtime()
                                 if (!browserManifestReady.isCompleted) browserManifestReady.complete(true)
                             }
                         }
@@ -1350,7 +1408,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun postMessage(raw: String) = onBrowserMessage(raw)
 
             fun onBrowserMessage(raw: String) {
-                if (raw.length > 300000) {
+                if (raw.length > 6 * 1024 * 1024) {
                     Trace.event("RESPONSE_BRIDGE", "REJECT", "sid=${id.take(8)} reason=message_over_limit bytes=${raw.length}")
                     return
                 }
@@ -1392,6 +1450,30 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 "reportedChars=${message.optInt("length")} truncated=$truncated " +
                                 "headers=${message.optString("headers").take(180)}")
                         responseState(kind, status, target, body, truncated)
+                    }
+                    "proxy_refresh_info" -> {
+                        Trace.event("AUTH_REFRESH", if (message.optBoolean("token")) "BROWSER_OK" else "BROWSER_UNAVAILABLE",
+                            "sid=${id.take(8)} functionAvailable=${message.optBoolean("available")} tokenPresent=${message.optBoolean("token")}")
+                    }
+                    "proxy_refresh_error" -> {
+                        Trace.event("AUTH_REFRESH", "BROWSER_ERROR",
+                            "sid=${id.take(8)} reason=${message.optString("error").take(64)}")
+                    }
+                    "proxy_resource" -> {
+                        val id = message.optString("id")
+                        val request = pendingResources[id] ?: return
+                        val kind = message.optString("kind")
+                        val status = message.optInt("http", 0)
+                        val body = if (kind == "manifest") message.optString("body") else null
+                        val bytes = if (kind == "segment" && status in 200..299) {
+                            runCatching { Base64.decode(message.optString("data"), Base64.DEFAULT) }
+                                .getOrNull()?.takeIf { it.isNotEmpty() }
+                        } else null
+                        val result = BrowserReply(status, message.optString("url"), body, bytes)
+                        Trace.event("PROXY_BROWSER", if (status in 200..299 && (body != null || bytes != null)) "OK" else "FAILED",
+                            "sid=${this.id.take(8)} kind=$kind http=$status text=${body?.length ?: 0} " +
+                                "bytes=${bytes?.size ?: 0} reason=${message.optString("error").take(64)}")
+                        request.complete(result)
                     }
                     "network_error", "read_error", "clone_error", "install_error", "js_error", "promise_error" -> {
                         val error = message.optString("error").lowercase()
@@ -1450,29 +1532,62 @@ class DaddyLiveExtractor : ExtractorApi() {
                         "authRequests=$authRequestCount authHttpError=${authHttpError ?: -1}")
             }
 
-            fun record(text: String) {
-                if (!text.startsWith("DADDY_TOKEN:")) return
-                val value = text.substringAfter("DADDY_TOKEN:")
-                if (value.isNotBlank()) token = value
-                pending?.complete(value)
-                pending = null
-            }
-
-            suspend fun renew(): String {
-                Trace.event("AUTH_REFRESH", "START", "sid=${id.take(8)}")
-                val promise = CompletableDeferred<String>()
-                pending = promise
-                main.post {
-                    browser?.evaluateJavascript(
-                        "try { fetchPlaylistToken().then(function(t) { console.log('DADDY_TOKEN:' + (t || '')) })" +
-                            ".catch(function(){console.log('DADDY_TOKEN:')}) } catch(e) { console.log('DADDY_TOKEN:') }",
-                        null
-                    ) ?: promise.complete("")
+            suspend fun browserRequest(kind: String, address: String): BrowserReply? {
+                if (!probeInstalled || browser == null) {
+                    Trace.event("PROXY_BROWSER", "UNAVAILABLE", "sid=${id.take(8)} kind=$kind installed=$probeInstalled")
+                    return null
                 }
-                return withTimeoutOrNull(4500L) { promise.await() }.orEmpty().also {
-                    Trace.event("AUTH_REFRESH", if (it.isNotBlank()) "OK" else "FAILED",
-                        "sid=${id.take(8)} reason=${if (it.isBlank()) "empty_or_timeout" else "new_token"}")
-                    if (pending === promise) pending = null
+                // Only forward a resource from this specific player's origin and channel directory.
+                val valid = runCatching {
+                    val source = URL(url)
+                    val target = URL(address)
+                    source.protocol == "https" && target.protocol == "https" &&
+                        source.host.equals(target.host, true) &&
+                        target.path.startsWith(source.path.substringBeforeLast('/') + "/")
+                }.getOrDefault(false)
+                if (!valid) {
+                    Trace.event("PROXY_BROWSER", "REJECT", "sid=${id.take(8)} kind=$kind reason=outside_channel")
+                    return null
+                }
+                val requestId = UUID.randomUUID().toString().replace("-", "")
+                val result = CompletableDeferred<BrowserReply?>()
+                pendingResources[requestId] = result
+                val command = JSONObject().put("daddyProxy", 1).put("id", requestId)
+                    .put("kind", kind).put("url", address).toString()
+                val script = """(function(){
+                    var cmd=$command, n=0, frames=document.querySelectorAll('iframe');
+                    for(var i=0;i<frames.length;i++) {
+                        try {
+                            if(new URL(frames[i].src).origin==='https://dembed.st') {
+                                frames[i].contentWindow.postMessage(cmd,'https://dembed.st'); n++;
+                            }
+                        }catch(e){}
+                    }
+                    return n;
+                })();""".trimIndent()
+                main.post {
+                    val view = browser
+                    if (view == null) result.complete(null)
+                    else runCatching {
+                        view.evaluateJavascript(script) { response ->
+                            if (response?.trim()?.toIntOrNull() == 0) {
+                                Trace.event("PROXY_BROWSER", "NO_FRAME", "sid=${id.take(8)} kind=$kind")
+                                result.complete(null)
+                            }
+                        }
+                    }.onFailure {
+                        Trace.event("PROXY_BROWSER", "DISPATCH_ERROR",
+                            "sid=${id.take(8)} kind=$kind reason=${it.javaClass.simpleName}")
+                        result.complete(null)
+                    }
+                }
+                return try {
+                    withTimeoutOrNull(9000L) { result.await() }.also {
+                        if (it == null) Trace.event("PROXY_BROWSER", "TIMEOUT",
+                            "sid=${id.take(8)} kind=$kind target=${Trace.target(address)}")
+                    }
+                } finally {
+                    pendingResources.remove(requestId)
                 }
             }
 
@@ -1495,6 +1610,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             fun close() {
+                pendingResources.values.forEach { it.complete(null) }
+                pendingResources.clear()
                 val player = browser
                 browser = null
                 main.post { runCatching { player?.stopLoading(); player?.destroy() } }
@@ -1548,9 +1665,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                             view.webChromeClient = object : WebChromeClient() {
                                 override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
                                     val raw = message?.message().orEmpty()
-                                    if (raw.startsWith("DADDY_TOKEN:")) {
-                                        Trace.event("AUTH_WEBVIEW", "JS_TOKEN_CALLBACK", "sid=${session.id.take(8)} hasValue=${raw.length > 12}")
-                                    }
                                     if (message?.message() != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
                                         val kind = when {
                                             raw.contains("turnstile", true) || raw.contains("captcha", true) -> "challenge"
@@ -1563,7 +1677,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         Trace.event("AUTH_JS", "ERROR",
                                             "sid=${session.id.take(8)} kind=$kind source=${Trace.target(message.sourceId())} line=${message.lineNumber()}")
                                     }
-                                    session.record(raw)
                                     return false
                                 }
                             }
@@ -1959,29 +2072,67 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
 
         private suspend fun loadManifest(session: Session, resource: Resource?): Pair<String, String>? {
-            val original = resource?.url ?: session.url
-            for (attempt in 0..1) {
-                if (attempt == 1) {
-                    if (session.renew().isBlank()) {
-                        Trace.event("HLS_REFRESH", "FAILED", "sid=${session.id.take(8)} reason=token_refresh_failed")
-                        return null
+            session.manifestMutex.lock()
+            try {
+                val source = resource?.url ?: session.url
+                val now = android.os.SystemClock.elapsedRealtime()
+                val cached = if (resource == null) session.browserManifestBody else null
+                val cacheAge = now - session.browserManifestAt
+                // Reuse a recent original-browser live playlist instead of requesting it again.
+                if (cached != null && cacheAge in 0..1500L) {
+                    decodePlaylist(cached, session.key)?.let {
+                        Trace.event("HLS_REFRESH", "BROWSER_CACHE",
+                            "sid=${session.id.take(8)} ageMs=$cacheAge chars=${it.length}")
+                        return session.browserManifestUrl to it
                     }
                 }
-                val target = session.signed(original)
-                Trace.event("HLS_REFRESH", "REQUEST", "sid=${session.id.take(8)} attempt=$attempt target=${Trace.target(target)}")
+                val browser = session.browserRequest("manifest", session.signed(source))
+                if (browser != null && browser.status in 200..299 && !browser.body.isNullOrBlank()) {
+                    val decoded = decodePlaylist(browser.body, session.key)
+                    if (decoded != null) {
+                        session.browserManifestBody = browser.body
+                        session.browserManifestUrl = browser.address
+                        session.browserManifestAt = android.os.SystemClock.elapsedRealtime()
+                        session.url = browser.address
+                        Trace.event("HLS_REFRESH", "BROWSER_OK",
+                            "sid=${session.id.take(8)} chars=${decoded.length}")
+                        return browser.address to decoded
+                    }
+                    Trace.event("HLS_REFRESH", "BROWSER_INVALID",
+                        "sid=${session.id.take(8)} reason=playlist_decode_failed")
+                }
+                // A failed browser request must not trigger repeated 403s through a different
+                // HTTP client. Use the last good live manifest briefly while the player recovers.
+                if (cached != null && cacheAge in 0..8000L) {
+                    decodePlaylist(cached, session.key)?.let {
+                        Trace.event("HLS_REFRESH", "LAST_GOOD",
+                            "sid=${session.id.take(8)} ageMs=$cacheAge browserHttp=${browser?.status ?: -1}")
+                        return session.browserManifestUrl to it
+                    }
+                }
+                if (browser != null && browser.status in 400..599) {
+                    Trace.event("HLS_REFRESH", "BROWSER_HTTP_FAIL",
+                        "sid=${session.id.take(8)} http=${browser.status} reason=browser_refused")
+                    return null
+                }
+                // Only fallback when the browser bridge is unavailable (e.g. unsupported frame).
+                val target = session.signed(source)
                 val response = runCatching { app.get(target, headers = session.headers, timeout = 5) }.getOrNull()
                 if (response?.isSuccessful == true) {
                     val decoded = decodePlaylist(response.text, session.key)
                     if (decoded != null) {
-                        Trace.event("HLS_REFRESH", "OK", "sid=${session.id.take(8)} attempt=$attempt chars=${decoded.length}")
+                        Trace.event("HLS_REFRESH", "CLIENT_OK",
+                            "sid=${session.id.take(8)} chars=${decoded.length} fallback=bridge_unavailable")
                         return target to decoded
                     }
                 }
-                Trace.event("HLS_REFRESH", "RETRY",
-                    "sid=${session.id.take(8)} attempt=$attempt http=${response?.code ?: -1} " +
-                        "reason=${if (response == null) "request_exception" else if (!response.isSuccessful) Trace.bodyReason(response.text) else "invalid_playlist"}")
+                Trace.event("HLS_REFRESH", "FAILED",
+                    "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
+                        "clientHttp=${response?.code ?: -1} reason=${if (response == null) "client_exception" else if (!response.isSuccessful) Trace.bodyReason(response.text) else "invalid_manifest"}")
+                return null
+            } finally {
+                session.manifestMutex.unlock()
             }
-            return null
         }
 
         private suspend fun serve(client: Socket) {
@@ -2016,19 +2167,41 @@ class DaddyLiveExtractor : ExtractorApi() {
 
                             }
                             resource != null -> {
-                                val response = runCatching {
-                                    app.get(resource.url, headers = session.headers, timeout = 8)
-                                }.getOrNull()
-                                if (response?.isSuccessful == true) {
-                                    val bytes = response.body.bytes()
-                                    data = DaddyLiveSegment.unwrap(bytes)
-                                    type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
-                                    else "application/octet-stream"
-                                    Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "FAILED",
-                                        "sid=${session.id.take(8)} target=${Trace.target(resource.url)} in=${bytes.size} out=${data?.size ?: 0} format=$type elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                val retryAfter = session.failedSegments[resource.url] ?: 0L
+                                if (start < retryAfter) {
+                                    Trace.event("PROXY_SEGMENT", "SKIP_REPEATED_FAILURE",
+                                        "sid=${session.id.take(8)} remainingMs=${retryAfter-start}")
                                 } else {
-                                    Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
-                                        "sid=${session.id.take(8)} target=${Trace.target(resource.url)} http=${response?.code ?: -1} elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                    val browser = session.browserRequest("segment", resource.url)
+                                    var bytes = browser?.takeIf { it.status in 200..299 }?.bytes
+                                    var clientHttp = -1
+                                    if (bytes == null && (browser == null || browser.status == 0 ||
+                                            browser.status in 200..299)) {
+                                        val response = runCatching {
+                                            app.get(resource.url, headers = session.headers, timeout = 8)
+                                        }.getOrNull()
+                                        clientHttp = response?.code ?: -1
+                                        if (response?.isSuccessful == true) bytes = response.body.bytes()
+                                    }
+                                    if (bytes != null) {
+                                        data = DaddyLiveSegment.unwrap(bytes)
+                                        type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
+                                            else "application/octet-stream"
+                                        Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "DECODE_FAIL",
+                                            "sid=${session.id.take(8)} source=${if (browser?.bytes != null) "browser" else "client"} " +
+                                                "in=${bytes.size} out=${data?.size ?: 0} type=$type " +
+                                                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                    } else {
+                                        val http = clientHttp.takeIf { it in 400..599 }
+                                            ?: browser?.status?.takeIf { it != 0 } ?: clientHttp
+                                        if (http in 400..599) {
+                                            if (session.failedSegments.size > 32) session.failedSegments.clear()
+                                            session.failedSegments[resource.url] = start + 10000L
+                                        }
+                                        Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
+                                            "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
+                                                "clientHttp=$clientHttp elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                    }
                                 }
                             }
                         }
