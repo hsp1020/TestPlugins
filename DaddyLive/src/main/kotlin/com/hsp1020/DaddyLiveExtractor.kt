@@ -1197,27 +1197,53 @@ class DaddyLiveExtractor : ExtractorApi() {
                       } catch (e) { emit({stage:"proxy_refresh_error", error:String(e && e.name || "refresh_failed")}); }
                     } else emit({stage:"proxy_refresh_info", available:false, token:false});
                   }
+                  if (cmd.kind === "segment") {
+                    // Match LiveLoader's binary XHR path; fetch() may be handled differently.
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("GET", target.toString(), true);
+                    xhr.responseType = "arraybuffer";
+                    xhr.timeout = 5000;
+                    xhr.onload = function() {
+                      if (xhr.status < 200 || xhr.status >= 300) {
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
+                          error:"xhr_http_"+xhr.status});
+                        return;
+                      }
+                      try {
+                        var buffer = xhr.response;
+                        if (!buffer || !buffer.byteLength || buffer.byteLength > 4*1024*1024)
+                          throw Error("invalid_segment_length");
+                        var bytes = new Uint8Array(buffer), pieces = [], step = 8192;
+                        for (var i=0; i<bytes.length; i+=step)
+                          pieces.push(String.fromCharCode.apply(null, bytes.subarray(i,i+step)));
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
+                          url:target.toString(),data:btoa(pieces.join(""))});
+                      } catch (e) {
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                          error:String(e && e.message || "segment_decode_failed")});
+                      }
+                    };
+                    xhr.onerror = function() {
+                      emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status || 0,
+                        error:"xhr_network_or_cors"});
+                    };
+                    xhr.ontimeout = function() {
+                      emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                        error:"xhr_timeout"});
+                    };
+                    xhr.send();
+                    return;
+                  }
                   var response = await fetch(target.toString(), {cache:"no-store", credentials:"omit"});
                   if (!response.ok) {
                     emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
                       url:target.toString(),error:"upstream_http_"+response.status});
                     return;
                   }
-                  if (cmd.kind === "manifest") {
-                    var text = await response.text();
-                    if (text.length > 262144) throw Error("manifest_too_large");
-                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
-                      url:target.toString(),body:text});
-                  } else {
-                    var buffer = await response.arrayBuffer();
-                    if (buffer.byteLength > 4*1024*1024) throw Error("segment_too_large");
-                    var bytes = new Uint8Array(buffer), pieces = [], step = 8192;
-                    for (var i=0; i<bytes.length; i+=step) {
-                      pieces.push(String.fromCharCode.apply(null, bytes.subarray(i,i+step)));
-                    }
-                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
-                      url:target.toString(),data:btoa(pieces.join(""))});
-                  }
+                  var text = await response.text();
+                  if (text.length > 262144) throw Error("manifest_too_large");
+                  emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                    url:target.toString(),body:text});
                 })().catch(function(e) {
                   emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
                     error:String(e && e.name || e || "browser_request_failed")});
@@ -1314,7 +1340,10 @@ class DaddyLiveExtractor : ExtractorApi() {
         private var server: ServerSocket? = null
         @Volatile private var port = 0
 
-        private class Resource(val url: String, val playlist: Boolean)
+        private class Resource(
+            val url: String, val playlist: Boolean,
+            val sequence: Long? = null, val manifestBase: String? = null
+        )
         private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
         private class Session(val parent: String, val embedded: String) {
             val id: String = UUID.randomUUID().toString().replace("-", "")
@@ -1582,7 +1611,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     }
                 }
                 return try {
-                    withTimeoutOrNull(9000L) { result.await() }.also {
+                    withTimeoutOrNull(if (kind == "segment") 5500L else 7000L) { result.await() }.also {
                         if (it == null) Trace.event("PROXY_BROWSER", "TIMEOUT",
                             "sid=${id.take(8)} kind=$kind target=${Trace.target(address)}")
                     }
@@ -1603,9 +1632,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                 return out.build().toString()
             }
 
-            fun reference(target: String, manifest: Boolean): String {
+            fun reference(
+                target: String, manifest: Boolean,
+                sequence: Long? = null, manifestBase: String? = null
+            ): String {
                 val key = UUID.randomUUID().toString().replace("-", "")
-                resources[key] = Resource(target, manifest)
+                resources[key] = Resource(target, manifest, sequence, manifestBase)
                 return "http://127.0.0.1:$port/$id/$key"
             }
 
@@ -2013,20 +2045,40 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }.getOrNull()
 
-        private fun rewrite(playlist: String, source: String, session: Session): String =
-            playlist.lineSequence().joinToString("\n") { line ->
+        private fun rewrite(playlist: String, source: String, session: Session): String {
+            var sequence = Regex("""(?m)^#EXT-X-MEDIA-SEQUENCE:\s*(\d+)""")
+                .find(playlist)?.groupValues?.getOrNull(1)?.toLongOrNull()
+            return playlist.lineSequence().joinToString("\n") { line ->
                 if (line.startsWith("#")) {
                     attribute.replace(line) { match ->
-                        val absolute = absolute(source, match.groupValues[1])
-                        if (absolute == null) match.value
-                        else "URI=\"${session.reference(absolute, absolute.substringBefore('?').endsWith(".m3u8", true))}\""
+                        val target = absolute(source, match.groupValues[1])
+                        if (target == null) match.value
+                        else "URI=\"${session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))}\""
                     }
                 } else if (line.isBlank()) line else {
                     val target = absolute(source, line.trim())
-                    if (target == null) line
-                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))
+                    if (target == null) line else {
+                        val isPlaylist = target.substringBefore('?').endsWith(".m3u8", true)
+                        val index = if (isPlaylist) null else sequence?.also { sequence = it + 1 }
+                        session.reference(target, isPlaylist, index, source)
+                    }
                 }
             } + "\n"
+        }
+
+        private fun segmentAtSequence(manifest: String, base: String, wanted: Long): String? {
+            var sequence = Regex("""(?m)^#EXT-X-MEDIA-SEQUENCE:\s*(\d+)""")
+                .find(manifest)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: return null
+            for (line in manifest.lineSequence()) {
+                val text = line.trim()
+                if (text.isEmpty() || text.startsWith("#")) continue
+                val target = absolute(base, text) ?: return null
+                if (target.substringBefore('?').endsWith(".m3u8", true)) return null
+                if (sequence == wanted) return target
+                sequence++
+            }
+            return null
+        }
 
         private fun decodePlaylist(body: String, key: ByteArray?): String? {
             if (body.trimStart().startsWith("#EXTM3U")) {
@@ -2071,7 +2123,9 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        private suspend fun loadManifest(session: Session, resource: Resource?): Pair<String, String>? {
+        private suspend fun loadManifest(
+            session: Session, resource: Resource?, forceFresh: Boolean = false
+        ): Pair<String, String>? {
             session.manifestMutex.lock()
             try {
                 val source = resource?.url ?: session.url
@@ -2079,7 +2133,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val cached = if (resource == null) session.browserManifestBody else null
                 val cacheAge = now - session.browserManifestAt
                 // Reuse a recent original-browser live playlist instead of requesting it again.
-                if (cached != null && cacheAge in 0..1500L) {
+                if (!forceFresh && cached != null && cacheAge in 0..1500L) {
                     decodePlaylist(cached, session.key)?.let {
                         Trace.event("HLS_REFRESH", "BROWSER_CACHE",
                             "sid=${session.id.take(8)} ageMs=$cacheAge chars=${it.length}")
@@ -2194,13 +2248,57 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     } else {
                                         val http = clientHttp.takeIf { it in 400..599 }
                                             ?: browser?.status?.takeIf { it != 0 } ?: clientHttp
-                                        if (http in 400..599) {
-                                            if (session.failedSegments.size > 32) session.failedSegments.clear()
-                                            session.failedSegments[resource.url] = start + 10000L
+                                        // If the live media window advanced, only retry the same
+                                        // sequence from a newly fetched playlist, never a random segment.
+                                        if (http == 404 && resource.sequence != null && resource.manifestBase != null) {
+                                            val parent = resource.manifestBase
+                                            val sameRoot = runCatching {
+                                                val a = URL(parent)
+                                                val b = URL(session.url)
+                                                a.host == b.host && a.path == b.path
+                                            }.getOrDefault(false)
+                                            val updated = loadManifest(
+                                                session,
+                                                if (sameRoot) null else Resource(parent, true),
+                                                forceFresh = true
+                                            )
+                                            val replacement = updated?.let {
+                                                segmentAtSequence(it.second, it.first, resource.sequence)
+                                            }
+                                            if (replacement != null && replacement != resource.url) {
+                                                Trace.event("SEGMENT_REMAP", "CHANGED",
+                                                    "sid=${session.id.take(8)} sequence=${resource.sequence} " +
+                                                        "old=${Trace.target(resource.url)} new=${Trace.target(replacement)}")
+                                                val retry = session.browserRequest("segment", replacement)
+                                                val retriedBytes = retry?.takeIf { it.status in 200..299 }?.bytes
+                                                    ?: if (retry == null || retry.status == 0) {
+                                                        runCatching {
+                                                            app.get(replacement, headers = session.headers, timeout = 5)
+                                                        }.getOrNull()?.takeIf { it.isSuccessful }?.body?.bytes()
+                                                    } else null
+                                                if (retriedBytes != null) {
+                                                    data = DaddyLiveSegment.unwrap(retriedBytes)
+                                                    type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
+                                                        else "application/octet-stream"
+                                                    Trace.event("SEGMENT_REMAP", if (data != null) "RECOVERED" else "DECODE_FAIL",
+                                                        "sid=${session.id.take(8)} sequence=${resource.sequence} " +
+                                                            "bytes=${retriedBytes.size}")
+                                                }
+                                            } else {
+                                                Trace.event("SEGMENT_REMAP", "UNCHANGED",
+                                                    "sid=${session.id.take(8)} sequence=${resource.sequence} " +
+                                                        "reason=${if (updated == null) "manifest_unavailable" else if (replacement == null) "sequence_missing" else "same_uri"}")
+                                            }
                                         }
-                                        Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
-                                            "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
-                                                "clientHttp=$clientHttp elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                        if (data == null) {
+                                            if (http in 400..599) {
+                                                if (session.failedSegments.size > 32) session.failedSegments.clear()
+                                                session.failedSegments[resource.url] = start + 10000L
+                                            }
+                                            Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
+                                                "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
+                                                    "clientHttp=$clientHttp elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                        }
                                     }
                                 }
                             }
