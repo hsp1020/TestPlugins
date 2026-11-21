@@ -1649,7 +1649,7 @@ internal class ElevateMetadataSwap(private val application: Application) :
                             val aioTarget = if (isSpecial) 0 to number else
                                 range?.let { it.season to absolute!! }
                                 ?: mapping?.tmdbSeason?.let {
-                                    it to (fromEpisode + number - 1)
+                                    it to (fromEpisode + number - (mapping.fromEpisode ?: 1))
                                 }
                                 ?: if (!anime) appSeason to number else null
                             val aioData = aioTarget?.let { targets[it.first]?.get(it.second) }
