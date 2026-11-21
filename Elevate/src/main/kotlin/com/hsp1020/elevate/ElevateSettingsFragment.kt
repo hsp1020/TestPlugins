@@ -70,6 +70,8 @@ internal enum class ElevateFeature(
         "Send native download requests directly to the selected app and recognize files in CloudStream's download folder."),
     LIBRARY_POSTERS("Home & Library", "Custom Posters",
         "Replace library and detail recommendation covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
+    AUTO_MARK_WATCHED("Home & Library", "Auto Mark Episodes Watched at 80%",
+        "Mark episodes watched and resume the next episode after 80% playback."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
         "Show watched progress on large episode thumbnails."),
     EPISODE_SPOILERS("Home & Library", "Blur Unwatched Episodes",

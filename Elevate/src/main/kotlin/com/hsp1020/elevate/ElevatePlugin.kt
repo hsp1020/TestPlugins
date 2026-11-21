@@ -82,6 +82,7 @@ class ElevatePlugin : Plugin() {
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
     private var watchProgressReporter: ElevateWatchProgressReporter? = null
+    private var autoWatched: ElevateAutoWatchedHook? = null
     private var watchHistoryHook: ElevateWatchHistoryHook? = null
     private var mdbRatings: ElevateMdbRatings? = null
     private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
@@ -273,6 +274,12 @@ class ElevatePlugin : Plugin() {
         } else {
             watchHistoryHook?.stop()
             watchHistoryHook = null
+        }
+        if (enabled(ElevateFeature.AUTO_MARK_WATCHED)) {
+            if (autoWatched == null) autoWatched = ElevateAutoWatchedHook(application).also { it.start() }
+        } else {
+            autoWatched?.stop()
+            autoWatched = null
         }
         if (enabled(ElevateFeature.WATCH_PROGRESS_SYNC)) {
             if (watchProgressReporter == null) {
@@ -562,6 +569,8 @@ class ElevatePlugin : Plugin() {
         watchHistoryHook = null
         watchProgressReporter?.stop()
         watchProgressReporter = null
+        autoWatched?.stop()
+        autoWatched = null
         mdbRatings?.stop()
         mdbRatings = null
         externalDownloaderLifecycle?.stop()
