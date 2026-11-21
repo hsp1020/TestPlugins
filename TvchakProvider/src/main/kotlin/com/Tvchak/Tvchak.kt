@@ -47,6 +47,9 @@ class TvchakProvider : MainAPI() {
         "4" to "애니"
     )
 
+    private val trailingYear = Regex("""\s*\(\d{4}\)\s*$""")
+    private fun cleanTitle(title: String) = title.trim().replace(trailingYear, "").trim()
+
     private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     private var cfCookies: String? = null
     private var cfUserAgent: String? = null
@@ -291,7 +294,7 @@ class TvchakProvider : MainAPI() {
             val url = "$mainUrl/index.php/vod/search.html?wd=$query"
             val document = safeGet(url).document
             val items = document.select(".vod-search-list .box").mapNotNull { element ->
-                val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return@mapNotNull null
+                val title = element.selectFirst(".movie-title")?.text()?.let(::cleanTitle) ?: return@mapNotNull null
                 val href = fixUrlNull(element.selectFirst("a.cover-link")?.attr("href")) ?: return@mapNotNull null
                 val poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
                 val encodedPoster = URLEncoder.encode(poster, "UTF-8")
@@ -312,13 +315,14 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         
         val realUrl = url.substringBefore("?poster=")
-        val encodedPoster = url.substringAfter("?poster=", "")
+        val isMovieCategory = url.substringAfter("?poster=", "").contains("&tvchakMovie=1")
+        val encodedPoster = url.substringAfter("?poster=", "").substringBefore("&tvchakMovie=")
         val passedPoster = if (encodedPoster.isNotBlank()) {
             URLDecoder.decode(encodedPoster, "UTF-8")
         } else null
 
         val document = safeGet(realUrl).document
-        val title = document.selectFirst("h1.movie-title")?.text()?.trim() ?: ""
+        val title = document.selectFirst("h1.movie-title")?.text()?.let(::cleanTitle) ?: ""
         val plot = document.selectFirst("h2#sum_tag")?.text()?.trim() ?: ""
         val poster = passedPoster ?: document.selectFirst(".poster img")?.attr("src") ?: ""
         
@@ -334,8 +338,13 @@ class TvchakProvider : MainAPI() {
             }
         }.sortedBy { it.episode }
 
-        val tvType = if (episodes.size == 1 && title.contains("영화")) TvType.Movie else TvType.TvSeries
-        return newTvSeriesLoadResponse(title, realUrl, tvType, episodes) {
+        if (isMovieCategory && episodes.size == 1 && episodes[0].name == "바로보기") {
+            return newMovieLoadResponse(title, realUrl, TvType.Movie, episodes[0].data) {
+                this.posterUrl = poster
+                this.plot = plot
+            }
+        }
+        return newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
         }
@@ -443,7 +452,7 @@ class TvchakProvider : MainAPI() {
 
     private fun parseItem(element: Element, isMovie: Boolean): SearchResponse? {
         return try {
-            val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return null
+            val title = element.selectFirst(".movie-title")?.text()?.let(::cleanTitle) ?: return null
             val href = fixUrlNull(element.selectFirst("a")?.attr("href")) ?: return null
             
             var poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
@@ -453,7 +462,7 @@ class TvchakProvider : MainAPI() {
             }
 
             val encodedPoster = URLEncoder.encode(poster, "UTF-8")
-            val finalUrl = "$href?poster=$encodedPoster"
+            val finalUrl = "$href?poster=$encodedPoster" + if (isMovie) "&tvchakMovie=1" else ""
             val type = if (isMovie) TvType.Movie else TvType.TvSeries
 
             newTvSeriesSearchResponse(title, finalUrl, type) {
