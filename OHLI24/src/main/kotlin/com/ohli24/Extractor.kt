@@ -16,7 +16,6 @@ class MichealCDN : Cdndania() {
 }
 
 open class Cdndania : ExtractorApi() {
-    private fun trace(stage: String, detail: String) = android.util.Log.i("OhliPlaybackTrace", "stage=$stage $detail")
 
     override val name = "CDNdania"
     override val mainUrl = "https://cdndania.com"
@@ -31,19 +30,14 @@ open class Cdndania : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val start = android.os.SystemClock.elapsedRealtime()
-        trace("CDN_START", "host=${getBaseUrl(url)}")
         val host= getBaseUrl(url)
         
         if (url.contains("/video/")) {
             try {
                 // 기존 로직 유지 (자막 추출)
-                val pageStart = android.os.SystemClock.elapsedRealtime()
                 val doc = app.get(url, referer = referer).document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
-                trace("CDN_PAGE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - pageStart}")
                 val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
                 val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
-                trace("CDN_SUBTITLE_PARSE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${srtUrl.isNotBlank()}")
 
                 val extractedHash = url.substringAfterLast("/").substringBefore('?')
                 val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
@@ -52,12 +46,8 @@ open class Cdndania : ExtractorApi() {
                 // referer가 null일 경우 "null" 문자열이 들어가는 것 방지
                 val safeReferer = referer ?: ""
                 val formdata= mapOf("hash" to extractedHash, "r" to safeReferer)
-                
-                val apiStart = android.os.SystemClock.elapsedRealtime()
-                trace("CDN_API_START", "ms=${apiStart - start}")
                 val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
                 
-                trace("CDN_API_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - apiStart} found=${response?.videoSource != null}")
                 response?.videoSource?.let { m3u8 ->
 
                     // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
@@ -71,33 +61,31 @@ open class Cdndania : ExtractorApi() {
 
                     var finalUrl = m3u8
 
-                    // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
-                    try {
-                        val manifestStart = android.os.SystemClock.elapsedRealtime()
-                        trace("CDN_MANIFEST_START", "ms=${manifestStart - start}")
-                        val m3u8Res = app.get(m3u8, headers = streamHeaders)
-                        
-                        trace("CDN_MANIFEST_HTTP", "ms=${android.os.SystemClock.elapsedRealtime() - manifestStart} status=${m3u8Res.code}")
-                        val content = try {
-                            m3u8Res.text.trim()
-                        } catch (e: Exception) {
-                            m3u8Res.document.text().trim()
-                        }
-                        
-                        trace("CDN_MANIFEST_CLASS", "ms=${android.os.SystemClock.elapsedRealtime() - start} isM3u8=${content.startsWith("#EXTM3U")} chars=${content.length}")
-                        // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
-                        if (!content.startsWith("#EXTM3U")) {
-                            val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
-                            innerM3u8Regex.find(content)?.let {
-                                finalUrl = it.groupValues[1]
+                    // Direct .m3u8 URLs need no second HTTP probe; retain HTML-wrapper recovery otherwise.
+                    if (!m3u8.substringBefore('?').substringBefore('#').endsWith(".m3u8", ignoreCase = true)) {
+                        // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
+                        try {
+                            val m3u8Res = app.get(m3u8, headers = streamHeaders)
+                            
+                            val content = try {
+                                m3u8Res.text.trim()
+                            } catch (e: Exception) {
+                                m3u8Res.document.text().trim()
                             }
+                            
+                            // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
+                            if (!content.startsWith("#EXTM3U")) {
+                                val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
+                                innerM3u8Regex.find(content)?.let {
+                                    finalUrl = it.groupValues[1]
+                                }
+                            }
+                        } catch (_: Exception) {
                         }
-                    } catch (e: Exception) {
-                        trace("CDN_MANIFEST_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
+
                     }
 
                     // 추출기 링크 생성 및 콜백
-                    trace("CDN_CALLBACK", "ms=${android.os.SystemClock.elapsedRealtime() - start} urlChanged=${finalUrl != m3u8}")
                     callback(
                         newExtractorLink(
                             "CDN",
@@ -119,11 +107,8 @@ open class Cdndania : ExtractorApi() {
                             )
                         )
                     }
-                } ?: run {
-                    trace("CDN_API_EMPTY", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                 }
             } catch (e: Exception) {
-                trace("CDN_ERROR", "ms=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
             }
         }
     }

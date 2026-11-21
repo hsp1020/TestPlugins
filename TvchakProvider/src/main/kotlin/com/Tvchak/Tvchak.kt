@@ -50,10 +50,6 @@ class TvchakProvider : MainAPI() {
     private val trailingYear = Regex("""\s*[\(（]\s*\d{4}\s*[\)）]""")
     private fun cleanTitle(title: String) = title.trim().replace(trailingYear, "").trim()
 
-    private fun trace(stage: String, detail: String) {
-        android.util.Log.i("TvchakPlaybackTrace", "stage=$stage $detail")
-    }
-
     private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     private var cfCookies: String? = null
     private var cfUserAgent: String? = null
@@ -105,7 +101,7 @@ class TvchakProvider : MainAPI() {
                 val cookieManager = android.webkit.CookieManager.getInstance()
                 cookieManager.removeAllCookies(null)
                 cookieManager.flush()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
             }
 
             val webView = android.webkit.WebView(context).apply {
@@ -164,27 +160,16 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun safeGet(url: String, referer: String? = null): NiceResponse {
-        val start = android.os.SystemClock.elapsedRealtime()
-        val host = runCatching { java.net.URL(url).host }.getOrDefault("unknown")
-        trace("HTTP_START", "host=$host referer=${referer != null}")
-        val resStart = android.os.SystemClock.elapsedRealtime()
         var res = try { app.get(url, headers = getHeaders(referer)) } catch (e: Exception) {
-            trace("HTTP_ERROR", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName} message=${e.message}")
             throw e
         }
-        trace("HTTP_RESPONSE", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - resStart} status=${res.code} bytes=${res.text.length} challenge=${isChallenge(res.text, res.code)}")
         
         if (isChallenge(res.text, res.code)) {
-            trace("WAF_LOCK_WAIT", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
             cfMutex.withLock {
-                trace("WAF_LOCK_ACQUIRED", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
                 res = app.get(url, headers = getHeaders(referer))
-                trace("WAF_RETRY", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} status=${res.code}")
                 if (!isChallenge(res.text, res.code)) return res
 
-                trace("WAF_SOLVE_START", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
                 val bypass = solveWaf(url)
-                trace("WAF_SOLVE_END", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} success=${bypass != null}")
                 if (bypass != null) {
                     cfCookies = bypass.first
                     cfUserAgent = bypass.second
@@ -193,25 +178,13 @@ class TvchakProvider : MainAPI() {
             }
         }
         
-        val hasSignature = res.text.contains("movie-list-item") || 
-                           res.text.contains("movie-title") || 
-                           res.text.contains("movie-list-body") || 
-                           res.text.contains("vod-search-list")
-                           
-        if (res.isSuccessful && hasSignature) {
-        } else if (res.isSuccessful) {
-            // [로그 버그 수정]: 성공(200)을 텍스트로 하드코딩하지 않고 실제 응답 코드를 유연하게 출력하도록 수정
-        }
-        trace("HTTP_END", "host=$host elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} status=${res.code} signature=$hasSignature")
         return res
     }
 
     private suspend fun checkAndUpdateDomain() {
-        if (isDomainChecked) { trace("DOMAIN_CACHED", "host=$mainUrl"); return }
-        val start = android.os.SystemClock.elapsedRealtime()
-        trace("DOMAIN_START", "host=$currentMainUrl")
+        if (isDomainChecked) return
         domainMutex.withLock {
-            if (isDomainChecked) { trace("DOMAIN_LOCK_CACHED", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}"); return@withLock }
+            if (isDomainChecked) return@withLock
 
             val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             currentMainUrl = prefs?.getString(PREF_KEY, null)?.replace("http://", "https://") ?: currentMainUrl
@@ -221,7 +194,6 @@ class TvchakProvider : MainAPI() {
 
             try {
                 val res = safeGet("$currentMainUrl$testPath")
-                trace("DOMAIN_PROBE", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} status=${res.code}")
                 val finalUrl = res.url.trimEnd('/')
                 
                 val hasSignature = res.text.contains("movie-list-item") || 
@@ -238,7 +210,6 @@ class TvchakProvider : MainAPI() {
                     return@withLock
                 }
             } catch (e: Exception) {
-                trace("DOMAIN_PROBE_ERROR", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} error=${e.javaClass.simpleName}")
             }
 
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
@@ -249,8 +220,7 @@ class TvchakProvider : MainAPI() {
                 val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
 
-                for ((chunkIndex, chunk) in chunks.withIndex()) {
-                    trace("DOMAIN_SCAN_CHUNK", "index=$chunkIndex elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
+                for (chunk in chunks) {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             try {
@@ -281,7 +251,6 @@ class TvchakProvider : MainAPI() {
                 return@withLock
             }
             isDomainChecked = true
-            trace("DOMAIN_END", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} found=${foundDomain != null}")
         }
     }
 
@@ -378,16 +347,10 @@ class TvchakProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val start = android.os.SystemClock.elapsedRealtime()
-        val episodeHost = runCatching { java.net.URL(data).host }.getOrDefault("unknown")
-        trace("LINK_START", "host=$episodeHost casting=$isCasting")
         checkAndUpdateDomain()
-        trace("LINK_DOMAIN_DONE", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} mainHost=$mainUrl")
 
         val document = safeGet(data).document
-        trace("LINK_PAGE_DONE", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: run {
-            trace("LINK_NO_SCRIPT", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
             return false
         }
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
@@ -395,7 +358,6 @@ class TvchakProvider : MainAPI() {
         val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
         val matchUrl = urlRegex.find(jsonString)
         val rawUrl = matchUrl?.groupValues?.get(1)?.replace("\\/", "/") ?: run {
-            trace("LINK_NO_URL", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
             return false
         }
 
@@ -403,9 +365,6 @@ class TvchakProvider : MainAPI() {
         var refererUrl = mainUrl
 
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
-        val isDirectBcdn = rawUrl.contains("b-cdn.net")
-        trace("LINK_PARSED", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} wrapper=$isChakttWrapper bcdn=$isDirectBcdn rawHost=${runCatching { java.net.URL(rawUrl).host }.getOrDefault("unknown")}")
-        if (isDirectBcdn && !isChakttWrapper) trace("HANDSHAKE_SKIPPED", "reason=direct_bcdn")
 
         if (isChakttWrapper) {
             var detectDomain = "https://ckp.wiselife.blog" 
@@ -444,13 +403,9 @@ class TvchakProvider : MainAPI() {
             }
 
             refererUrl = "$detectDomain/"
-            trace("HANDSHAKE_START", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} host=${runCatching { java.net.URL(handshakeUrl).host }.getOrDefault("unknown")} wrapper=$isChakttWrapper")
-            val handshakeStart = android.os.SystemClock.elapsedRealtime()
             try {
-                val handshakeResponse = safeGet(handshakeUrl, referer = mainUrl)
-                trace("HANDSHAKE_DONE", "durationMs=${android.os.SystemClock.elapsedRealtime() - handshakeStart} status=${handshakeResponse.code}")
-            } catch (e: Exception) {
-                trace("HANDSHAKE_ERROR", "durationMs=${android.os.SystemClock.elapsedRealtime() - handshakeStart} error=${e.javaClass.simpleName} message=${e.message}")
+                safeGet(handshakeUrl, referer = mainUrl)
+            } catch (_: Exception) {
             }
         }
 
@@ -464,7 +419,6 @@ class TvchakProvider : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        trace("LINK_CALLBACK_START", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start} videoHost=${runCatching { java.net.URL(videoUrl).host }.getOrDefault("unknown")} type=$type subtitles=${subUrl != null}")
         callback.invoke(
             newExtractorLink(
                 this.name,
@@ -487,7 +441,6 @@ class TvchakProvider : MainAPI() {
             )
         }
 
-        trace("LINK_END", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - start}")
         return true
     }
 

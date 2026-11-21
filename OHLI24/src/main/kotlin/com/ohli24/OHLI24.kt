@@ -38,7 +38,6 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 class OHLI24 : MainAPI() {
-    private fun trace(stage: String, detail: String) = android.util.Log.i("OhliPlaybackTrace", "stage=$stage $detail")
 
     override var mainUrl = "https://ani.ohli24.com"
     override var name = "OHLI24"
@@ -330,8 +329,6 @@ class OHLI24 : MainAPI() {
 
     @android.annotation.SuppressLint("SetJavaScriptEnabled")
     private suspend fun findVideoIframe(url: String): String? = withContext(Dispatchers.Main) {
-        val start = android.os.SystemClock.elapsedRealtime()
-        trace("IFRAME_START", "host=${runCatching { java.net.URL(url).host }.getOrDefault("unknown")}")
         val context = CloudStreamApp.context ?: return@withContext null
         suspendCancellableCoroutine { continuation ->
             val handler = Handler(Looper.getMainLooper())
@@ -341,7 +338,6 @@ class OHLI24 : MainAPI() {
 
             fun finish(result: String?) {
                 if (finished) return
-                trace("IFRAME_END", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${result != null}")
                 finished = true
                 timeout?.let(handler::removeCallbacks)
                 webView?.stopLoading()
@@ -366,15 +362,13 @@ class OHLI24 : MainAPI() {
                             (uri.host.equals("michealcdn.com", true) ||
                                 uri.host.equals("cdndania.com", true))
                         ) {
-                            trace("IFRAME_CAPTURE", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${uri.host}")
                             handler.post { finish(uri.toString()) }
                         }
                         return null
                     }
                 }
-                timeout = Runnable { trace("IFRAME_TIMEOUT", "ms=${android.os.SystemClock.elapsedRealtime() - start}"); finish(null) }
+                timeout = Runnable { finish(null) }
                 handler.postDelayed(timeout, 10000L)
-                trace("IFRAME_LOAD_URL", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
                 view.loadUrl(url, headers)
             } catch (_: Exception) {
                 finish(null)
@@ -390,10 +384,7 @@ class OHLI24 : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (data.isBlank()) return false
-        val start = android.os.SystemClock.elapsedRealtime()
-        trace("LINK_START", "casting=$isCasting")
         val doc = app.get(data, headers = headers, timeout = 20).document
-        trace("PAGE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         var player = sequenceOf(
             doc.selectFirst("iframe[src]")?.attr("src"),
             doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
@@ -403,21 +394,14 @@ class OHLI24 : MainAPI() {
             }?.attr("href")
         ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
             ?.let(::absoluteUrl).orEmpty()
-        trace("PARSE_DONE", "ms=${android.os.SystemClock.elapsedRealtime() - start} found=${player.isNotBlank()} iframe=${doc.selectFirst("iframe[src]") != null} form=${doc.selectFirst("form.tt input[name=vurl]") != null} cdnAnchor=${doc.select("a[href]").any { it.attr("href").contains("cdndania.com/video/", true) || it.attr("href").contains("michealcdn.com", true) }}")
-        if (player.isBlank()) {
-            trace("IFRAME_FALLBACK", "reason=no_static_candidate")
-            player = findVideoIframe(data).orEmpty()
-        }
+        if (player.isBlank()) player = findVideoIframe(data).orEmpty()
         if (player.isBlank()) return false
 
-        trace("EXTRACT_START", "ms=${android.os.SystemClock.elapsedRealtime() - start} host=${runCatching { java.net.URL(player).host }.getOrDefault("unknown")}")
-        trace("EXTRACT_BRANCH", "customCdn=${player.contains("cdndania.com/video/", true)}")
         if (player.contains("cdndania.com/video/", true)) {
             Cdndania().getUrl(player, mainUrl, subtitleCallback, callback)
         } else {
             loadExtractor(player, mainUrl, subtitleCallback, callback)
         }
-        trace("LINK_END", "ms=${android.os.SystemClock.elapsedRealtime() - start}")
         return true
     }
 }
