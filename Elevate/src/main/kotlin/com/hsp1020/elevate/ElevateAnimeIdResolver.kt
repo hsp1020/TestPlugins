@@ -107,6 +107,18 @@ internal object ElevateAnimeIdResolver {
         return resolveByField("imdbId", id, season, allowSplitSeasons = true)
     }
 
+    /** Resolve a specific TVDB episode without confusing split anime cours. */
+    suspend fun resolveTvdbEpisode(rawId: String, season: Int, episode: Int): Mapping? {
+        val id = rawId.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return null
+        if (season <= 0 || episode <= 0) return null
+        return resolveByField("thetvdbId", id, season,
+            allowTrackerOnly = true, episode = episode)?.takeIf {
+            it.tvdb == id && it.tvdbSeason == season &&
+                it.tvdbAbsoluteOrder == false && it.kitsu != null &&
+                (it.tvdbFromEpisode == null || episode >= it.tvdbFromEpisode)
+        }
+    }
+
     /** Same AIOStreams flight/cache as title and season mapping, with episode offset retained. */
     suspend fun resolveEpisode(
         imdb: String?, mal: String?, anilist: String?, kitsu: String?,
@@ -224,7 +236,7 @@ internal object ElevateAnimeIdResolver {
                 val tvdbId = mapped?.tvdb
                 audit(feature, "TVDB_INPUT", "S$season E$episode tvdb=$tvdbId ranges=${rangeCandidates.size}")
                 if (tvdbId != null) {
-                    val tvdb = resolveByField("thetvdbId", tvdbId, season, allowTrackerOnly = true)
+                    val tvdb = resolveTvdbEpisode(tvdbId, season, episode)
                     val local = if (tvdb != null && tvdb.tvdb == tvdbId &&
                         tvdb.tvdbSeason == season && tvdb.tvdbAbsoluteOrder == false)
                         (episode - (tvdb.tvdbFromEpisode ?: 1) + 1).takeIf { it > 0 } else null
@@ -458,9 +470,10 @@ internal object ElevateAnimeIdResolver {
 
     private suspend fun resolveByField(
         field: String, id: String, season: Int?, allowTrackerOnly: Boolean = false,
-        trace: String? = null, allowSplitSeasons: Boolean = false
+        trace: String? = null, allowSplitSeasons: Boolean = false, episode: Int? = null
     ): Mapping? {
         val key = field + ":" + id + (season?.let { ":$it" } ?: "") +
+            (episode?.let { ":episode=$it" } ?: "") +
             (if (allowTrackerOnly) ":watch-history" else "") +
             (if (allowSplitSeasons) ":episode-mapping" else "")
         val now = System.currentTimeMillis()
@@ -488,7 +501,8 @@ internal object ElevateAnimeIdResolver {
                     var result: Mapping? = null
                     for (host in hosts) {
                         val url = "https://" + host + "/api/v1/anime?idType=" + field +
-                            "&idValue=" + id + (season?.let { "&season=$it" } ?: "")
+                            "&idValue=" + id + (season?.let { "&season=$it" } ?: "") +
+                            (episode?.let { "&episode=$it" } ?: "")
 
                         val requestedAt = android.os.SystemClock.elapsedRealtime()
                         val root = try {

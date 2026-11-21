@@ -1727,6 +1727,75 @@ internal class ElevateMetadataSwap(private val application: Application) :
                                     " reason=${if (mapped != null) "MATCH" else if (dateRejected) "AIRDATE_30D" else if (aioData == null) "AIO_MISSING" else "AMBIGUOUS_OR_DUPLICATE"}" +
                                     " sourceDate=$sourceDate tmdbDate=${mapped?.let { targets[it.first]?.get(it.second)?.date }}")
                         }
+                        // Retry only episodes that the existing season-level mapping could not match.
+                        val missing = if (anime && !isSpecial && imdb != null &&
+                            initialSeasonMappings[appSeason]?.tvdb != null)
+                            numbersBySeason[appSeason].orEmpty().distinct().sorted().filter {
+                                result[appSeason to it] == null
+                            } else emptyList()
+                        if (missing.isNotEmpty()) {
+                            val tvdbId = initialSeasonMappings[appSeason]!!.tvdb!!
+                            val limit = Semaphore(4)
+                            val verified = withTimeoutOrNull(6_000L) {
+                                missing.map { number ->
+                                    async(Dispatchers.IO) {
+                                        limit.withPermit {
+                                            number to ElevateAnimeIdResolver.resolveTvdbEpisode(
+                                                tvdbId, appSeason, number)
+                                        }
+                                    }
+                                }.awaitAll()
+                            }.orEmpty()
+                            val additionalSeasons = targets.map { (season, episodes) ->
+                                (targetId to season) to episodes
+                            }.toMap().toMutableMap()
+                            for ((number, exact) in verified) {
+                                if (exact?.tvdbFromEpisode == null || exact.tmdb == null ||
+                                    exact.tmdbSeason == null || exact.tmdbFromEpisode == null) continue
+                                val mappedEpisode = exact.tmdbFromEpisode.toLong() +
+                                    number - exact.tvdbFromEpisode
+                                if (mappedEpisode !in 1L..Int.MAX_VALUE.toLong()) continue
+                                val part = exact.tmdb to exact.tmdbSeason
+                                val target = Triple(part.first, part.second, mappedEpisode.toInt())
+                                if (target in used) continue
+                                var episodes = additionalSeasons[part]
+                                if (episodes == null) {
+                                    val response = withTimeoutOrNull(10_000L) {
+                                        seasonRequests.withPermit {
+                                            ElevateTmdbMetadata.season(part.first, part.second, detailLocale)
+                                        }
+                                    }
+                                    val values = response?.optJSONArray("episodes")
+                                    val fetched = if (values == null) emptyMap() else
+                                        (0 until values.length()).mapNotNull { index ->
+                                            values.optJSONObject(index)?.let { ep ->
+                                                ep.optInt("episode_number").takeIf { it > 0 }
+                                                    ?.let { it to ep.episodeMeta(true) }
+                                            }
+                                        }.toMap()
+                                    additionalSeasons[part] = fetched
+                                    episodes = fetched
+                                }
+                                val candidate = episodes[mappedEpisode.toInt()] ?: continue
+                                val sourceDate = if (completeAio)
+                                    source.videos.firstOrNull { it.season == appSeason &&
+                                        it.number == number }?.meta?.date
+                                else base.firstOrNull { it.seasonIndex == appSeason &&
+                                    it.season == appSeason && it.episode == number }
+                                    ?.airDate?.let { nativeDate.format(java.util.Date(it)) }
+                                val sourceDay = dayOf(sourceDate)
+                                val candidateDay = dayOf(candidate.date)
+                                if (sourceDay != null && candidateDay != null &&
+                                    kotlin.math.abs(sourceDay - candidateDay) >= 30L) continue
+                                used.add(target)
+                                result[appSeason to number] = candidate
+                                matches++
+                                misses--
+                                Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=EPISODE" +
+                                    " app=S$appSeason:E$number target=(${part.second},${mappedEpisode.toInt()})" +
+                                    " method=AIO_EPISODE status=MATCH")
+                            }
+                        }
                         Log.i("ElevateSeasonAudit", "feature=TMDB_SWAP phase=SEASON_RESULT" +
                             " season=$appSeason targetId=$targetId matched=$matches missed=$misses" +
                             " status=${if (misses == 0) "SUCCESS" else if (matches > 0) "PARTIAL" else "FAILED"}")
