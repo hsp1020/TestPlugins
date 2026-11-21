@@ -238,6 +238,9 @@ class DaddyLiveExtractor : ExtractorApi() {
 
 
             val targetOrigin = originOf(url) ?: mainUrl
+            if (targetOrigin == "https://dembed.st") {
+                DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName)?.let { return it }
+            }
             val referer = parentReferer ?: "$targetOrigin/"
             val refererOrigin = originOf(referer) ?: targetOrigin
 
@@ -698,7 +701,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     lower.contains("ksohls") ||
                     lower.contains("live=") ||
                     lower.contains("zmid=") ||
-                    lower.endsWith(".php")
+                    (runCatching { URL(resolved).path.endsWith(".php", true) }.getOrDefault(false)) ||
+                    lower.contains("dembed.st/premiumtv/")
 
             if (likelyPlayer) result += resolved
         }
@@ -735,6 +739,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             .sortedByDescending { candidate ->
                 val lower = candidate.lowercase()
                 when {
+                    lower.contains("dembed.st/premiumtv/") -> 1100
                     lower.contains("tiestep.") -> 1000
                     lower.contains("/e/") -> 900
                     lower.contains("/embed/") -> 800
@@ -763,6 +768,9 @@ class DaddyLiveExtractor : ExtractorApi() {
         if (childUrl in visited) return null
 
         val parentOrigin = originOf(parentUrl) ?: return null
+        if (originOf(childUrl) == "https://dembed.st") {
+            DaddyLiveDembed.extract(childUrl, parentUrl, sourceName)?.let { return it }
+        }
 
         return try {
             currentCoroutineContext().ensureActive()
