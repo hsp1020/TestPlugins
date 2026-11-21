@@ -5,7 +5,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
-import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -96,16 +95,11 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         var capturedUrl: String? = cleanUrl
-        val trace = android.os.SystemClock.elapsedRealtimeNanos()
-        val started = android.os.SystemClock.elapsedRealtime()
         val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
-        Log.i("TVWikiProxyTrace", "phase=EXTRACT_START trace=${trace} needHook=${!cleanUrl.contains("/c.html")}")
 
         if (!cleanUrl.contains("/c.html")) {
             val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
             if (webViewResult != null) capturedUrl = webViewResult
-            Log.i("TVWikiProxyTrace", "phase=WEBVIEW_RESULT trace=${trace} captured=${webViewResult != null} " +
-                "keyCandidates=${currentSessionKeys.size}")
         }
 
         if (capturedUrl != null) {
@@ -132,7 +126,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                 }
                 if (!content.startsWith("#EXTM3U")) {
-                    Log.w("TVWikiProxyTrace", "phase=INVALID_PLAYLIST trace=${trace}")
                     return false
                 }
 
@@ -147,19 +140,15 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 val playlistLines = content.lines()
                 val isKey7 = playlistLines.any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
-                Log.i("TVWikiProxyTrace", "phase=PLAYLIST trace=${trace} key7=${isKey7} " +
-                    "bytes=${content.length} keyCandidates=${currentSessionKeys.size}")
 
                 if (isKey7) {
                     val newProxy = server() ?: run {
-                        Log.e("TVWikiProxyTrace", "phase=PROXY_BIND_FAILED trace=${trace}")
                         return false
                     }
                     val sessionId = java.util.UUID.randomUUID().toString().replace("-", "")
                     val prefix = "http://127.0.0.1:${newProxy.port}/${sessionId}"
                     var keyUrlForSession: String? = null
                     var testSegmentForSession: String? = null
-                    Log.i("TVWikiProxyTrace", "phase=SESSION_CREATED trace=${trace} session=${sessionId.take(8)}")
 
                     val videoId = Regex("""/v/[ef]/([^/]+)""").find(capturedUrl!!)?.groupValues?.get(1) ?: "video"
                     val keyLine = playlistLines.firstOrNull {
@@ -211,23 +200,16 @@ class BunnyPoorCdn : ExtractorApi() {
                     callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = "$playerOrigin/"; this.headers = headers
                     })
-                    Log.i("TVWikiProxyTrace", "phase=LINK trace=${trace} mode=proxy elapsedMs=" +
-                        (android.os.SystemClock.elapsedRealtime() - started))
                     return true
                 } else {
                     callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                         this.referer = "$playerOrigin/"; this.headers = headers
                     })
-                    Log.i("TVWikiProxyTrace", "phase=LINK trace=${trace} mode=direct elapsedMs=" +
-                        (android.os.SystemClock.elapsedRealtime() - started))
                     return true
                 }
             } catch (e: Exception) {
-                Log.e("TVWikiProxyTrace", "phase=EXTRACT_EXCEPTION trace=${trace}", e)
             }
         }
-        Log.w("TVWikiProxyTrace", "phase=EXTRACT_NO_LINK trace=${trace} elapsedMs=" +
-            (android.os.SystemClock.elapsedRealtime() - started))
         return false
     }
 
@@ -388,7 +370,6 @@ class BunnyPoorCdn : ExtractorApi() {
             socket = server
             port = server.localPort
             running = true
-            Log.i("TVWikiProxyTrace", "phase=SERVER_START port=$port bind=loopback")
             CoroutineScope(Dispatchers.IO).launch {
                 while (running) {
                     try {
@@ -396,14 +377,12 @@ class BunnyPoorCdn : ExtractorApi() {
                         launch { serve(client) }
                     } catch (_: SocketTimeoutException) {
                     } catch (e: Exception) {
-                        if (running) Log.w("TVWikiProxyTrace", "phase=ACCEPT_ERROR type=${e.javaClass.simpleName}")
                     }
                     expire()
                 }
             }
             true
         } catch (error: Exception) {
-            Log.e("TVWikiProxyTrace", "phase=SERVER_BIND_FAILED", error)
             false
         }
 
@@ -413,22 +392,18 @@ class BunnyPoorCdn : ExtractorApi() {
         ) {
             sessions[id] = Session(id, playlist.toByteArray(Charsets.UTF_8), capturedKeys,
                 headers.toMap(), iv, keyUrl, segmentUrl)
-            Log.i("TVWikiProxyTrace", "phase=SESSION_ADD id=${id.take(8)} active=${sessions.size} " +
-                "playlistBytes=${sessions[id]?.playlist?.size}")
         }
 
         private fun expire() {
             val now = android.os.SystemClock.elapsedRealtime()
             for ((id, state) in sessions) {
                 if (now - state.lastAccess >= 24L * 60 * 60 * 1000 && sessions.remove(id, state)) {
-                    Log.i("TVWikiProxyTrace", "phase=SESSION_EXPIRE id=${id.take(8)} active=${sessions.size}")
                 }
             }
             if (sessions.isEmpty()) {
                 running = false
                 try { socket?.close() } catch (_: Exception) { }
                 socket = null
-                Log.i("TVWikiProxyTrace", "phase=SERVER_STOP reason=idle")
             }
         }
 
@@ -467,11 +442,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray(Charsets.US_ASCII))
                     output.write(payload)
                     output.flush()
-                    Log.i("TVWikiProxyTrace", "phase=HTTP id=${id.take(8)} resource=${if (path.endsWith(".m3u8")) "playlist" else "key"} " +
-                        "status=$status bytes=${payload.size}")
                 }
             } catch (e: Exception) {
-                Log.w("TVWikiProxyTrace", "phase=HTTP_ERROR type=${e.javaClass.simpleName}")
                 try { client.close() } catch (_: Exception) { }
             }
         }
@@ -479,7 +451,6 @@ class BunnyPoorCdn : ExtractorApi() {
         private suspend fun verifyMultipleKeys(session: Session): ByteArray? {
             val url = session.segmentUrl ?: return null
             val iv = session.iv
-            val started = android.os.SystemClock.elapsedRealtime()
             return try {
                 val response = app.get(url, headers = session.headers + ("Range" to "bytes=0-575"))
                 val prefix = ByteArray(576)
@@ -492,7 +463,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                 }
                 val bytes = prefix.copyOf(count - count % 16)
-                Log.i("TVWikiProxyTrace", "phase=SEGMENT_PROBE session=${session.id.take(8)} http=${response.code} bytes=$count elapsedMs=${android.os.SystemClock.elapsedRealtime()-started}")
                 if (bytes.size < 16) return null
                 val captured = synchronized(session.capturedKeys) { session.capturedKeys.toList() }
                 val candidates = captured.filter { it.matches(Regex("[0-9a-fA-F]{32}")) }
@@ -503,22 +473,17 @@ class BunnyPoorCdn : ExtractorApi() {
                         val rawKey = keyResponse.body.bytes()
                         if (rawKey.size == 16) candidates.add(rawKey)
                         else decodeLevel7Key(rawKey)?.let { candidates.add(it) }
-                        Log.i("TVWikiProxyTrace", "phase=KEY_SOURCE session=${session.id.take(8)} http=${keyResponse.code} bytes=${rawKey.size} candidates=${candidates.size}")
                     } catch (e: Exception) {
-                        Log.w("TVWikiProxyTrace", "phase=KEY_SOURCE_ERROR session=${session.id.take(8)} type=${e.javaClass.simpleName}")
                     }
                 }
                 for ((idx, key) in candidates.withIndex()) {
                     if (looksLikeMedia(decryptAES(bytes, key, iv))) {
-                        Log.i("TVWikiProxyTrace", "phase=KEY_VERIFIED session=${session.id.take(8)} index=$idx candidates=${candidates.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-started}")
                         synchronized(session.capturedKeys) { session.capturedKeys.clear() }
                         return key
                     }
                 }
-                Log.w("TVWikiProxyTrace", "phase=KEY_INVALID session=${session.id.take(8)} candidates=${candidates.size}")
                 null
             } catch (e: Exception) {
-                Log.e("TVWikiProxyTrace", "phase=KEY_VERIFY_ERROR session=${session.id.take(8)}", e)
                 null
             }
         }

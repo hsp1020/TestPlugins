@@ -2,7 +2,6 @@
 package com.movieking
 
 import android.util.Base64
-import android.util.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
@@ -57,7 +56,7 @@ class BcbcRedExtractor : ExtractorApi() {
         }
 
     // Read a bounded encrypted prefix. AES-CBC header verification never needs a full segment.
-    private suspend fun segmentPrefix(url: String, headers: Map<String, String>, trace: Long): ByteArray {
+    private suspend fun segmentPrefix(url: String, headers: Map<String, String>): ByteArray {
         val response = app.get(url, headers = headers + ("Range" to "bytes=0-575"))
         val data = ByteArray(576)
         var count = 0
@@ -68,8 +67,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 count += read
             }
         }
-        Log.i("MovieKingProxyTrace", "phase=SEGMENT_PROBE trace=$trace http=${response.code} bytes=$count " +
-            "rangeRequested=true")
         return data.copyOf(count - count % 16)
     }
 
@@ -91,8 +88,6 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val trace = android.os.SystemClock.elapsedRealtimeNanos()
-        val started = android.os.SystemClock.elapsedRealtime()
         try {
             val uri = URI(url)
             val hostUrl = "${uri.scheme}://${uri.host}"
@@ -106,21 +101,16 @@ class BcbcRedExtractor : ExtractorApi() {
 
             var playerRes = app.get(url, headers = playerHeaders)
             var m3u8Url = extractM3u8Url(playerRes.text, url)
-            Log.i("MovieKingProxyTrace", "phase=PLAYER trace=$trace variant=parent http=${playerRes.code} " +
-                "hasPlaylist=${m3u8Url != null}")
             if (m3u8Url == null && pageReferer.trimEnd('/') != hostUrl.trimEnd('/')) {
                 val selfHeaders = playerHeaders + mapOf("Referer" to "$hostUrl/", "Origin" to hostUrl)
                 val response = app.get(url, headers = selfHeaders)
                 val candidate = extractM3u8Url(response.text, url)
-                Log.i("MovieKingProxyTrace", "phase=PLAYER trace=$trace variant=self http=${response.code} " +
-                    "hasPlaylist=${candidate != null}")
                 if (candidate != null) {
                     playerRes = response
                     m3u8Url = candidate
                 }
             }
             if (m3u8Url == null) {
-                Log.w("MovieKingProxyTrace", "phase=NO_PLAYLIST trace=$trace")
                 return
             }
 
@@ -133,7 +123,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val playlistResponse = app.get(m3u8Url, headers = mediaHeaders)
             val playlist = playlistResponse.text
             if (!playlist.trimStart().startsWith("#EXTM3U")) {
-                Log.w("MovieKingProxyTrace", "phase=INVALID_PLAYLIST trace=$trace http=${playlistResponse.code}")
                 return
             }
             val lines = playlist.lines()
@@ -149,7 +138,6 @@ class BcbcRedExtractor : ExtractorApi() {
                     if (method == "AES-128") {
                         val match = uriAttribute.find(trimmed)
                         if (match == null) {
-                            Log.w("MovieKingProxyTrace", "phase=KEY_MISSING_URI trace=$trace line=$index")
                             return
                         }
                         val explicitIv = Regex("""(?:^|,)IV=(0x[0-9A-Fa-f]{32})""")
@@ -162,8 +150,6 @@ class BcbcRedExtractor : ExtractorApi() {
                     sequence++
                 }
             }
-            Log.i("MovieKingProxyTrace", "phase=PLAYLIST trace=$trace http=${playlistResponse.code} " +
-                "bytes=${playlist.length} keySections=${sections.size} mediaSequence=$mediaSequence")
 
             // No AES key: preserve the original URL and let Media3 fetch the playlist directly.
             if (sections.isEmpty()) {
@@ -171,7 +157,6 @@ class BcbcRedExtractor : ExtractorApi() {
                     this.headers = mediaHeaders
                     this.referer = playerRes.url
                 })
-                Log.i("MovieKingProxyTrace", "phase=DIRECT trace=$trace reason=no_aes_key")
                 return
             }
 
@@ -181,30 +166,24 @@ class BcbcRedExtractor : ExtractorApi() {
                     .body.bytes().also { payloadCache[section.keyUrl] = it }
                 if (keyPayload.size == 16) {
                     section.plainKey = true
-                    Log.i("MovieKingProxyTrace", "phase=KEY_SOURCE trace=$trace section=$position type=raw_aes")
                     continue
                 }
                 val candidates = withContext(Dispatchers.Default) { solveKeyCandidatesCombinatorial(keyPayload) }
                 val segmentUrl = section.sampleSegment
                 if (segmentUrl == null || candidates.isEmpty()) {
-                    Log.w("MovieKingProxyTrace", "phase=KEY_INVALID trace=$trace section=$position " +
-                        "reason=${if (segmentUrl == null) "no_segment" else "no_candidates"}")
                     return
                 }
-                val encrypted = segmentPrefix(segmentUrl, mediaHeaders, trace)
+                val encrypted = segmentPrefix(segmentUrl, mediaHeaders)
                 if (encrypted.size < 16) {
-                    Log.w("MovieKingProxyTrace", "phase=KEY_INVALID trace=$trace section=$position reason=short_segment")
                     return
                 }
                 val ivs = getIvList(section.startSequence, section.explicitIv)
                 var winner: ByteArray? = null
                 var winningIv: ByteArray? = null
-                var attempts = 0
                 withContext(Dispatchers.Default) {
                     outer@ for (candidate in candidates) {
                         if (candidate.size != 16) continue
                         for (iv in ivs) {
-                            attempts++
                             try {
                                 val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(candidate, "AES"), IvParameterSpec(iv))
@@ -218,14 +197,10 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 if (winner == null) {
-                    Log.w("MovieKingProxyTrace", "phase=KEY_INVALID trace=$trace section=$position " +
-                        "reason=no_verified_candidate attempts=$attempts candidates=${candidates.size}")
                     return
                 }
                 section.confirmedKey = winner
                 section.confirmedIv = winningIv
-                Log.i("MovieKingProxyTrace", "phase=KEY_VERIFIED trace=$trace section=$position " +
-                    "attempts=$attempts iv=${if (winningIv.contentEquals(ivs.first())) "primary" else "fallback"}")
             }
 
             if (sections.all { it.plainKey }) {
@@ -233,12 +208,10 @@ class BcbcRedExtractor : ExtractorApi() {
                     this.headers = mediaHeaders
                     this.referer = playerRes.url
                 })
-                Log.i("MovieKingProxyTrace", "phase=DIRECT trace=$trace reason=raw_aes_keys")
                 return
             }
 
             val proxy = server() ?: run {
-                Log.e("MovieKingProxyTrace", "phase=SERVER_START_FAILED trace=$trace")
                 return
             }
             val sessionId = UUID.randomUUID().toString().replace("-", "")
@@ -277,11 +250,8 @@ class BcbcRedExtractor : ExtractorApi() {
                 this.headers = mediaHeaders
                 this.referer = playerRes.url
             })
-            Log.i("MovieKingProxyTrace", "phase=LINK trace=$trace mode=proxy session=${sessionId.take(8)} " +
-                "keyCount=${keys.size} totalMs=${android.os.SystemClock.elapsedRealtime() - started}")
         } catch (error: Exception) {
             if (error is CancellationException) throw error
-            Log.e("MovieKingProxyTrace", "phase=EXCEPTION trace=$trace", error)
         }
     }
 
@@ -315,20 +285,6 @@ class BcbcRedExtractor : ExtractorApi() {
         }
     }
 
-    private fun logPlayerResponse(label: String, code: Int, finalUrl: String, html: String, m3u8Url: String?) {
-        val lower = html.lowercase()
-    }
-
-    private fun diagnosticHtml(html: String): String {
-        if (html.isBlank()) return "<empty>"
-        val compact = html.replace(Regex("""\s+"""), " ").trim()
-        val lower = compact.lowercase()
-        val markers = listOf("data-m3u8", ".m3u8", "cf-challenge", "just a moment", "hold tight", "secure connection", "player")
-        val pos = markers.map { lower.indexOf(it) }.filter { it >= 0 }.minOrNull() ?: 0
-        val start = (pos - 250).coerceAtLeast(0)
-        val end = (pos + 950).coerceAtMost(compact.length)
-        return compact.substring(start, end)
-    }
 
     private fun extractVideoIdDeep(url: String): String {
         try {
@@ -460,7 +416,6 @@ class BcbcRedExtractor : ExtractorApi() {
             socket = server
             port = server.localPort
             running = true
-            Log.i("MovieKingProxyTrace", "phase=SERVER_START port=$port bind=loopback")
             CoroutineScope(Dispatchers.IO).launch {
                 while (running) {
                     try {
@@ -468,35 +423,29 @@ class BcbcRedExtractor : ExtractorApi() {
                         launch { serve(client) }
                     } catch (_: SocketTimeoutException) {
                     } catch (e: Exception) {
-                        if (running) Log.w("MovieKingProxyTrace", "phase=ACCEPT_ERROR type=${e.javaClass.simpleName}")
                     }
                     expire()
                 }
             }
             true
         } catch (error: Exception) {
-            Log.e("MovieKingProxyTrace", "phase=SERVER_BIND_FAILED", error)
             false
         }
 
         fun addSession(id: String, playlist: String, keys: Map<String, ByteArray>) {
             sessions[id] = Session(playlist.toByteArray(Charsets.UTF_8), keys.toMap())
-            Log.i("MovieKingProxyTrace", "phase=SESSION_ADD id=${id.take(8)} active=${sessions.size} " +
-                "playlistBytes=${sessions[id]?.playlist?.size} keys=${keys.size}")
         }
 
         private fun expire() {
             val now = android.os.SystemClock.elapsedRealtime()
             for ((id, state) in sessions) {
                 if (now - state.lastAccess >= 24L * 60 * 60 * 1000 && sessions.remove(id, state)) {
-                    Log.i("MovieKingProxyTrace", "phase=SESSION_EXPIRE id=${id.take(8)} active=${sessions.size}")
                 }
             }
             if (sessions.isEmpty()) {
                 running = false
                 try { socket?.close() } catch (_: Exception) { }
                 socket = null
-                Log.i("MovieKingProxyTrace", "phase=SERVER_STOP reason=idle")
             }
         }
 
@@ -526,11 +475,8 @@ class BcbcRedExtractor : ExtractorApi() {
                     output.write(header.toByteArray(Charsets.US_ASCII))
                     output.write(payload)
                     output.flush()
-                    Log.i("MovieKingProxyTrace", "phase=HTTP id=${id.take(8)} resource=${parts.drop(1).joinToString("/")} " +
-                        "status=$status bytes=${payload.size}")
                 }
             } catch (e: Exception) {
-                Log.w("MovieKingProxyTrace", "phase=HTTP_ERROR type=${e.javaClass.simpleName}")
                 try { client.close() } catch (_: Exception) { }
             }
         }
