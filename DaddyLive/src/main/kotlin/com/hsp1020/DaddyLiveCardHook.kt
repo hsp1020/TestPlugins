@@ -226,7 +226,7 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
                     Build.VERSION.SDK_INT >= 29 && title.isSingleLine,
                     image, image?.scaleType
                 ).also { originals[view] = it }
-                if (item.posterUrl == DaddyLiveScheduleProvider.searchPosterUrl) {
+                if (item.posterUrl == DaddyLiveScheduleProvider.cardPosterUrl) {
                     // The existing portrait logo is transparent; preserve the full LIVE text.
                     if (image != null && image.scaleType != ImageView.ScaleType.FIT_CENTER) {
                         image.scaleType = ImageView.ScaleType.FIT_CENTER
@@ -241,8 +241,10 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
                     title.maxLines = 4
                     changed = true
                 }
-                if (title.minLines != 1) {
-                    title.minLines = 1
+                // Reserve four lines in the native wrap_content carousel row.
+                // Otherwise the measured one-line row clips the remaining text.
+                if (title.minLines != 4) {
+                    title.minLines = 4
                     changed = true
                 }
                 if (changed) {

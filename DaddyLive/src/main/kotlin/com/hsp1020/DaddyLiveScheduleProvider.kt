@@ -59,7 +59,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         private const val posterUrl =
             "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming2.png"
 
-        internal const val searchPosterUrl =
+        internal const val cardPosterUrl =
             "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
 
         private const val SCHEDULE_CACHE_TTL_MS = 60_000L
@@ -211,7 +211,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         }
     }
 
-    private fun eventToSearchResponse(event: ScheduleEvent, forSearch: Boolean = false): SearchResponse {
+    private fun eventToSearchResponse(event: ScheduleEvent): SearchResponse {
         val formattedTime = try {
             convertGMTToLocalTime(event.timeGmt)
         } catch (_: Exception) {
@@ -225,7 +225,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
             encodedDataTitle,
             TvType.TvSeries
         ) {
-            this.posterUrl = if (forSearch) Companion.searchPosterUrl else Companion.posterUrl
+            this.posterUrl = Companion.cardPosterUrl
             this.episodes = event.channels.size
         }
     }
@@ -267,7 +267,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                         .replace(" ", "")
                         .contains(normalizedQuery)
                 }
-                .map { eventToSearchResponse(it, forSearch = true) }
+                .map { eventToSearchResponse(it) }
                 .also {
                 }
         } catch (e: Exception) {
