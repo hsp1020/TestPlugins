@@ -147,9 +147,9 @@ class DaddyLiveExtractor : ExtractorApi() {
      */
     private val players = listOf(
         "stream",
-        "plus",
-        "watch",
         "player",
+        "watch",
+        "plus",
         "cast",
         "casting"
     )
@@ -205,10 +205,9 @@ class DaddyLiveExtractor : ExtractorApi() {
         Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
         if (candidates.isEmpty()) return
 
-        // Start stream, plus, watch and player in parallel. Keep the existing
-        // six-player order and drain cast/casting when a slot becomes free.
+        // Start stream, player and watch in parallel; then try plus, cast and casting.
         val sharedDembed = ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>()
-        val workers = minOf(4, candidates.size)
+        val workers = minOf(3, candidates.size)
         val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
