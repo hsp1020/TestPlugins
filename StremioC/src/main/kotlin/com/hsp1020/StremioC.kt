@@ -1089,8 +1089,7 @@ open class StremioC(
             val catalogAddons: List<StreamSubtitleAddon> = emptyList(),
             val cineStreamIntegrationMap: Map<String, Boolean> = emptyMap(),
             val streamPlayIntegrationMap: Map<String, Boolean> = emptyMap(),
-            val vixSrcIntegrationMap: Map<String, Boolean> = emptyMap(),
-            val catalogStreamsMap: Map<String, Boolean> = emptyMap()
+            val vixSrcIntegrationMap: Map<String, Boolean> = emptyMap()
         )
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
@@ -1151,7 +1150,6 @@ open class StremioC(
                 val progressMap = mutableMapOf<String, Boolean>()
                 val streamsMap = mutableMapOf<String, Boolean>()
                 val subtitlesMap = mutableMapOf<String, Boolean>()
-                val catalogStreamsMap = mutableMapOf<String, Boolean>()
                 val catalogEnabled = mutableMapOf<String, Boolean>()
                 val catalogEnabledIds = mutableMapOf<Long, Boolean>()
                 val catalogAddons = mutableListOf<StreamSubtitleAddon>()
@@ -1182,7 +1180,6 @@ open class StremioC(
                                 val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                                 streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
                                 subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
-                                catalogStreamsMap[link] = obj.optBoolean("isCatalogStreamsEnabled", true)
                                 if (obj.has("isCineStreamIntegrationEnabled"))
                                     cineIntegrationMap[link] = obj.optBoolean("isCineStreamIntegrationEnabled")
                                 if (obj.has("isStreamPlayIntegrationEnabled"))
@@ -1208,7 +1205,7 @@ open class StremioC(
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
                 val result = SyncSettings(libraryUrl, map, progressMap, streamsMap, subtitlesMap, extraUrls,
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons,
-                    cineIntegrationMap, streamPlayIntegrationMap, vixSrcIntegrationMap, catalogStreamsMap)
+                    cineIntegrationMap, streamPlayIntegrationMap, vixSrcIntegrationMap)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -3030,23 +3027,6 @@ open class StremioC(
             stremioManifestUrl(currentMainUrl) !in syncSettings.disabledCatalogUrls
         val streamsAddonEnabled = savedStreamsAddon ?: libraryAddonDefault
         val subtitlesAddonEnabled = savedSubtitlesAddon ?: libraryAddonDefault
-        val catalogStreamsEnabled = syncSettings.catalogStreamsMap[currentCleanUrl] ?: true
-        // Respect an explicit "no stream" manifest without blocking legacy or uncached addons.
-        val mainStreamResourceSupported = CloudStreamApp.context
-            ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-            ?.let { stremioReadManifest(it, currentMainUrl) }
-            ?.let { raw ->
-                runCatching {
-                    val resources = org.json.JSONObject(raw).optJSONArray("resources")
-                    resources == null || (0 until resources.length()).any { index ->
-                        when (val resource = resources.opt(index)) {
-                            is String -> resource.equals("stream", true)
-                            is org.json.JSONObject -> resource.optString("name").equals("stream", true)
-                            else -> false
-                        }
-                    }
-                }.getOrDefault(true)
-            } ?: true
         val extraUrls = if (streamsAddonEnabled || subtitlesAddonEnabled) {
             syncSettings.streamSubtitleUrls.filter { addon ->
                 val parsed = addon.url.toHttpUrlOrNull()
@@ -3410,12 +3390,7 @@ open class StremioC(
                 }
             },
             {
-                val request = if (catalogStreamsEnabled && mainStreamResourceSupported)
-                    streamRequest(targetType, primaryId, loadData.season, loadData.episode) else null
-                if (!catalogStreamsEnabled || !mainStreamResourceSupported) {
-                    traceSource(traceId, "STREMIO_MAIN_SKIP",
-                        "source=$name reason=${if (!catalogStreamsEnabled) "DISABLED" else "NO_STREAM_RESOURCE"}")
-                }
+                val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 if (cleanBaseUrl.isNotBlank() && request != null) {
                     suspend fun fetchMainStreams(route: Pair<String, String>): Int =
                         runSuspendCatching {

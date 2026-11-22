@@ -96,7 +96,6 @@ data class LinkItem(
     val isProgressSyncEnabled: Boolean = true,
     val isStreamsAddonEnabled: Boolean = false,
     val isSubtitlesAddonEnabled: Boolean = false,
-    val isCatalogStreamsEnabled: Boolean = true,
     val isCineStreamIntegrationEnabled: Boolean? = null,
     val isStreamPlayIntegrationEnabled: Boolean? = null,
     val isVixSrcIntegrationEnabled: Boolean? = null,
@@ -128,7 +127,6 @@ object SettingsRepository {
                         isProgressSyncEnabled = obj.optBoolean("isProgressSyncEnabled", true),
                         isStreamsAddonEnabled = obj.optBoolean("isStreamsAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         isSubtitlesAddonEnabled = obj.optBoolean("isSubtitlesAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
-                        isCatalogStreamsEnabled = obj.optBoolean("isCatalogStreamsEnabled", true),
                         isCineStreamIntegrationEnabled = if (obj.has("isCineStreamIntegrationEnabled")) obj.optBoolean("isCineStreamIntegrationEnabled") else null,
                         isStreamPlayIntegrationEnabled = if (obj.has("isStreamPlayIntegrationEnabled")) obj.optBoolean("isStreamPlayIntegrationEnabled") else null,
                         isVixSrcIntegrationEnabled = if (obj.has("isVixSrcIntegrationEnabled")) obj.optBoolean("isVixSrcIntegrationEnabled") else null,
@@ -154,7 +152,6 @@ object SettingsRepository {
                 put("isProgressSyncEnabled", item.isProgressSyncEnabled)
                 put("isStreamsAddonEnabled", item.isStreamsAddonEnabled)
                 put("isSubtitlesAddonEnabled", item.isSubtitlesAddonEnabled)
-                put("isCatalogStreamsEnabled", item.isCatalogStreamsEnabled)
                 item.isCineStreamIntegrationEnabled?.let { put("isCineStreamIntegrationEnabled", it) }
                 item.isStreamPlayIntegrationEnabled?.let { put("isStreamPlayIntegrationEnabled", it) }
                 item.isVixSrcIntegrationEnabled?.let { put("isVixSrcIntegrationEnabled", it) }
@@ -1854,7 +1851,7 @@ class SettingsBottomFragment(
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
-            Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchCatalogStreams", "switchLinkSync",
+            Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchLinkSync",
                 "switchProgressSync", "switchCineStream", "switchStreamPlay", "switchVixSrc"),
             NestedScrollView::class.java to listOf("catalogEditorScroll")
         ))) {
@@ -1874,12 +1871,10 @@ class SettingsBottomFragment(
         url.setText(itemToEdit?.link.orEmpty())
         val streamsAddon = dialogView.findView<Switch>("switchStreamsAddon")
         val subtitlesAddon = dialogView.findView<Switch>("switchSubtitlesAddon")
-        val catalogStreams = dialogView.findView<Switch>("switchCatalogStreams")
         val metaSync = dialogView.findView<Switch>("switchLinkSync")
         val progressSync = dialogView.findView<Switch>("switchProgressSync")
         streamsAddon.isChecked = itemToEdit?.isStreamsAddonEnabled ?: false
         subtitlesAddon.isChecked = itemToEdit?.isSubtitlesAddonEnabled ?: false
-        catalogStreams.isChecked = itemToEdit?.isCatalogStreamsEnabled ?: true
         metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
         progressSync.isChecked = itemToEdit?.isProgressSyncEnabled ?: false
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
@@ -1914,7 +1909,6 @@ class SettingsBottomFragment(
                 link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
                 isProgressSyncEnabled = progressSync.isChecked,
                 isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked,
-                isCatalogStreamsEnabled = catalogStreams.isChecked,
                 isCineStreamIntegrationEnabled = dialogView.findView<Switch>("switchCineStream").isChecked,
                 isStreamPlayIntegrationEnabled = dialogView.findView<Switch>("switchStreamPlay").isChecked,
                 isVixSrcIntegrationEnabled = dialogView.findView<Switch>("switchVixSrc").isChecked)
