@@ -82,6 +82,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
         } catch (_: Exception) { "unknown" }
         fun key(url: String): String = digest(url)
+        fun urlShape(raw: String?): String = try {
+            if (raw.isNullOrBlank()) "absent" else {
+                val u = URL(raw)
+                "host=${u.host} pathId=${pathKey(raw)} urlId=${key(raw)} " +
+                    "queryKeys=${Uri.parse(raw).queryParameterNames.sorted().joinToString(",").take(100)} " +
+                    "queryChars=${u.query?.length ?: 0}"
+            }
+        } catch (_: Exception) { "invalid" }
+        fun valueId(raw: String?): String = if (raw.isNullOrBlank()) "none" else key(raw)
         fun pathKey(url: String): String = runCatching {
             val parsed = URL(url)
             digest(parsed.host + parsed.path)
@@ -1142,6 +1151,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             url: String, requested: Map<String, String>, session: Session, prefetch: Boolean
         ): ByteArray? {
             val started = android.os.SystemClock.elapsedRealtime()
+            if (prefetch) Trace.event("SCRIPT_PREFETCH", "START",
+                "sid=${session.id.take(8)} ${Trace.urlShape(url)} agentId=${Trace.valueId(session.userAgent)}")
             var connection: HttpURLConnection? = null
             return try {
                 val active = URL(url).openConnection() as HttpURLConnection
@@ -1189,7 +1200,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (!prefetch) session.milestone("script_body",
                     "readMs=${finished-headersAt} bytes=${bytes.size}")
                 Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE", "FETCH_OK",
-                    "sid=${session.id.take(8)} bytes=${bytes.size} elapsedMs=${finished-started}")
+                    "sid=${session.id.take(8)} bytes=${bytes.size} elapsedMs=${finished-started} " +
+                        "mime=${active.contentType?.substringBefore(';').orEmpty()} " +
+                        "redirected=${active.url.toString() != url} final=${Trace.urlShape(active.url.toString())}")
                 bytes
             } catch (e: Exception) {
                 Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE", "SCRIPT_ERROR",
@@ -1223,8 +1236,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 browserAgent != null && browserAgent != cached.agent -> "agent_changed"
                 else -> "hit"
             }
+            session.scriptReuseResult = result
             Trace.event("SCRIPT_PREFETCH", if (result == "hit") "HIT" else "MISS",
                 "sid=${session.id.take(8)} reason=$result ageMs=$age")
+            Trace.event("SCRIPT_PREFETCH", "COMPARE",
+                "sid=${session.id.take(8)} saved=${Trace.urlShape(cached?.url)} " +
+                    "requested=${Trace.urlShape(address)} " +
+                    "sameHost=${cached?.let { runCatching { URL(it.url).host == URL(address).host }.getOrDefault(false) }} " +
+                    "samePath=${cached?.let { runCatching { URL(it.url).path == URL(address).path }.getOrDefault(false) }} " +
+                    "sameQuery=${cached?.let { runCatching { URL(it.url).query == URL(address).query }.getOrDefault(false) }} " +
+                    "sameCookie=${cached?.let { it.cookie == scriptCookie(address) }} " +
+                    "sameAgent=${cached?.let { browserAgent == null || browserAgent == it.agent }} " +
+                    "sameReferer=${cached?.let { browserRef == null || browserRef == it.referer }} " +
+                    "headers=${request.requestHeaders.keys.sorted().joinToString(",").take(150)}")
             Trace.event("RESPONSE_BRIDGE", "SCRIPT_FETCH",
                 "sid=${session.id.take(8)} target=${Trace.target(address)} " +
                     "mode=${if (result == "hit") "prefetched_js_with_probe" else "original_js_with_probe"}")
@@ -1290,6 +1314,35 @@ class DaddyLiveExtractor : ExtractorApi() {
             private val timingStart = android.os.SystemClock.elapsedRealtime()
             private val timingLast = AtomicLong(timingStart)
             private val timingStages = ConcurrentHashMap.newKeySet<String>()
+            private val timingTimes = ConcurrentHashMap<String, Long>()
+            private val reported = AtomicInteger()
+            @Volatile var scriptReuseResult = "not_requested"
+            @Volatile var issuedTokenId = "none"
+            @Volatile var issuedTokenAt = 0L
+            @Volatile var signedManifestHttp = -1
+            @Volatile var unsignedManifestHttp = -1
+            fun reportOutcome(status: String) {
+                if (!reported.compareAndSet(0, 1)) return
+                fun gap(a: String, b: String): Long {
+                    val start = timingTimes[a] ?: return -1
+                    val end = timingTimes[b] ?: return -1
+                    return end - start
+                }
+                Trace.event("AUTH_DIAG_SUMMARY", status,
+                    "sid=${id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-timingStart} " +
+                        "pageStartMs=${gap("extract_start","page_started")} " +
+                        "beforeScriptMs=${gap("page_started","script_request")} " +
+                        "scriptLoadMs=${gap("script_request","script_injected")} " +
+                        "toTicketMs=${gap("script_injected","ticket_request")} " +
+                        "ticketToTokenMs=${gap("ticket_request","token_response")} " +
+                        "tokenToManifestMs=${gap("token_response","manifest_response")} " +
+                        "preflightMs=${gap("preflight_start","preflight_ok")} " +
+                        "prefetch=$scriptReuseResult navigations=${mainNavigations.get()} " +
+                        "ticketHttp=$browserTicketHttp tokenHttp=$browserTokenHttp " +
+                        "unsignedHttp=$unsignedManifestHttp signedHttp=$signedManifestHttp " +
+                        "manifestError=${manifestHttpError ?: -1} authRequests=$authRequestCount " +
+                        "sealed=$sealedPlaylist tailHeld=$skipInitialTail")
+            }
             val mainNavigations = AtomicInteger()
             private val parentResources = AtomicInteger()
             private val embedResources = AtomicInteger()
@@ -1301,8 +1354,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (!timingStages.add(step)) return
                 val now = android.os.SystemClock.elapsedRealtime()
                 val prior = timingLast.getAndSet(now)
+                timingTimes[step] = now
                 Trace.event("AUTH_TIMING", "MARK", "sid=${id.take(8)} step=$step " +
                     "totalMs=${now-timingStart} gapMs=${now-prior} $detail")
+                if (step == "link_ready") reportOutcome("LINK_READY")
             }
 
             // P2 only measures: the original browser requests remain untouched.
@@ -1493,8 +1548,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "manifest" -> {
                         manifestHttpError = status.takeIf { it !in 200..299 }
                         val decoded = body.trimStart().startsWith("#EXTM3U")
-                        val signed = runCatching { !Uri.parse(address).getQueryParameter("t").isNullOrBlank() }
-                            .getOrDefault(false)
+                        val signature = runCatching { Uri.parse(address).getQueryParameter("t") }.getOrNull()
+                        val signed = !signature.isNullOrBlank()
+                        if (signed) signedManifestHttp = status else unsignedManifestHttp = status
+                        Trace.event("AUTH_CHAIN", "MANIFEST_RESPONSE",
+                            "sid=${id.take(8)} http=$status ${Trace.urlShape(address)} " +
+                                "signed=$signed tokenId=${Trace.valueId(signature)} issuedId=$issuedTokenId " +
+                                "matchesIssued=${signed && issuedTokenId != "none" && Trace.valueId(signature) == issuedTokenId} " +
+                                "issuedAgeMs=${if (issuedTokenAt > 0) android.os.SystemClock.elapsedRealtime()-issuedTokenAt else -1} " +
+                                "bodyChars=${body.length} truncated=$truncated")
                         Trace.event("HLS_BROWSER", code,
                             "sid=${id.take(8)} http=$status signed=$signed extm3u=$decoded " +
                                 "chars=${body.length} truncated=$truncated reason=$reason")
@@ -1652,7 +1714,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                     return
                 }
                 val current = data.optString("token").ifBlank { data.optString("t") }
-                if (current.isNotBlank()) token = current
+                if (current.isNotBlank()) {
+                    token = current
+                    issuedTokenId = Trace.valueId(current)
+                    issuedTokenAt = android.os.SystemClock.elapsedRealtime()
+                }
+                Trace.event("AUTH_CHAIN", "TOKEN_ISSUED",
+                    "sid=${id.take(8)} tokenId=${Trace.valueId(current)} " +
+                        "fields=${data.keys().asSequence().take(12).toList().sorted().joinToString(",")} " +
+                        "keyPresent=${data.optString("k").isNotBlank()}")
                 val key = data.optString("k")
                 if (current.isNotBlank() && key.isNotBlank()) {
                     val decoded = runCatching { Base64.decode(key, Base64.URL_SAFE or Base64.NO_WRAP) }.getOrNull()
@@ -1669,6 +1739,12 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun captureManifest(request: WebResourceRequest) {
                 val address = request.url.toString()
                 val t = request.url.getQueryParameter("t")
+                Trace.event("AUTH_CHAIN", "MANIFEST_REQUEST",
+                    "sid=${id.take(8)} ${Trace.urlShape(address)} signed=${!t.isNullOrBlank()} " +
+                        "tokenId=${Trace.valueId(t)} issuedId=$issuedTokenId " +
+                        "matchesIssued=${!t.isNullOrBlank() && issuedTokenId != "none" && Trace.valueId(t) == issuedTokenId} " +
+                        "issuedAgeMs=${if (issuedTokenAt > 0) android.os.SystemClock.elapsedRealtime()-issuedTokenAt else -1} " +
+                        "${Trace.headerProfile(request.requestHeaders)}")
                 if (token.isNotBlank() && t.isNullOrBlank() &&
                     Uri.parse(url).getQueryParameter("t")?.isNotBlank() == true) {
                     Trace.event("PLAYER_URL", "PRESERVE_SIGNED", "sid=${id.take(8)} reason=ignore_late_unsigned_request")
@@ -1786,6 +1862,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             fun close() {
+                reportOutcome("CLOSED_WITHOUT_LINK")
                 pendingResources.values.forEach { it.complete(null) }
                 pendingResources.clear()
                 val player = browser
@@ -2120,12 +2197,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             session.milestone("playlist_url_captured")
             if (session.probeAvailable) {
+                val waitStarted = android.os.SystemClock.elapsedRealtime()
                 val capturedByBrowser = withTimeoutOrNull(if (session.probeInstalled) 6500L else 3000L) {
                     session.browserManifestReady.await()
                 } == true
                 Trace.event("RESPONSE_BRIDGE",
                     if (capturedByBrowser) "MANIFEST_CAPTURED" else "MANIFEST_UNAVAILABLE",
                     "sid=${session.id.take(8)} installed=${session.probeInstalled} " +
+                        "waitMs=${android.os.SystemClock.elapsedRealtime()-waitStarted} " +
                         "browserTokenHttp=${session.browserTokenHttp} ticketHttp=${session.browserTicketHttp} " +
                         "browserManifestHttp=${session.manifestHttpError ?: -1} " +
                         "reason=${if (capturedByBrowser) "browser_response_body_ready" else if (!session.probeInstalled) "probe_not_installed" else "no_successful_readable_manifest"}")
@@ -2158,6 +2237,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val requestHeaders = session.headers
                 val browserBody = session.browserManifestBody
                 val response = if (browserBody == null) {
+                    Trace.event("AUTH_CHAIN", "CLIENT_FALLBACK",
+                        "sid=${session.id.take(8)} ${Trace.urlShape(actual)} " +
+                            "tokenId=${Trace.valueId(Uri.parse(actual).getQueryParameter("t"))} " +
+                            "issuedId=${session.issuedTokenId} signedBrowserHttp=${session.signedManifestHttp} " +
+                            "unsignedBrowserHttp=${session.unsignedManifestHttp} ${Trace.headerProfile(requestHeaders)}")
                     Trace.event("HLS_FETCH", "CLIENT_REQUEST",
                         "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
                             "headerNames=${requestHeaders.keys.sorted().joinToString(",")} " +
@@ -2262,6 +2346,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 .filterNot { URL(it).path.endsWith(".m3u8", true) }
                 .toList().asReversed()
             val verified = available.filter { session.hasVerifiedAlternative(it) }
+            val seq = playlist.lineSequence().firstOrNull {
+                it.startsWith("#EXT-X-MEDIA-SEQUENCE:", true)
+            }?.substringAfter(':').orEmpty()
+            val duration = playlist.lineSequence().firstOrNull {
+                it.startsWith("#EXT-X-TARGETDURATION:", true)
+            }?.substringAfter(':').orEmpty()
+            Trace.event("SEGMENT_WINDOW", "PREFLIGHT",
+                "sid=${session.id.take(8)} seq=$seq duration=$duration count=${available.size} " +
+                    "hasPdt=${playlist.contains("#EXT-X-PROGRAM-DATE-TIME", true)} " +
+                    "sealed=${session.sealedPlaylist} encrypted=${session.encryptedMedia} " +
+                    "newestId=${Trace.valueId(available.firstOrNull())} " +
+                    "previousId=${Trace.valueId(available.getOrNull(1))} " +
+                    "oldestId=${Trace.valueId(available.lastOrNull())}")
             // In a sealed live sliding window, the newest entry can still be incomplete.
             // Prefer the preceding completed entry; retain the newest as a fallback.
             val stableLive = session.sealedPlaylist && available.size >= 3 &&
@@ -2320,6 +2417,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                         media == null -> "not_ts"
                         else -> "ok"
                     }
+                    if (raw != null && media == null) Trace.event("SEGMENT_MEDIA_SHAPE", "UNWRAP_FAILED",
+                        "sid=${session.id.take(8)} entry=$index targetId=${Trace.key(target)} " +
+                            "mime=${client?.headers?.get("Content-Type").orEmpty().substringBefore(';')} " +
+                            describeMediaShape(raw))
                     val size = minOf(decodedBytes, prefix.size)
                     if (size > 0) media!!.copyInto(prefix, 0, 0, size)
                     size
@@ -2744,6 +2845,34 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         /** Original unwrap(): recover TS from WebP EXIF, PNG IEND / pixels,
          * TIKTIKRAW / TIKTIKTSGZ, or raw sync-byte embedded data. */
+        // Failure-only PNG structure probe: no raw bytes or segment URLs in the logs.
+        private fun describeMediaShape(bytes: ByteArray): String {
+            val png = bytes.size >= 8 && bytes[0] == 0x89.toByte() && at(bytes, 1, "PNG")
+            val webp = at(bytes, 0, "RIFF") && at(bytes, 8, "WEBP")
+            if (!png) return "bytes=${bytes.size} png=false webp=$webp ts=${isTs(bytes)}"
+            var offset = 8
+            var chunks = 0
+            var idat = 0L
+            var iend = false
+            var broken = false
+            var width = 0
+            var height = 0
+            var color = -1
+            while (offset + 12 <= bytes.size && chunks++ < 80) {
+                val length = int32(bytes, offset)
+                if (length < 0 || length > bytes.size - offset - 12) { broken = true; break }
+                if (at(bytes, offset + 4, "IHDR") && length >= 13) {
+                    width = int32(bytes, offset + 8)
+                    height = int32(bytes, offset + 12)
+                    color = bytes[offset + 17].toInt() and 255
+                } else if (at(bytes, offset + 4, "IDAT")) idat += length
+                else if (at(bytes, offset + 4, "IEND")) { iend = true; break }
+                offset += 12 + length
+            }
+            return "bytes=${bytes.size} png=true dimensions=${width}x$height " +
+                "colorType=$color chunks=$chunks idatBytes=$idat iend=$iend invalidChunk=$broken"
+        }
+
         private fun unwrapMedia(bytes: ByteArray): ByteArray? {
             if (isTs(bytes)) return bytes
             if (at(bytes, 0, "RIFF") && at(bytes, 8, "WEBP")) {
@@ -2968,6 +3097,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                             parts[1] == "index.m3u8" || resource?.playlist == true -> {
                                 val first = if (resource == null) session.firstPlaylist else null
                                 val original = if (resource == null) session.url else resource.url
+                                if (resource == null) Trace.event("PROXY_WINDOW", "REQUEST",
+                                    "sid=${session.id.take(8)} initial=${first != null} " +
+                                        "tailHeld=${session.skipInitialTail} chars=${first?.length ?: 0}")
                                 val manifest = if (first != null) {
                                     session.firstPlaylist = null
                                     original to first
@@ -3013,6 +3145,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "DECODE_FAIL",
                                             "sid=${session.id.take(8)} source=${if (browser?.bytes != null) "browser" else "client"} " +
                                                 "in=${bytes.size} out=${data?.size ?: 0} type=$type " +
+                                                "urlId=${Trace.key(resource.url)} pathId=${Trace.pathKey(resource.url)} " +
                                                 "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                                     } else {
                                         val http = clientHttp.takeIf { it in 400..599 }
@@ -3024,7 +3157,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                                             }
                                             Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
                                                 "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
-                                                    "clientHttp=$clientHttp elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                                    "clientHttp=$clientHttp urlId=${Trace.key(resource.url)} " +
+                                                        "pathId=${Trace.pathKey(resource.url)} " +
+                                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                                         }
                                     }
                                 }
