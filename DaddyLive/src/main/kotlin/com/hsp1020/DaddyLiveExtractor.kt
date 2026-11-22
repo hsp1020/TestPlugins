@@ -67,6 +67,11 @@ import org.json.JSONArray
 import org.json.JSONTokener
 
 class DaddyLiveExtractor : ExtractorApi() {
+    companion object {
+        internal fun releaseSessionsOnPlayerExit(reason: String) =
+            DaddyLiveDembed.releaseAllSessions(reason)
+    }
+
     private object Trace {
         private const val TAG = "DaddyLiveTrace"
         fun target(raw: String): String = try {
@@ -2540,6 +2545,20 @@ class DaddyLiveExtractor : ExtractorApi() {
                 "sid=" + session.id.take(8) + " reason=all_candidates_failed count=" + targets.size)
             return false
         }
+        fun releaseAllSessions(reason: String) {
+            var dembedCount = 0
+            sessions.forEach { (id, session) ->
+                if (sessions.remove(id, session)) {
+                    session.close()
+                    dembedCount++
+                }
+            }
+            val directCount = directSessions.size
+            directSessions.clear()
+            Trace.event("PLAYER_SESSION_CLEANUP", "CLOSED",
+                "reason=$reason dembed=$dembedCount direct=$directCount")
+        }
+
         @Synchronized private fun startServer(): Int {
             if (server?.isClosed == false) {
                 Trace.event("PROXY", "REUSE", "port=$port")
