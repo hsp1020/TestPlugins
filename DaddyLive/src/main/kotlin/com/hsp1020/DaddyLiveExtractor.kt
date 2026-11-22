@@ -184,7 +184,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     else original.url,
                                     original.type
                                 ) {
-                                    referer = original.referer
+                                    this.referer = original.referer
                                     quality = original.quality
                                     headers = original.headers
                                     extractorData = original.extractorData
