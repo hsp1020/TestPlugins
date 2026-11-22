@@ -14,6 +14,7 @@ import android.view.inspector.WindowInspector
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
+import androidx.fragment.app.FragmentActivity
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
@@ -27,7 +28,7 @@ import java.util.IdentityHashMap
 /** Apply DaddyLive's four-line titles to native Home and Search cards only. */
 internal class DaddyLiveCardHook(private val app: Application) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
-    private var host: MainActivity? = null
+    private var host: FragmentActivity? = null
     private var focusTree: ViewTreeObserver? = null
     private val screens = mutableMapOf<Fragment, Screen>()
     private val dialogs = mutableMapOf<View, Screen>()
@@ -57,7 +58,7 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
         release()
     }
 
-    private fun use(activity: MainActivity) {
+    private fun use(activity: FragmentActivity) {
         if (host === activity) return
         release()
         host = activity
