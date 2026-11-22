@@ -48,6 +48,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -187,29 +189,54 @@ class DaddyLiveExtractor : ExtractorApi() {
             streamId = selected.streamId
         )
         Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
+        if (candidates.isEmpty()) return
 
-        val attemptedDembed = hashSetOf<String>()
-        for (candidate in candidates) {
-            currentCoroutineContext().ensureActive()
-
-            val sourceName = "${selected.channelName} - ${candidate.player}"
-            Trace.event("PLAYER_CANDIDATE", "TRY", "player=${candidate.player} target=${Trace.target(candidate.url)}")
-
-            val link = extractVideo(
-                url = candidate.url,
-                sourceName = sourceName,
-                parentReferer = entryUrl,
-                attemptedDembed = attemptedDembed
-            )
-
-            if (link != null) {
-                Trace.event("MEDIA3_LINK", "EMITTED", "player=${candidate.player} mode=${if (link.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(link.url)}")
-                callback(link)
-                return
+        // A slow stream player must not delay an independently playable fallback.
+        // Limit outstanding work to three candidates (including any embedded WebView).
+        val attemptedDembed = ConcurrentHashMap.newKeySet<String>()
+        val selectedLink = supervisorScope {
+            val permits = Semaphore(3)
+            val remaining = AtomicInteger(candidates.size)
+            val first = CompletableDeferred<Pair<PlayerCandidate, ExtractorLink>?>()
+            val jobs = candidates.map { candidate ->
+                launch {
+                    try {
+                        permits.acquire()
+                        try {
+                            val sourceName = "${selected.channelName} - ${candidate.player}"
+                            Trace.event("PLAYER_CANDIDATE", "TRY",
+                                "player=${candidate.player} target=${Trace.target(candidate.url)}")
+                            val link = extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
+                            if (link == null) {
+                                Trace.event("PLAYER_CANDIDATE", "FALLBACK",
+                                    "player=${candidate.player} reason=no_valid_link")
+                            } else if (!first.complete(candidate to link)) {
+                                DaddyLiveDembed.discardUnused(link.url)
+                            }
+                        } finally {
+                            permits.release()
+                        }
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (e: Exception) {
+                        Trace.event("PLAYER_CANDIDATE", "ERROR",
+                            "player=${candidate.player} reason=${e.javaClass.simpleName}")
+                    } finally {
+                        if (remaining.decrementAndGet() == 0) first.complete(null)
+                    }
+                }
             }
-            Trace.event("PLAYER_CANDIDATE", "FALLBACK", "player=${candidate.player} reason=no_valid_link")
+            try { first.await() } finally { jobs.forEach { it.cancel() } }
         }
-        Trace.event("PLAYER_DISCOVERY", "EXHAUSTED", "candidates=${candidates.size} reason=all_failed")
+        if (selectedLink != null) {
+            val (candidate, link) = selectedLink
+            Trace.event("MEDIA3_LINK", "EMITTED",
+                "player=${candidate.player} mode=${if (link.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(link.url)}")
+            callback(link)
+        } else {
+            Trace.event("PLAYER_DISCOVERY", "EXHAUSTED",
+                "candidates=${candidates.size} reason=all_failed")
+        }
     }
 
     /*
@@ -1078,10 +1105,11 @@ class DaddyLiveExtractor : ExtractorApi() {
               // Record whether the real player starts media loading at all.
               var mediaHost="", nativeStarts=0, nativeEnds=0, mediaPlayAttempts=0, mediaEvents=0;
               function hostOf(raw) { try {return new URL(raw,location.href).host;}catch(_){return "";} }
-              function nativeMedia(raw,method,kind) {
+              function nativeMedia(raw,method,kind,binary) {
                 var p=pathOf(raw);
                 return !kind && String(method).toUpperCase()==="GET" &&
-                  (/^\/premium[^/]*\//.test(p) || (!!mediaHost && hostOf(raw)===mediaHost && !/^\/api\//.test(p) && !/\.m3u8$/i.test(p)));
+                  (!!binary || /^\/premium[^/]*\//.test(p) ||
+                    (!!mediaHost && hostOf(raw)===mediaHost && !/^\/api\//.test(p) && !/\.m3u8$/i.test(p)));
               }
               function sampleRtc(reason) {
                 for(var i=0;i<Math.min(rtcPeers.length,3);i++){
@@ -1180,6 +1208,23 @@ class DaddyLiveExtractor : ExtractorApi() {
                          url:absoluteOf(url),requestUrl:absoluteOf(url),requestHeaders:names,credentials:credentials,
                          error:String(e && e.name||"network_error"),elapsedMs:Math.round(performance.now()-start)});});
                    }
+                  // A P2P HTTP loader can use fetchSetup() to load binary media
+                  // from a different host; inspect headers without copying response bytes.
+                  if (!kind && !nativeMedia(url,method,kind) && String(method).toUpperCase()==="GET") {
+                    Promise.resolve(promise).then(function(r) {
+                      var mime="";try{mime=(r.headers.get("content-type")||"").toLowerCase();}catch(_){}
+                      if (!/^(image\/png|video\/|audio\/|application\/octet-stream|application\/mp2t)/.test(mime)) return;
+                      nativeStarts++; nativeEnds++;
+                      var actual=r.url||absoluteOf(url), names="";
+                      try{names=headerNames(new Headers(init&&init.headers||input&&input.headers));}catch(_){}
+                      if(nativeStarts<=12)
+                        emit({stage:"native_start",transport:"fetch_binary_candidate",method:method,url:absoluteOf(url),headers:names});
+                      emit({stage:"native_segment",transport:"fetch_binary_candidate",method:method,
+                        requestUrl:absoluteOf(url),url:actual,http:r.status,requestHeaders:names,
+                        contentType:mime,contentLength:r.headers.get("content-length")||"",
+                        responseType:r.type||"",elapsedMs:Math.round(performance.now()-start)});
+                    },function(_) {});
+                  }
                   if (kind) Promise.resolve(promise).then(function(r) {
                     var ms = performance.now()-start;
                     try {
@@ -1209,7 +1254,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 };
                 XMLHttpRequest.prototype.send = function() {
                   var self=this, entry=this.__daddyProbe;
-                   if (entry && !self.__daddySynthetic && nativeMedia(entry.url,entry.method,entry.kind)) {
+                   if (entry && !self.__daddySynthetic &&
+                        nativeMedia(entry.url,entry.method,entry.kind,
+                          self.responseType==="arraybuffer" || self.responseType==="blob")) {
                      nativeStarts++;
                      if(nativeStarts<=12) emit({stage:"native_start",transport:"xhr",method:entry.method,url:absoluteOf(entry.url),headers:entry.headers.join(",")});
                      var begun=performance.now();
@@ -2063,6 +2110,12 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
+        fun discardUnused(address: String) {
+            val uri = Uri.parse(address)
+            if (uri.scheme != "http" || uri.host != "127.0.0.1") return
+            uri.pathSegments.firstOrNull()?.let { id -> sessions.remove(id)?.close() }
+        }
+
         suspend fun extract(embedded: String, parent: String, name: String, known404: MutableSet<String>): ExtractorLink? {
             if (!runCatching {
                     val uri = Uri.parse(embedded)
@@ -2070,6 +2123,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                         uri.path?.matches(Regex("""^/premiumtv/[a-z0-9_-]+\.php$""", RegexOption.IGNORE_CASE)) == true
                 }.getOrDefault(false)) {
                 Trace.event("DEMBED", "SKIP", "target=${Trace.target(embedded)} reason=invalid_player_endpoint")
+                return null
+            }
+            // Atomic deduplication across concurrently searched player pages.
+            if (!known404.add(embedded)) {
+                Trace.event("DEMBED", "SKIP_REPEAT", "target=${Trace.target(embedded)}")
                 return null
             }
             val session = Session(parent, embedded)
@@ -2083,12 +2141,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                         if (continuation.isActive) continuation.resume(null)
                     }
                     continuation.invokeOnCancellation {
+                        session.close()
                         main.post {
                             main.removeCallbacks(timeout)
                             runCatching { web?.destroy() }
                         }
                     }
                     main.post {
+                        if (!continuation.isActive) return@post
                         try {
                             val context = (CloudStreamApp.context ?: app) as android.content.Context
                             web = WebView(context)
@@ -2363,7 +2423,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                         if (!probePlayable(session, playlist, actual)) {
                             session.snapshot("after_preflight")
                             delay(280)
-                            if (session.allMedia404) known404.add(embedded)
                             session.close()
                             null
                         } else if (session.directAllowed && (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
