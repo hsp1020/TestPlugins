@@ -9,10 +9,8 @@ import android.os.Looper
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
-import androidx.navigation.fragment.NavHostFragment
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
-import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity
@@ -84,15 +82,12 @@ private class PlayerExitCleanup(private val application: Application) :
 
     private fun checkLater() {
         main.removeCallbacks(checkExit)
-        // Let a replacement fragment or a PiP Activity attach before checking for exit.
-        main.postDelayed(checkExit, 350L)
+        // Allow player replacements and PiP Activity handoff to settle before checking for exit.
+        main.postDelayed(checkExit, 1000L)
     }
 
     private fun hasPlayer(host: FragmentActivity): Boolean {
         if (host.isFinishing || host.isDestroyed) return false
-        val nav = (host.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
-            as? NavHostFragment)?.navController
-        if (nav?.currentDestination?.id == R.id.navigation_player) return true
         fun containsPlayer(manager: FragmentManager): Boolean =
             manager.fragments.any { fragment ->
                 fragment.isAdded && (
