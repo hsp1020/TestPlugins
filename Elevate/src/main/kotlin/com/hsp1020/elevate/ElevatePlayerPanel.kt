@@ -1120,6 +1120,12 @@ internal class ElevatePlayerPanel(
         showTabContents()
     }
 
+    fun onMirrorChanged() {
+        chosenLink = null
+        if (tab == Tab.SOURCES && overlay.isShown && fragment.isAdded && fragment.view === root)
+            renderSources()
+    }
+
     private fun replaceRows(values: List<Row>) {
         rows.clear()
         rows.addAll(values)
@@ -1257,7 +1263,7 @@ internal class ElevatePlayerPanel(
     private fun renderSources() {
         sourceProfileButton.text = QualityDataHelper.getProfileName(qualityProfile()).asString(ctx)
         val source = vm.state.generatorState?.response?.apiName.orEmpty()
-        val selected = chosenLink ?: currentLink()
+        val selected = currentLink() ?: chosenLink
         val entries = vm.state.sortLinks(qualityProfile())
             .filter { it.shouldUseLink || it.link == selected }.map { it.link }
         val keys = entries.map { sourceGroup(it, source) }

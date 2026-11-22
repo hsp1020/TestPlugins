@@ -1157,6 +1157,11 @@ internal class NativeEpisodeOverlayHook(
                     original.onTracksInfoChanged()
                     playerPanel?.onTracksChanged()
                 }
+
+                override fun nextMirror() {
+                    original.nextMirror()
+                    playerPanel?.onMirrorChanged()
+                }
             }
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = target
