@@ -2156,7 +2156,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        fun wrapDirectHls(link: ExtractorLink): ExtractorLink {
+        suspend fun wrapDirectHls(link: ExtractorLink): ExtractorLink {
             if (!link.url.substringBefore('?').endsWith(".m3u8", true) ||
                 !link.url.startsWith("https://")) return link
             val openPort = startServer()
