@@ -1945,6 +1945,29 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
             }
 
+            /** Invalidate the cached two-line height of a Search carousel row once. */
+            private fun remeasureSearchRow() {
+                if (adaptiveRemeasurePosted) return
+                adaptiveRemeasurePosted = true
+                list.post {
+                    adaptiveRemeasurePosted = false
+                    if (watchers[list] !== this@Watcher || !list.isAttachedToWindow) return@post
+                    val adapter = list.adapter as? HomeChildItemAdapter ?: return@post
+                    for (i in 0 until list.childCount) {
+                        val child = list.getChildAt(i)
+                        val position = list.getChildAdapterPosition(child)
+                        if (position != RecyclerView.NO_POSITION &&
+                            adapter.getItemOrNull(position)?.apiName == "YouTube") {
+                            child.forceLayout()
+                        }
+                    }
+                    list.forceLayout()
+                    (list.parent as? View)?.forceLayout()
+                    list.parent?.requestLayout()
+                    list.requestLayout()
+                }
+            }
+
             /**
              * A recycled Shorts holder can be measured against the previous
              * landscape row height, leaving the title at 0px. Check the existing
@@ -2050,16 +2073,25 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     view.setOnClickListener(click)
                     card.setOnClickListener(click)
                 }
-                // Search thumbnails are already sized by the native app/Elevate.
-                if (role == Role.SEARCH_CARD || role == Role.SEARCH_GRID) return
+                // Keep Search thumbnails under the native app/Elevate sizing logic,
+                // but still apply the same four-line title limit as Home.
                 val title = view.findViewById<TextView>(R.id.imageText) ?: return
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
                 val state = modified[view] ?: CardState(title, card, image).also { modified[view] = it }
                 val expanded = !card.contains(title)
                 val lines = 4
+                val titleChanged = (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) ||
+                    title.maxLines != lines || title.minLines != 1
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) title.setSingleLine(false)
                 if (title.maxLines != lines) title.maxLines = lines
                 if (title.minLines != 1) title.minLines = 1
+                if (role == Role.SEARCH_CARD || role == Role.SEARCH_GRID) {
+                    if (titleChanged) {
+                        view.requestLayout()
+                        if (role == Role.SEARCH_CARD) remeasureSearchRow()
+                    }
+                    return
+                }
                 if (!video && !shorts) {
                     state.restoreSize()
                     return

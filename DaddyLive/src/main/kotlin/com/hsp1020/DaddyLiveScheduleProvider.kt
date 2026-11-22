@@ -59,6 +59,9 @@ class DaddyLiveScheduleProvider : MainAPI() {
         private const val posterUrl =
             "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming2.png"
 
+        internal const val searchPosterUrl =
+            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
+
         private const val SCHEDULE_CACHE_TTL_MS = 60_000L
 
         fun convertGMTToLocalTime(gmtTime: String): String {
@@ -208,7 +211,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         }
     }
 
-    private fun eventToSearchResponse(event: ScheduleEvent): SearchResponse {
+    private fun eventToSearchResponse(event: ScheduleEvent, forSearch: Boolean = false): SearchResponse {
         val formattedTime = try {
             convertGMTToLocalTime(event.timeGmt)
         } catch (_: Exception) {
@@ -222,7 +225,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
             encodedDataTitle,
             TvType.TvSeries
         ) {
-            this.posterUrl = Companion.posterUrl
+            this.posterUrl = if (forSearch) Companion.searchPosterUrl else Companion.posterUrl
             this.episodes = event.channels.size
         }
     }
@@ -264,7 +267,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                         .replace(" ", "")
                         .contains(normalizedQuery)
                 }
-                .map { eventToSearchResponse(it) }
+                .map { eventToSearchResponse(it, forSearch = true) }
                 .also {
                 }
         } catch (e: Exception) {

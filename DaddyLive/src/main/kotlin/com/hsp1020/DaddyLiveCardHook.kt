@@ -11,6 +11,7 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
@@ -219,12 +220,18 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
                     else adapter.getItemOrNull(position) as? SearchResponse
                 if (item?.apiName != "DaddyLive") return restore(view)
                 val title = view.findViewById<TextView>(R.id.imageText) ?: return
-                if (!originals.containsKey(view)) {
-                    originals[view] = OriginalTitle(
-                        title, title.maxLines, title.minLines,
-                        Build.VERSION.SDK_INT >= 29 && title.isSingleLine
-                    )
-                }
+                val image = view.findViewById<ImageView>(R.id.imageView)
+                val original = originals[view] ?: OriginalTitle(
+                    title, title.maxLines, title.minLines,
+                    Build.VERSION.SDK_INT >= 29 && title.isSingleLine,
+                    image, image?.scaleType
+                ).also { originals[view] = it }
+                if (item.posterUrl == DaddyLiveScheduleProvider.searchPosterUrl) {
+                    // The existing portrait logo is transparent; preserve the full LIVE text.
+                    if (image != null && image.scaleType != ImageView.ScaleType.FIT_CENTER) {
+                        image.scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                } else original.restoreImageScale()
                 var changed = false
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) {
                     title.setSingleLine(false)
@@ -283,12 +290,21 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
         private val title: TextView,
         private val max: Int,
         private val min: Int,
-        private val singleLine: Boolean
+        private val singleLine: Boolean,
+        private val image: ImageView?,
+        private val imageScale: ImageView.ScaleType?
     ) {
+        fun restoreImageScale() {
+            if (image != null && imageScale != null && image.scaleType != imageScale) {
+                image.scaleType = imageScale
+            }
+        }
+
         fun restore() {
             title.maxLines = max
             title.minLines = min
             if (singleLine) title.setSingleLine(true)
+            restoreImageScale()
         }
     }
 
