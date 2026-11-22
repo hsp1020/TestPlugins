@@ -374,7 +374,8 @@ open class StremioC(
     private val searchCatalogId: String? = null,
     private val searchCatalogType: String? = null,
     private val showHome: Boolean = true,
-    private val disableSearch: Boolean = false
+    private val disableSearch: Boolean = false,
+    private val searchResultProvider: StremioC? = null
 ) : MainAPI() {
     override val supportedTypes get() = if (mainUrl.isNotBlank() && isAddonEnabled()) {
         setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
@@ -701,7 +702,7 @@ open class StremioC(
         val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
         val isSyncEnabled = syncMap[currentCleanUrl] ?: false
 
-        return if (isSyncEnabled) "StremioC" else name
+        return if (isSyncEnabled) "StremioC" else searchResultProvider?.name ?: name
     }
 
     companion object {
@@ -2426,7 +2427,8 @@ open class StremioC(
 
         val currentSkip = catalogSkipState[stateKey] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
-        val resultPair = fetchCatalogItems(targetPath)
+        val catalogType = request.data.substringAfter("/catalog/", "movie").substringBefore('/')
+        val resultPair = fetchCatalogItems(targetPath, catalogType)
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
             return newHomePageResponse(emptyList(), hasNext = false)
@@ -2541,7 +2543,7 @@ open class StremioC(
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
                 async(Dispatchers.IO) {
-                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
+                    try { catalog.search(query, this@StremioC, searchResultProvider ?: this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
                 }
             }.awaitAll().flatten()
         }
@@ -4980,7 +4982,7 @@ open class StremioC(
             } catch (e: Throwable) { emptyList() }
         }
 
-        suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
+        suspend fun search(query: String, provider: StremioC, resultProvider: StremioC = provider): List<SearchResponse> {
             val allMetasWithType = coroutineScope {
                 activeTypes.map { type ->
                     async(Dispatchers.IO) {
@@ -4990,7 +4992,7 @@ open class StremioC(
                 }.awaitAll().flatten()
             }
             return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
-                meta.toSearchResponse(provider, typeName = type)
+                meta.toSearchResponse(resultProvider, typeName = type)
             }
         }
 

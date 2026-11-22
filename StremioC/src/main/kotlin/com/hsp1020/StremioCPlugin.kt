@@ -392,7 +392,7 @@ class StremioCPlugin : Plugin() {
                             }
                             val provider = StremioC(
                                 item.link, uniqueLabel, item.id, catalog.id, catalog.type,
-                                showHome = false
+                                showHome = false, searchResultProvider = homeProvider
                             )
                             provider.primeManifest(requireNotNull(manifest))
                             registerMainAPI(provider)
