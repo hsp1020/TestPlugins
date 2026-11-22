@@ -53,7 +53,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -196,53 +195,64 @@ class DaddyLiveExtractor : ExtractorApi() {
         Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
         if (candidates.isEmpty()) return
 
-        // Keep the existing candidate order and at most three simultaneous probes.
-        // Publish each validated source as soon as it is ready, not just the first.
-        val attemptedDembed = ConcurrentHashMap.newKeySet<String>()
-        val permits = Semaphore(3)
+        // Fixed initial slots: stream, plus, watch. The next available slot
+        // takes player, cast and casting in priority order.
+        val sharedDembed = ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>()
+        val workers = minOf(3, candidates.size)
+        val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
         val emitted = AtomicInteger(0)
         supervisorScope {
-            candidates.forEach { candidate ->
+            repeat(workers) { slot ->
+                Trace.event("PLAYER_CANDIDATE", "SCHEDULED",
+                    "slot=${slot + 1} player=${candidates[slot].player}")
                 launch(Dispatchers.IO) {
-                    try {
-                        permits.acquire()
+                    var index = slot
+                    while (index < candidates.size) {
+                        val candidate = candidates[index]
                         try {
                             val sourceName = "${selected.channelName} - ${candidate.player}"
                             Trace.event("PLAYER_CANDIDATE", "TRY",
                                 "player=${candidate.player} target=${Trace.target(candidate.url)}")
                             val link = withTimeoutOrNull(35000L) {
-                                extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
+                                extractVideo(candidate.url, sourceName, entryUrl, sharedDembed)
                             }
                             if (link == null) {
                                 Trace.event("PLAYER_CANDIDATE", "FALLBACK",
                                     "player=${candidate.player} reason=no_valid_link_or_timeout")
                             } else {
-                                val playing = if (candidate.player == "player")
+                                val original = if (candidate.player == "player")
                                     DaddyLiveDembed.wrapDirectHls(link) else link
+                                // One Dembed session can back multiple independent source URLs.
+                                // CloudStream deduplicates identical URLs; loopback ignores query.
+                                val playing = if (original.url.startsWith("http://127.0.0.1:"))
+                                    newExtractorLink(sourceName, sourceName,
+                                        Uri.parse(original.url).buildUpon()
+                                            .appendQueryParameter("source", candidate.player).build().toString(),
+                                        original.type) {
+                                        referer = original.referer
+                                        quality = original.quality
+                                        headers = original.headers
+                                    }
+                                else original
                                 callbackMutex.lock()
                                 try {
-                                    // Preserve the caller's callback context and serialize delivery.
                                     withContext(callbackContext) { callback(playing) }
                                     emitted.incrementAndGet()
                                     Trace.event("MEDIA3_LINK", "EMITTED",
                                         "player=${candidate.player} mode=${if (playing.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(playing.url)}")
-                                } catch (e: Exception) {
-                                    DaddyLiveDembed.discardUnused(playing.url)
-                                    throw e
                                 } finally {
                                     callbackMutex.unlock()
                                 }
                             }
-                        } finally {
-                            permits.release()
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (e: Exception) {
+                            Trace.event("PLAYER_CANDIDATE", "ERROR",
+                                "player=${candidate.player} reason=${e.javaClass.simpleName}")
                         }
-                    } catch (cancel: CancellationException) {
-                        throw cancel
-                    } catch (e: Exception) {
-                        Trace.event("PLAYER_CANDIDATE", "ERROR",
-                            "player=${candidate.player} reason=${e.javaClass.simpleName}")
+                        index = next.getAndIncrement()
                     }
                 }
             }
@@ -385,7 +395,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         url: String,
         sourceName: String,
         parentReferer: String?,
-        attemptedDembed: MutableSet<String> = hashSetOf()
+        sharedDembed: ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>> = ConcurrentHashMap()
     ): ExtractorLink? {
         try {
             currentCoroutineContext().ensureActive()
@@ -395,11 +405,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             Trace.event("PLAYER_PAGE", "START", "target=${Trace.target(url)}")
             if (targetOrigin == "https://dembed.st" && URL(url).path.endsWith(".php", true)) {
                 Trace.event("PLAYER_PAGE", "DEMBED_ROUTE", "target=" + Trace.target(url))
-                if (attemptedDembed.contains(url)) {
-                    Trace.event("DEMBED", "SKIP_REPEAT", "target=${Trace.target(url)}")
-                    return null
-                }
-                return DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName, attemptedDembed)
+                return DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName, sharedDembed)
             }
             val referer = parentReferer ?: "$targetOrigin/"
             val refererOrigin = originOf(referer) ?: targetOrigin
@@ -426,7 +432,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sourceName = sourceName,
                 depth = 0,
                 visited = linkedSetOf(),
-                attemptedDembed = attemptedDembed
+                sharedDembed = sharedDembed
             )
 
             Trace.event("PLAYER_PAGE", if (link != null) "LINK_FOUND" else "NO_LINK",
@@ -612,7 +618,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         sourceName: String,
         depth: Int,
         visited: MutableSet<String>,
-        attemptedDembed: MutableSet<String>
+        sharedDembed: ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>
     ): ExtractorLink? {
         if (depth > 4) return null
         if (!visited.add(pageUrl)) return null
@@ -695,7 +701,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         Trace.event("PLAYER_NESTED", "FOUND", "parent=" + Trace.target(pageUrl) + " count=" + nested.size)
         for (candidate in nested) {
             currentCoroutineContext().ensureActive()
-            crawlChild(candidate, pageUrl, sourceName, depth, visited, attemptedDembed)?.let { return it }
+            crawlChild(candidate, pageUrl, sourceName, depth, visited, sharedDembed)?.let { return it }
         }
         val isJson = payload.trimStart().let { it.startsWith('{') || it.startsWith('[') }
         Trace.event("PLAYER_PARSE", "NO_LINK",
@@ -856,7 +862,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         sourceName: String,
         depth: Int,
         visited: MutableSet<String>,
-        attemptedDembed: MutableSet<String>
+        sharedDembed: ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>
     ): ExtractorLink? {
         if (childUrl in visited) {
             Trace.event("PLAYER_NESTED", "SKIP", "reason=already_visited target=${Trace.target(childUrl)}")
@@ -866,11 +872,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         val parentOrigin = originOf(parentUrl) ?: return null
         if (originOf(childUrl) == "https://dembed.st" && URL(childUrl).path.endsWith(".php", true)) {
             Trace.event("PLAYER_NESTED", "DEMBED_ROUTE", "target=" + Trace.target(childUrl))
-            if (attemptedDembed.contains(childUrl)) {
-                Trace.event("DEMBED", "SKIP_REPEAT", "target=${Trace.target(childUrl)}")
-                return null
-            }
-            return DaddyLiveDembed.extract(childUrl, parentUrl, sourceName, attemptedDembed)
+            return DaddyLiveDembed.extract(childUrl, parentUrl, sourceName, sharedDembed)
         }
 
         return try {
@@ -897,7 +899,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sourceName = sourceName,
                 depth = depth + 1,
                 visited = visited,
-                attemptedDembed = attemptedDembed
+                sharedDembed = sharedDembed
             )
         } catch (e: CancellationException) {
             throw e
@@ -2183,13 +2185,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        fun discardUnused(address: String) {
-            val uri = Uri.parse(address)
-            if (uri.scheme != "http" || uri.host != "127.0.0.1") return
-            uri.pathSegments.firstOrNull()?.let { id -> sessions.remove(id)?.close() }
-        }
-
-        suspend fun extract(embedded: String, parent: String, name: String, known404: MutableSet<String>): ExtractorLink? {
+        suspend fun extract(embedded: String, parent: String, name: String, sharedDembed: ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>): ExtractorLink? {
             if (!runCatching {
                     val uri = Uri.parse(embedded)
                     uri.scheme == "https" && uri.host == "dembed.st" &&
@@ -2198,11 +2194,25 @@ class DaddyLiveExtractor : ExtractorApi() {
                 Trace.event("DEMBED", "SKIP", "target=${Trace.target(embedded)} reason=invalid_player_endpoint")
                 return null
             }
-            // Atomic deduplication across concurrently searched player pages.
-            if (!known404.add(embedded)) {
-                Trace.event("DEMBED", "SKIP_REPEAT", "target=${Trace.target(embedded)}")
-                return null
+            // Share the in-flight result rather than failing the later candidate.
+            val pending = CompletableDeferred<ExtractorLink?>()
+            val shared = sharedDembed.putIfAbsent(embedded, pending)
+            if (shared != null) {
+                val link = shared.await()
+                Trace.event("DEMBED", if (link != null) "SHARED_OK" else "SHARED_FAILED",
+                    "target=${Trace.target(embedded)}")
+                return link
             }
+            var result: ExtractorLink? = null
+            try {
+                result = extractDistinct(embedded, parent, name)
+                return result
+            } finally {
+                pending.complete(result)
+            }
+        }
+
+        private suspend fun extractDistinct(embedded: String, parent: String, name: String): ExtractorLink? {
             val session = Session(parent, embedded)
             val startMs = android.os.SystemClock.elapsedRealtime()
             Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
