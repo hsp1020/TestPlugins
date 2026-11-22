@@ -205,10 +205,10 @@ class DaddyLiveExtractor : ExtractorApi() {
         Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
         if (candidates.isEmpty()) return
 
-        // Fixed initial slots: stream, plus, watch. The next available slot
-        // takes player, cast and casting in priority order.
+        // Start stream, plus, watch and player in parallel. Keep the existing
+        // six-player order and drain cast/casting when a slot becomes free.
         val sharedDembed = ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>()
-        val workers = minOf(3, candidates.size)
+        val workers = minOf(4, candidates.size)
         val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
@@ -937,7 +937,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nativeStarts++;
                     if (nativeStarts<=12) emit({stage:"native_start",transport:"fetch",method:method,url:absoluteOf(url)});
                   }
-                  if (kind === "ticket") perfSnapshot("before_ticket");
                   if (kind) emit({stage:"auth_start",kind:kind});
                   var start = performance.now();
                   var promise = nativeFetch.apply(this, arguments);
@@ -1019,7 +1018,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                      });
                    }
                   if (entry && entry.kind) {
-                    if (entry.kind === "ticket") perfSnapshot("before_ticket");
                     emit({stage:"auth_start",kind:entry.kind});
                     var start=performance.now();
                     this.addEventListener("loadend",function() {
@@ -1132,7 +1130,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 });
               });
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
-              perfSnapshot("probe_installed");
+              setTimeout(function(){perfSnapshot("probe_installed")},0);
             })();
         """.trimIndent()
         private val responseProbeBytes by lazy { (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8) }
@@ -1232,7 +1230,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             val result = when {
                 cached == null -> "not_ready"
                 cached.url != address -> "url_mismatch"
-                age !in 0L..15000L -> "expired"
+                age < 0L -> "clock_mismatch"
                 cached.cookie != scriptCookie(address) -> "cookie_changed"
                 browserRef != null && browserRef != cached.referer -> "referer_changed"
                 browserAgent != null && browserAgent != cached.agent -> "agent_changed"
@@ -1499,6 +1497,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun mediaKey(): ByteArray? = playKeys[token]
                 ?: runCatching { playKeys[Uri.parse(url).getQueryParameter("t").orEmpty()] }.getOrNull()
             @Volatile var firstPlaylist: String? = null
+            @Volatile var recentRootPlaylist: Pair<String, String>? = null
+            @Volatile var recentRootAt = 0L
             @Volatile var skipInitialTail = false
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
             @Volatile var userAgent = "Mozilla/5.0"
@@ -1965,6 +1965,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                             session.userAgent = view.settings.userAgentString
                             view.settings.javaScriptEnabled = true
                             view.settings.domStorageEnabled = true
+                            // An unattached authentication WebView never renders images.
+                            // Avoid image fetch/decode and competing WebView renderer work.
+                            view.settings.loadsImagesAutomatically = false
+                            view.settings.blockNetworkImage = true
                             view.settings.mediaPlaybackRequiresUserGesture = false
                             CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
                             // Android framework bridge: available to isolated CloudStream plugins
@@ -2706,6 +2710,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             val resource = session.resources[key]
             val playlist = key == "index.m3u8" || resource?.playlist == true
             val address = if (key == "index.m3u8") session.url else resource?.url
+            socket.tcpNoDelay = true
             val output = socket.getOutputStream()
             if (address == null) {
                 output.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
@@ -2727,7 +2732,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (code !in 200..299) {
                 if (!playlist && code == 404 && resource != null) {
                     try {
-                        direct404Evidence(session, address, resource.manifest, code, range)
+                        io.launch { direct404Evidence(session, address, resource.manifest, code, range) }
                     } catch (e: Exception) {
                         Trace.event("DIRECT_HLS_404", "DIAGNOSTIC_ERROR",
                             "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
@@ -2783,7 +2788,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             var total = 0L
             try {
                 reply.body.byteStream().use { stream ->
-                    val buffer = ByteArray(16 * 1024)
+                    val buffer = ByteArray(32 * 1024)
+                    var firstChunk = true
                     while (true) {
                         val read = stream.read(buffer)
                         if (read < 0) break
@@ -2792,6 +2798,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                             output.write("${read.toString(16)}\r\n".toByteArray(StandardCharsets.US_ASCII))
                         output.write(buffer, 0, read)
                         if (length == null) output.write("\r\n".toByteArray(StandardCharsets.US_ASCII))
+                        if (firstChunk) { output.flush(); firstChunk = false }
                         total += read
                     }
                 }
@@ -3143,18 +3150,27 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 if (resource == null) Trace.event("PROXY_WINDOW", "REQUEST",
                                     "sid=${session.id.take(8)} initial=${first != null} " +
                                         "tailHeld=${session.skipInitialTail} chars=${first?.length ?: 0}")
+                                val recent = session.recentRootPlaylist?.takeIf {
+                                    resource == null && first == null &&
+                                        android.os.SystemClock.elapsedRealtime() - session.recentRootAt in 0..1000L
+                                }
                                 val manifest = if (first != null) {
                                     session.firstPlaylist = null
                                     original to first
-                                } else loadManifest(session, resource)
+                                } else recent ?: loadManifest(session, resource)
                                 if (manifest != null) {
-                                    session.registerManifestSegments(manifest.second, manifest.first)
-                                    // The first manifest was already trimmed when assigned.
-                                    // Only fresh root reloads need a new safety margin.
-                                    val mediaPlaylist = if (resource == null && first == null)
+                                    // The first or recently published root is already trimmed.
+                                    val mediaPlaylist = if (resource == null && first == null && recent == null)
                                         stableInitialPlaylist(manifest.second, session) else manifest.second
+                                    session.registerManifestSegments(mediaPlaylist, manifest.first)
+                                    if (resource == null) {
+                                        session.recentRootPlaylist = manifest.first to mediaPlaylist
+                                        session.recentRootAt = android.os.SystemClock.elapsedRealtime()
+                                    }
                                     data = rewrite(mediaPlaylist, manifest.first, session).toByteArray()
                                     type = "application/vnd.apple.mpegurl"
+                                    if (recent != null) Trace.event("PROXY_PLAYLIST", "QUICK_REUSE",
+                                        "sid=${session.id.take(8)} ageMs=${android.os.SystemClock.elapsedRealtime()-session.recentRootAt}")
                                 }
                                 Trace.event("PROXY_PLAYLIST", if (data != null) "OK" else "FAILED",
                                     "sid=${session.id.take(8)} chars=${data?.size ?: 0} reason=${if (data == null) "manifest_unavailable" else "rewritten"}")
