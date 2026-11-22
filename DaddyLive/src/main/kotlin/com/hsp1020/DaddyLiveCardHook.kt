@@ -145,6 +145,7 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
             private val originals = IdentityHashMap<View, OriginalTitle>()
             private var observed: RecyclerView.Adapter<*>? = null
             private var scheduled = false
+            private var remeasurePosted = false
             private val changes = object : RecyclerView.AdapterDataObserver() {
                 override fun onChanged() = schedule()
                 override fun onItemRangeChanged(start: Int, count: Int) = schedule()
@@ -180,6 +181,7 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
                 originals.keys.toList().forEach(::restore)
                 originals.clear()
                 scheduled = false
+                remeasurePosted = false
             }
 
             private fun syncAdapter() {
@@ -240,6 +242,31 @@ internal class DaddyLiveCardHook(private val app: Application) : Application.Act
                     view.requestLayout()
                     list.requestLayout()
                     (list.parent as? View)?.requestLayout()
+                    remeasureHomeRow()
+                }
+            }
+
+            // Like YouTube's Home-card correction: discard RecyclerView's cached
+            // two-line row measurement after expanding a DaddyLive title.
+            private fun remeasureHomeRow() {
+                if (parent || list.adapter !is HomeChildItemAdapter || remeasurePosted) return
+                remeasurePosted = true
+                list.post {
+                    remeasurePosted = false
+                    if (watchers[list] !== this@Watcher || !list.isAttachedToWindow) return@post
+                    val adapter = list.adapter as? HomeChildItemAdapter ?: return@post
+                    for (i in 0 until list.childCount) {
+                        val child = list.getChildAt(i)
+                        val position = list.getChildAdapterPosition(child)
+                        if (position != RecyclerView.NO_POSITION &&
+                            adapter.getItemOrNull(position)?.apiName == "DaddyLive") {
+                            child.forceLayout()
+                        }
+                    }
+                    list.forceLayout()
+                    (list.parent as? View)?.forceLayout()
+                    list.parent?.requestLayout()
+                    list.requestLayout()
                 }
             }
 
