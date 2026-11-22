@@ -1461,15 +1461,24 @@ class DaddyLiveExtractor : ExtractorApi() {
             val syntheticSegments = ConcurrentHashMap<String, Boolean>()
             val expectedUrls = ConcurrentHashMap<String, Boolean>()
             val expectedPaths = ConcurrentHashMap<String, Boolean>()
+            private val expectedPathCounts = ConcurrentHashMap<String, Int>()
+            private data class ObservedMedia(val effective: String, val at: Long)
+            private val observedMedia = ConcurrentHashMap<String, ObservedMedia>()
+            private val observedExact = ConcurrentHashMap<String, ObservedMedia>()
             fun registerManifestSegments(playlist: String, base: String) {
                 expectedUrls.clear()
                 expectedPaths.clear()
+                expectedPathCounts.clear()
                 playlist.lineSequence().map { it.trim() }
                     .filter { it.isNotBlank() && !it.startsWith("#") }
                     .take(50).forEach { part ->
                         runCatching { URL(URL(base), part).toString() }.getOrNull()?.let { address ->
-                            expectedUrls[Trace.key(address)] = true
-                            expectedPaths[Trace.pathKey(address)] = true
+                            if (!URL(address).path.endsWith(".m3u8", true)) {
+                                expectedUrls[Trace.key(address)] = true
+                                val pathId = Trace.pathKey(address)
+                                expectedPaths[pathId] = true
+                                expectedPathCounts[pathId] = (expectedPathCounts[pathId] ?: 0) + 1
+                            }
                         }
                     }
                 Trace.event("MANIFEST_SEGMENTS", "INDEXED",
@@ -1481,6 +1490,38 @@ class DaddyLiveExtractor : ExtractorApi() {
                 runCatching { URL(address).host == URL(url).host }.getOrDefault(false) -> "SAME_HOST_DIFFERENT_PATH"
                 else -> "OTHER_HOST_OR_UNAVAILABLE"
             }
+            /** Keep only original-player HTTP successes; never infer a mapping from response order. */
+            fun recordObservedMedia(request: String, effective: String, status: Int, method: String) {
+                if (status !in 200..299 || !method.equals("GET", true)) return
+                val valid = runCatching {
+                    val source = URL(request)
+                    val destination = URL(effective)
+                    source.protocol == "https" && destination.protocol == "https" &&
+                        destination.host.isNotBlank() && destination.host != "localhost" &&
+                        destination.host != "127.0.0.1" && !destination.host.endsWith(".local")
+                }.getOrDefault(false)
+                if (!valid) return
+                if (observedMedia.size >= 32 || observedExact.size >= 64) {
+                    observedMedia.clear()
+                    observedExact.clear()
+                }
+                val entry = ObservedMedia(effective, android.os.SystemClock.elapsedRealtime())
+                observedExact[Trace.key(request)] = entry
+                observedMedia[Trace.pathKey(request)] = entry
+            }
+
+            private fun verifiedSegment(address: String): String? {
+                val pathId = Trace.pathKey(address)
+                val exactKey = Trace.key(address)
+                val recorded = observedExact[exactKey]?.takeIf { expectedUrls.containsKey(exactKey) }
+                    ?: observedMedia[pathId]?.takeIf { expectedPathCounts[pathId] == 1 }
+                    ?: return null
+                val age = android.os.SystemClock.elapsedRealtime() - recorded.at
+                return recorded.effective.takeIf { age in 0..20000L }
+            }
+            fun hasVerifiedAlternative(address: String): Boolean =
+                verifiedSegment(address)?.let { it != address } == true
+
             private val scriptErrorCount = AtomicInteger()
 
             fun errorDetail(source: String, line: Int, raw: String, kind: String) {
@@ -1784,6 +1825,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                             message.optString("contentLength").ifBlank { message.optString("bytes") },
                             message.optLong("elapsedMs"))
                         val responseAddress = message.optString("url")
+                        recordObservedMedia(address, responseAddress, message.optInt("http", 0),
+                            message.optString("method", "GET"))
                         if (responseAddress != address && responseAddress.isNotBlank() && nativeSegmentCount.get() <= 12)
                             Trace.event("ORIGINAL_REDIRECT", "CHANGED",
                                 "sid=${id.take(8)} request=${Trace.fingerprint(address)} response=${Trace.fingerprint(responseAddress)}")
@@ -1976,8 +2019,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                 media.buildUpon().appendQueryParameter("t", token).build().toString()
             }.getOrNull()
 
-            fun actualSegment(address: String): String =
-                if (segmentTokenMode) segmentWithToken(address) ?: address else address
+            fun actualSegment(address: String): String {
+                val observed = verifiedSegment(address)
+                if (observed != null && observed != address) {
+                    Trace.event("SEGMENT_URL", "ORIGINAL_CONFIRMED",
+                        "sid=${id.take(8)} request=${Trace.fingerprint(address)} " +
+                            "effective=${Trace.fingerprint(observed)}")
+                    return observed
+                }
+                return if (segmentTokenMode) segmentWithToken(address) ?: address else address
+            }
 
             fun signed(address: String): String {
                 if (token.isBlank() || !address.substringBefore('?').endsWith(".m3u8", true)) return address
@@ -2397,11 +2448,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 "NOT_OBSERVED_BEFORE_PREFLIGHT" else "OBSERVED",
                 "sid=${session.id.take(8)} nativeRequests=${session.nativeRequestCount.get()} " +
                     "nativeResponses=${session.nativeSegmentCount.get()} note=observation_not_playback_proof")
-            val targets = playlist.lineSequence().map { it.trim() }
+            val available = playlist.lineSequence().map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("#") }
                 .mapNotNull { absolute(manifestUrl, it) }
                 .filterNot { URL(it).path.endsWith(".m3u8", true) }
-                .toList().takeLast(3).asReversed()
+                .toList().asReversed()
+            val verified = available.filter { session.hasVerifiedAlternative(it) }
+            val targets = (verified + available.take(3)).distinct().take(3)
+            Trace.event("SEGMENT_PREFLIGHT", "SELECTED",
+                "sid=${session.id.take(8)} verifiedCandidates=${verified.size} count=${targets.size}")
             if (targets.isEmpty()) {
                 Trace.event("SEGMENT_PREFLIGHT", "FAILED", "sid=" + session.id.take(8) + " reason=no_media_entries")
                 return false
@@ -2409,13 +2464,15 @@ class DaddyLiveExtractor : ExtractorApi() {
             var all404 = true
             for ((index, target) in targets.withIndex()) {
                 currentCoroutineContext().ensureActive()
-                val forwarded = session.mediaHeaders(target)
+                val requestUrl = session.actualSegment(target)
+                val forwarded = session.mediaHeaders(requestUrl)
                 Trace.event("SEGMENT_ATTEMPT", "CLIENT",
-                    "sid=${session.id.take(8)} entry=$index ${Trace.fingerprint(target)} ${Trace.headerProfile(forwarded)}")
+                    "sid=${session.id.take(8)} entry=$index mapping=${requestUrl != target} " +
+                        "${Trace.fingerprint(requestUrl)} ${Trace.headerProfile(forwarded)}")
                 val requestStarted = android.os.SystemClock.elapsedRealtime()
                 var clientFailure = "none"
                 val client = try {
-                    app.get(target, headers = forwarded, timeout = 4)
+                    app.get(requestUrl, headers = forwarded, timeout = 4)
                 } catch (e: CancellationException) { throw e } catch (e: Exception) {
                     clientFailure = e.javaClass.simpleName
                     null
@@ -2445,7 +2502,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "sid=${session.id.take(8)} entry=$index http=${client?.code ?: -1} bytes=$n " +
                         "mime=${client?.headers?.get("Content-Type")?.substringBefore(';').orEmpty().take(60)} " +
                         "contentLength=${client?.headers?.get("Content-Length").orEmpty().take(15)}")
-                if (client?.code == 404 && !session.tokenProbeDone) {
+                if (client?.code == 404 && requestUrl == target && !session.tokenProbeDone) {
                     session.tokenProbeDone = true
                     val signedSegment = session.segmentWithToken(target)
                     if (signedSegment != null) {
@@ -2470,7 +2527,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         }
                     }
                 }
-                val browser = session.browserRequest("segment", target)
+                val browser = session.browserRequest("segment", requestUrl)
                 val chunk = browser?.bytes
                 if (browser?.status in 200..299 && chunk != null && validMediaPrefix(chunk, chunk.size, playlist)) {
                     session.segmentTransport = "browser"
@@ -2642,6 +2699,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     original to first
                                 } else loadManifest(session, resource)
                                 if (manifest != null) {
+                                    session.registerManifestSegments(manifest.second, manifest.first)
                                     data = rewrite(manifest.second, manifest.first, session).toByteArray()
                                     type = "application/vnd.apple.mpegurl"
                                 }
@@ -2655,20 +2713,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     Trace.event("PROXY_SEGMENT", "SKIP_REPEATED_FAILURE",
                                         "sid=${session.id.take(8)} remainingMs=${retryAfter-start}")
                                 } else {
+                                    val actual = session.actualSegment(resource.url)
                                     var browser = if (session.segmentTransport == "browser")
-                                        session.browserRequest("segment", resource.url) else null
+                                        session.browserRequest("segment", actual) else null
                                     var bytes = browser?.takeIf { it.status in 200..299 }?.bytes
                                     var clientHttp = -1
                                     if (bytes == null) {
                                         val response = runCatching {
-                                            app.get(session.actualSegment(resource.url), headers = session.mediaHeaders(resource.url), timeout = 8)
+                                            app.get(actual, headers = session.mediaHeaders(actual), timeout = 8)
                                         }.getOrNull()
                                         clientHttp = response?.code ?: -1
                                         session.compare(resource.url, "client_proxy", clientHttp, session.mediaHeaders(resource.url))
                                         if (response?.isSuccessful == true) bytes = response.body.bytes()
                                     }
                                     if (bytes == null && browser == null) {
-                                        browser = session.browserRequest("segment", resource.url)
+                                        browser = session.browserRequest("segment", actual)
                                         bytes = browser?.takeIf { it.status in 200..299 }?.bytes
                                         session.compare(resource.url, "browser_proxy", browser?.status ?: -1, session.mediaHeaders(resource.url))
                                     }
