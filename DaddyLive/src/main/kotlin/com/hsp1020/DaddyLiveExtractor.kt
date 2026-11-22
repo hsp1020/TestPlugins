@@ -29,6 +29,10 @@ import java.io.BufferedReader
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
+import java.util.zip.InflaterInputStream
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -1682,6 +1686,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var browser: WebView? = null
             @Volatile var url: String = ""
             @Volatile var token: String = ""
+            @Volatile var sealedPlaylist = false
+            private val playKeys = ConcurrentHashMap<String, ByteArray>()
+            fun mediaKey(): ByteArray? = playKeys[token]
+                ?: runCatching { playKeys[Uri.parse(url).getQueryParameter("t").orEmpty()] }.getOrNull()
             @Volatile var firstPlaylist: String? = null
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
             @Volatile var userAgent = "Mozilla/5.0"
@@ -1978,6 +1986,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 val current = data.optString("token").ifBlank { data.optString("t") }
                 if (current.isNotBlank()) token = current
+                val key = data.optString("k")
+                if (current.isNotBlank() && key.isNotBlank()) {
+                    val decoded = runCatching { Base64.decode(key, Base64.URL_SAFE or Base64.NO_WRAP) }.getOrNull()
+                    if (decoded != null && decoded.size in setOf(16, 24, 32)) {
+                        if (playKeys.size >= 4 && !playKeys.containsKey(current)) playKeys.clear()
+                        playKeys[current] = decoded
+                        Trace.event("AUTH_KEY", "ACQUIRED", "sid=" + id.take(8) + " bits=" + decoded.size * 8)
+                    } else Trace.event("AUTH_KEY", "INVALID", "sid=" + id.take(8))
+                }
                 Trace.event("AUTH_TOKEN", if (current.isNotBlank()) "ACQUIRED" else "MISSING",
                     "sid=" + id.take(8) + " tokenPresent=" + current.isNotBlank() + " responseBytes=" + response.size)
             }
@@ -2476,7 +2493,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     session.close()
                     null
                 } else {
-                    val playlist = decodePlaylist(body)
+                    val playlist = decodePlaylist(body, session)
                     if (playlist == null || !playlist.trimStart().startsWith("#EXTM3U")) {
                         Trace.event("HLS_DECODE", "FAILED", "sid=${session.id.take(8)} reason=invalid_playlist")
                         session.close()
@@ -2602,7 +2619,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                     null
                 }
                 val prefix = ByteArray(576)
-                val n = try { client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, prefix) } ?: 0 } catch (_: Exception) { 0 }
+                // Decrypted URLs may point to image-wrapped MPEG-TS objects.
+                val n = if (session.sealedPlaylist) {
+                    val media = runCatching {
+                        client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { input ->
+                            readLimited(input, 12 * 1024 * 1024)?.let { unwrapMedia(it) }
+                        }
+                    }.getOrNull()
+                    val size = minOf(media?.size ?: 0, prefix.size)
+                    if (size > 0) media!!.copyInto(prefix, 0, 0, size)
+                    size
+                } else try {
+                    client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, prefix) } ?: 0
+                } catch (_: Exception) { 0 }
                 val upstream = client?.code ?: -1
                 val reason = if (upstream in 400..599) {
                     runCatching { Trace.bodyReason(client?.text.orEmpty()) }.getOrDefault("read_error")
@@ -2906,8 +2935,207 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        private fun decodePlaylist(body: String): String? =
-            body.takeIf { it.trimStart().startsWith("#EXTM3U") }
+        /** Original daddy.min.js openPlaylist(): AES-CTR, IV = 64-bit HLS sequence
+         * in the last eight bytes of a 16-byte counter. */
+        private fun decodePlaylist(body: String, session: Session? = null): String? {
+            if (!body.trimStart().startsWith("#EXTM3U")) return null
+            val first = body.lineSequence().map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: return body
+            if (first.length < 100 || !first.all { it.isLetterOrDigit() || it == '-' || it == '_' }) return body
+            val key = session?.mediaKey() ?: run {
+                Trace.event("HLS_DECODE", "KEY_MISSING")
+                return null
+            }
+            return try {
+                val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+                val secret = SecretKeySpec(key, "AES")
+                var sequence = 0L
+                var count = 0
+                val output = buildString {
+                    for (entry in body.lineSequence()) {
+                        val line = entry.trim()
+                        if (line.isEmpty()) continue
+                        if (line.startsWith("#")) {
+                            if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:"))
+                                sequence = line.substringAfter(':').trim().toLong()
+                            append(line).append('\n')
+                            continue
+                        }
+                        val iv = ByteArray(16)
+                        for (i in 0 until 8) iv[15 - i] = (sequence ushr (i * 8)).toByte()
+                        cipher.init(Cipher.DECRYPT_MODE, secret, IvParameterSpec(iv))
+                        val url = cipher.doFinal(Base64.decode(line, Base64.URL_SAFE or Base64.NO_WRAP))
+                            .toString(Charsets.UTF_8)
+                        val parsed = URL(url)
+                        if (parsed.protocol != "https" || parsed.host.isBlank() ||
+                            parsed.host == "localhost" || parsed.host == "127.0.0.1" ||
+                            parsed.host.endsWith(".local")) return null
+                        append(url).append('\n')
+                        sequence++
+                        count++
+                    }
+                }
+                if (count == 0) return null
+                session.sealedPlaylist = true
+                Trace.event("HLS_DECODE", "SEALED_OK",
+                    "sid=" + session.id.take(8) + " entries=" + count)
+                output
+            } catch (e: Exception) {
+                Trace.event("HLS_DECODE", "SEALED_FAILED", "reason=" + e.javaClass.simpleName)
+                null
+            }
+        }
+
+        private fun at(bytes: ByteArray, offset: Int, value: String): Boolean =
+            offset >= 0 && offset <= bytes.size - value.length &&
+                value.indices.all { (bytes[offset + it].toInt() and 255) == value[it].code }
+
+        private fun int32(bytes: ByteArray, at: Int): Int =
+            ((bytes[at].toInt() and 255) shl 24) or
+                ((bytes[at + 1].toInt() and 255) shl 16) or
+                ((bytes[at + 2].toInt() and 255) shl 8) or (bytes[at + 3].toInt() and 255)
+
+        private fun isTs(bytes: ByteArray, at: Int = 0) =
+            at >= 0 && at + 188 < bytes.size &&
+                bytes[at] == 0x47.toByte() && bytes[at + 188] == 0x47.toByte()
+
+        private fun readLimited(input: InputStream, max: Int): ByteArray? {
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(16384)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                if (n == 0) continue
+                if (output.size() > max - n) return null
+                output.write(buffer, 0, n)
+            }
+            return output.toByteArray()
+        }
+
+        /** Original unwrap(): recover TS from WebP EXIF, PNG IEND / pixels,
+         * TIKTIKRAW / TIKTIKTSGZ, or raw sync-byte embedded data. */
+        private fun unwrapMedia(bytes: ByteArray): ByteArray? {
+            if (isTs(bytes)) return bytes
+            if (at(bytes, 0, "RIFF") && at(bytes, 8, "WEBP")) {
+                var i = 12
+                while (i + 8 <= bytes.size) {
+                    val length = (bytes[i + 4].toInt() and 255) or
+                        ((bytes[i + 5].toInt() and 255) shl 8) or
+                        ((bytes[i + 6].toInt() and 255) shl 16) or
+                        ((bytes[i + 7].toInt() and 255) shl 24)
+                    if (length < 0 || length > bytes.size - i - 8) break
+                    if (at(bytes, i, "EXIF") && isTs(bytes, i + 8))
+                        return bytes.copyOfRange(i + 8, bytes.size)
+                    i += 8 + length + (length and 1)
+                }
+            }
+            if (bytes.size >= 8 && bytes[0] == 0x89.toByte() && at(bytes, 1, "PNG")) {
+                var i = 8
+                var width = 0
+                var height = 0
+                var channels = 0
+                val idat = ByteArrayOutputStream()
+                while (i + 12 <= bytes.size) {
+                    val length = int32(bytes, i)
+                    if (length < 0 || length > bytes.size - i - 12) break
+                    val begin = i + 8
+                    when {
+                        at(bytes, i + 4, "IHDR") && length >= 13 -> {
+                            width = int32(bytes, begin)
+                            height = int32(bytes, begin + 4)
+                            channels = when (bytes[begin + 9].toInt() and 255) {
+                                2 -> 3
+                                6 -> 4
+                                else -> 0
+                            }
+                            if (bytes[begin + 8] != 8.toByte() || bytes[begin + 10] != 0.toByte() ||
+                                bytes[begin + 11] != 0.toByte() || bytes[begin + 12] != 0.toByte()) channels = 0
+                        }
+                        at(bytes, i + 4, "IDAT") -> {
+                            if (idat.size() > 12 * 1024 * 1024 - length) return null
+                            idat.write(bytes, begin, length)
+                        }
+                        at(bytes, i + 4, "IEND") -> {
+                            i += 12 + length
+                            if (isTs(bytes, i)) return bytes.copyOfRange(i, bytes.size)
+                            break
+                        }
+                    }
+                    i += 12 + length
+                }
+                if (channels > 0 && width > 0 && height > 0 &&
+                    width.toLong() * height * (channels + 1) <= 12L * 1024 * 1024 &&
+                    idat.size() > 0) {
+                    val pixels = runCatching {
+                        InflaterInputStream(ByteArrayInputStream(idat.toByteArray())).use { input ->
+                            val raw = readLimited(input, 12 * 1024 * 1024) ?: return@use null
+                            val stride = width * channels
+                            if (raw.size < (stride + 1) * height) return@use null
+                            val rgb = ByteArray(width * height * 3)
+                            var src = 0
+                            var dst = 0
+                            var previous = ByteArray(stride)
+                            repeat(height) {
+                                val filter = raw[src++].toInt() and 255
+                                if (filter > 4) return@use null
+                                val row = ByteArray(stride)
+                                for (x in 0 until stride) {
+                                    val value = raw[src++].toInt() and 255
+                                    val a = if (x >= channels) row[x - channels].toInt() and 255 else 0
+                                    val b = previous[x].toInt() and 255
+                                    val c = if (x >= channels) previous[x - channels].toInt() and 255 else 0
+                                    val prediction = when (filter) {
+                                        1 -> a
+                                        2 -> b
+                                        3 -> (a + b) / 2
+                                        4 -> {
+                                            val p = a + b - c
+                                            val da = kotlin.math.abs(p - a)
+                                            val db = kotlin.math.abs(p - b)
+                                            val dc = kotlin.math.abs(p - c)
+                                            if (da <= db && da <= dc) a else if (db <= dc) b else c
+                                        }
+                                        else -> 0
+                                    }
+                                    row[x] = (value + prediction).toByte()
+                                }
+                                for (x in 0 until width) {
+                                    val p = x * channels
+                                    rgb[dst++] = row[p]
+                                    rgb[dst++] = row[p + 1]
+                                    rgb[dst++] = row[p + 2]
+                                }
+                                previous = row
+                            }
+                            rgb
+                        }
+                    }.getOrNull()
+                    if (pixels != null) for (p in 0 until pixels.size - 12) {
+                        if (!at(pixels, p, "TIKTIKPX")) continue
+                        val size = int32(pixels, p + 8)
+                        if (size <= 0 || size > pixels.size - p - 12) continue
+                        val ts = runCatching {
+                            GZIPInputStream(ByteArrayInputStream(pixels, p + 12, size))
+                                .use { readLimited(it, 12 * 1024 * 1024) }
+                        }.getOrNull()
+                        if (ts != null && isTs(ts)) return ts
+                    }
+                }
+            }
+            for (i in bytes.indices) {
+                if (at(bytes, i, "TIKTIKRAW") && isTs(bytes, i + 9))
+                    return bytes.copyOfRange(i + 9, bytes.size)
+                if (at(bytes, i, "TIKTIKTSGZ")) {
+                    val ts = runCatching {
+                        GZIPInputStream(ByteArrayInputStream(bytes, i + 10, bytes.size - i - 10))
+                            .use { readLimited(it, 12 * 1024 * 1024) }
+                    }.getOrNull()
+                    if (ts != null && isTs(ts)) return ts
+                }
+                if (isTs(bytes, i)) return bytes.copyOfRange(i, bytes.size)
+            }
+            return null
+        }
 
         private suspend fun loadManifest(
             session: Session, resource: Resource?
@@ -2920,7 +3148,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val cacheAge = now - session.browserManifestAt
                 // Reuse a recent original-browser live playlist instead of requesting it again.
                 if (cached != null && cacheAge in 0..1500L) {
-                    decodePlaylist(cached)?.let {
+                    decodePlaylist(cached, session)?.let {
                         Trace.event("HLS_REFRESH", "BROWSER_CACHE",
                             "sid=${session.id.take(8)} ageMs=$cacheAge chars=${it.length}")
                         return session.browserManifestUrl to it
@@ -2928,7 +3156,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 val browser = session.browserRequest("manifest", session.signed(source))
                 if (browser != null && browser.status in 200..299 && !browser.body.isNullOrBlank()) {
-                    val decoded = decodePlaylist(browser.body)
+                    val decoded = decodePlaylist(browser.body, session)
                     if (decoded != null) {
                         session.browserManifestBody = browser.body
                         session.browserManifestUrl = browser.address
@@ -2944,7 +3172,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 // A failed browser request must not trigger repeated 403s through a different
                 // HTTP client. Use the last good live manifest briefly while the player recovers.
                 if (cached != null && cacheAge in 0..8000L) {
-                    decodePlaylist(cached)?.let {
+                    decodePlaylist(cached, session)?.let {
                         Trace.event("HLS_REFRESH", "LAST_GOOD",
                             "sid=${session.id.take(8)} ageMs=$cacheAge browserHttp=${browser?.status ?: -1}")
                         return session.browserManifestUrl to it
@@ -2959,7 +3187,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val target = session.signed(source)
                 val response = runCatching { app.get(target, headers = session.headers, timeout = 5) }.getOrNull()
                 if (response?.isSuccessful == true) {
-                    val decoded = decodePlaylist(response.text)
+                    val decoded = decodePlaylist(response.text, session)
                     if (decoded != null) {
                         Trace.event("HLS_REFRESH", "CLIENT_OK",
                             "sid=${session.id.take(8)} chars=${decoded.length} fallback=bridge_unavailable")
@@ -3048,7 +3276,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         session.compare(resource.url, "browser_proxy", browser?.status ?: -1, session.mediaHeaders(resource.url))
                                     }
                                     if (bytes != null) {
-                                        data = bytes.takeIf { validMediaPrefix(it, it.size, if (session.encryptedMedia) "#EXT-X-KEY" else "") }
+                                        val decoded = if (session.sealedPlaylist) unwrapMedia(bytes) else bytes
+                                        data = decoded?.takeIf {
+                                            validMediaPrefix(it, it.size, if (session.encryptedMedia) "#EXT-X-KEY" else "")
+                                        }
                                         type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
                                             else "application/octet-stream"
                                         Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "DECODE_FAIL",
