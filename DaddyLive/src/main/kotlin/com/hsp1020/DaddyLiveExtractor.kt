@@ -1500,7 +1500,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var recentRootAt = 0L
             @Volatile var skipInitialTail = false
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
-            @Volatile var browserReleasedAt = 0L
             @Volatile var userAgent = "Mozilla/5.0"
             @Volatile var browserHeaders: Map<String, String> = emptyMap()
             @Volatile var authHttpError: Int? = null
@@ -1873,22 +1872,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val key = UUID.nameUUIDFromBytes(target.toByteArray(Charsets.UTF_8)).toString().replace("-", "")
                 resources.putIfAbsent(key, Resource(target, manifest))
                 return "http://127.0.0.1:$port/$id/$key"
-            }
-
-            // Verification only: keep proxy/session state, release just the authentication WebView.
-            fun releaseBrowserForTest() {
-                val view = browser ?: return
-                browser = null
-                browserReleasedAt = android.os.SystemClock.elapsedRealtime()
-                prefetchedPlayerScript = null
-                Trace.event("WEBVIEW_EARLY_CLOSE_TEST", "REQUESTED",
-                    "sid=${id.take(8)} signed=${token.isNotBlank()} sealed=$sealedPlaylist")
-                main.post {
-                    runCatching { view.stopLoading(); view.destroy() }
-                        .onSuccess { Trace.event("WEBVIEW_EARLY_CLOSE_TEST", "DESTROYED", "sid=${id.take(8)}") }
-                        .onFailure { Trace.event("WEBVIEW_EARLY_CLOSE_TEST", "DESTROY_FAILED",
-                            "sid=${id.take(8)} reason=${it.javaClass.simpleName}") }
-                }
             }
 
             fun close() {
@@ -2371,12 +2354,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 session.milestone("link_ready")
                                 session.resourceSnapshot("link_ready")
                                 val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
-                                val link = newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
+                                newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
                                     referer = "$EMBED_ORIGIN/"
                                     quality = Qualities.Unknown.value
                                 }
-                                session.releaseBrowserForTest()
-                                link
                             }
                         }
                     }
@@ -2580,12 +2561,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                         }
                         val now = android.os.SystemClock.elapsedRealtime()
                         sessions.forEach { (key, session) ->
-                            if (now - session.lastUse > 15 * 60 * 1000L && sessions.remove(key, session)) {
+                            if (now - session.lastUse > 5 * 60 * 1000L && sessions.remove(key, session)) {
                                 session.close()
                             }
                         }
                         directSessions.forEach { (key, direct) ->
-                            if (now - direct.lastUse > 15 * 60 * 1000L) directSessions.remove(key, direct)
+                            if (now - direct.lastUse > 5 * 60 * 1000L) directSessions.remove(key, direct)
                         }
                         if (sessions.isEmpty() && directSessions.isEmpty()) {
                             runCatching { socket.close() }
@@ -3109,12 +3090,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 // Only fallback when the browser bridge is unavailable (e.g. unsupported frame).
                 val target = session.signed(source)
                 val response = runCatching { app.get(target, headers = session.headers, timeout = 5) }.getOrNull()
-                if (session.browserReleasedAt != 0L) {
-                    Trace.event("WEBVIEW_EARLY_CLOSE_TEST", "CLIENT_MANIFEST",
-                        "sid=${session.id.take(8)} http=${response?.code ?: -1} " +
-                            "sinceCloseMs=${android.os.SystemClock.elapsedRealtime()-session.browserReleasedAt} " +
-                            "tokenAgeMs=${if (session.issuedTokenAt > 0L) android.os.SystemClock.elapsedRealtime()-session.issuedTokenAt else -1L}")
-                }
                 if (response?.isSuccessful == true) {
                     val decoded = decodePlaylist(response.text, session)
                     if (decoded != null) {
