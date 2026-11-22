@@ -921,6 +921,36 @@ class DaddyLiveExtractor : ExtractorApi() {
               window.__daddyResponseProbe = true;
               var bridge = window.DaddyResponseTrace;
               function emit(x) { try { if (bridge) { x.origin = location.origin; bridge.postMessage(JSON.stringify(x)); } } catch (_) {} }
+              // Observe resource completion and long main-thread tasks during auth.
+              // No request or player behavior is modified by this observer.
+              var longTasks=[], longTaskAvailable=false;
+              try {
+                if(window.PerformanceObserver &&
+                    (PerformanceObserver.supportedEntryTypes||[]).indexOf("longtask")>=0){
+                  new PerformanceObserver(function(list){
+                    list.getEntries().forEach(function(e){
+                      longTasks.push({at:Math.round(e.startTime),ms:Math.round(e.duration)});
+                      if(longTasks.length>10)longTasks.shift();
+                    });
+                  }).observe({entryTypes:["longtask"]});
+                  longTaskAvailable=true;
+                }
+              }catch(_){}
+              function perfSnapshot(phase){
+                try{
+                  var all=performance.getEntriesByType("resource");
+                  var items=all.map(function(e){
+                    var u;try{u=new URL(e.name,location.href)}catch(_){return null}
+                    return {host:u.hostname.slice(0,65),path:u.pathname.slice(-65),
+                      type:e.initiatorType||"",at:Math.round(e.startTime),
+                      end:Math.round(e.responseEnd),ms:Math.round(e.duration),
+                      blocking:e.renderBlockingStatus||""};
+                  }).filter(Boolean).sort(function(a,b){return b.end-a.end}).slice(0,12);
+                  emit({stage:"perf_snapshot",phase:phase,age:Math.round(performance.now()),
+                    count:all.length,longTaskAvailable:longTaskAvailable,
+                    resources:items,tasks:longTasks.slice()});
+                }catch(_){}
+              }
               function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
               function absoluteOf(raw) { try { return new URL(raw,location.href).href; } catch (_) { return String(raw); } }
               function kindOf(raw, method) {
@@ -1210,6 +1240,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nativeStarts++;
                     if (nativeStarts<=12) emit({stage:"native_start",transport:"fetch",method:method,url:absoluteOf(url)});
                   }
+                  if (kind === "ticket") perfSnapshot("before_ticket");
                   if (kind) emit({stage:"auth_start",kind:kind});
                   var start = performance.now();
                   var promise = nativeFetch.apply(this, arguments);
@@ -1292,6 +1323,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                      });
                    }
                   if (entry && entry.kind) {
+                    if (entry.kind === "ticket") perfSnapshot("before_ticket");
                     emit({stage:"auth_start",kind:entry.kind});
                     var start=performance.now();
                     this.addEventListener("loadend",function() {
@@ -1406,6 +1438,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 });
               });
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
+              perfSnapshot("probe_installed");
             })();
         """.trimIndent()
         private val responseProbeBytes by lazy { (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8) }
@@ -1840,6 +1873,28 @@ class DaddyLiveExtractor : ExtractorApi() {
                         milestone("probe_installed")
                         probeInstalled = true
                         Trace.event("RESPONSE_BRIDGE", "INSTALLED", "sid=${id.take(8)} type=${message.optString("kind")}")
+                    }
+                    "perf_snapshot" -> {
+                        val phase = message.optString("phase").take(30)
+                        val list = message.optJSONArray("resources")
+                        Trace.event("AUTH_PERF", "SUMMARY",
+                            "sid=${id.take(8)} phase=$phase ageMs=${message.optInt("age")} " +
+                            "resources=${message.optInt("count")} longTaskAvailable=${message.optBoolean("longTaskAvailable")}")
+                        for (i in 0 until minOf(list?.length() ?: 0, 12)) {
+                            val entry = list?.optJSONObject(i) ?: continue
+                            Trace.event("AUTH_PERF", "RESOURCE",
+                                "sid=${id.take(8)} phase=$phase host=${entry.optString("host").take(65)} " +
+                                "path=${entry.optString("path").take(65)} type=${entry.optString("type").take(20)} " +
+                                "startMs=${entry.optInt("at")} endMs=${entry.optInt("end")} " +
+                                "durationMs=${entry.optInt("ms")} blocking=${entry.optString("blocking").take(20)}")
+                        }
+                        val tasks = message.optJSONArray("tasks")
+                        for (i in 0 until minOf(tasks?.length() ?: 0, 10)) {
+                            val item = tasks?.optJSONObject(i) ?: continue
+                            Trace.event("AUTH_PERF", "LONG_TASK",
+                                "sid=${id.take(8)} phase=$phase startMs=${item.optInt("at")} " +
+                                "durationMs=${item.optInt("ms")}")
+                        }
                     }
                     "auth_start" -> {
                         val kind = message.optString("kind")
@@ -2346,6 +2401,38 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     session.milestone("page_finished")
                                     session.resourceSnapshot("page_finished")
+                                    // Main document performance provides the pre-Dembed JS
+                                    // resource waterfall and HTML script async/defer attributes.
+                                    view?.evaluateJavascript("""
+                                        (function(){
+                                          try {
+                                            var items=performance.getEntriesByType('resource')
+                                              .filter(function(e){return e.initiatorType==='script'||/\.js$/i.test(new URL(e.name).pathname)})
+                                              .sort(function(a,b){return b.responseEnd-a.responseEnd}).slice(0,16)
+                                              .map(function(e){
+                                                var u=new URL(e.name);
+                                                return [u.hostname.slice(0,55),u.pathname.slice(-55),
+                                                  Math.round(e.startTime),Math.round(e.responseEnd),
+                                                  Math.round(e.duration),e.renderBlockingStatus||''].join(':');
+                                              });
+                                            var scripts=Array.prototype.slice.call(document.scripts).slice(0,24)
+                                              .filter(function(x){return !!x.src})
+                                              .map(function(x){
+                                                var u=new URL(x.src);
+                                                return [u.hostname.slice(0,50),u.pathname.slice(-45),
+                                                  !!x.async,!!x.defer].join(':');
+                                              });
+                                            return JSON.stringify({age:Math.round(performance.now()),
+                                              total:performance.getEntriesByType('resource').length,
+                                              scripts:document.scripts.length,resources:items,attributes:scripts});
+                                          }catch(e){return JSON.stringify({error:String(e&&e.name||'unavailable')})}
+                                        })();
+                                    """.trimIndent()) { raw ->
+                                        val decoded = runCatching { JSONTokener(raw).nextValue().toString() }
+                                            .getOrDefault("invalid").take(3500)
+                                        Trace.event("AUTH_PARENT_PERF", "SNAPSHOT",
+                                            "sid=${session.id.take(8)} data=$decoded")
+                                    }
                                     Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
                                         "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())} " +
                                         "probeAvailable=${session.probeAvailable} installed=${session.probeInstalled}")
@@ -2708,6 +2795,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     clientFailure = e.javaClass.simpleName
                     null
                 }
+                val responseAt = android.os.SystemClock.elapsedRealtime()
                 val prefix = ByteArray(576)
                 // Decrypted URLs may point to image-wrapped MPEG-TS objects.
                 val n = if (session.sealedPlaylist) {
@@ -2722,6 +2810,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                 } else try {
                     client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, prefix) } ?: 0
                 } catch (_: Exception) { 0 }
+                val prefixAt = android.os.SystemClock.elapsedRealtime()
+                Trace.event("SEGMENT_PREFLIGHT_TIME", "BREAKDOWN",
+                    "sid=${session.id.take(8)} entry=$index http=${client?.code ?: -1} " +
+                    "requestMs=${responseAt-requestStarted} readUnwrapMs=${prefixAt-responseAt} " +
+                    "totalMs=${prefixAt-requestStarted} sealed=${session.sealedPlaylist} prefixBytes=$n")
                 val upstream = client?.code ?: -1
                 val reason = if (upstream in 400..599) {
                     runCatching { Trace.bodyReason(client?.text.orEmpty()) }.getOrDefault("read_error")
