@@ -231,7 +231,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         Uri.parse(original.url).buildUpon()
                                             .appendQueryParameter("source", candidate.player).build().toString(),
                                         original.type) {
-                                        referer = original.referer
+                                        this.referer = original.referer
                                         quality = original.quality
                                         headers = original.headers
                                     }
