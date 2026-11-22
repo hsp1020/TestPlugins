@@ -3,7 +3,6 @@ package com.ultimaevo
 
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.SharedPreferences
 import android.content.Intent
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
@@ -49,17 +48,7 @@ fun getSafeAllProviders(): List<MainAPI> {
 
 object UltimaEvoSyncManager {
     private var isSyncing = false
-    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L
-
-    private fun getSyncTargets(prefs: SharedPreferences, instanceCount: Int): List<MainAPI> =
-        getSafeAllProviders().filter { provider ->
-            !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
-                (1..instanceCount).any { instId ->
-                    prefs.getBoolean("provider_enabled_${instId}_${provider.name}", true) &&
-                        (prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
-                            prefs.getBoolean("auto_add_${instId}_${provider.name}", false))
-                }
-        }
+    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L 
 
     fun triggerAutoSync(context: Context) {
         if (isSyncing) return
@@ -70,14 +59,10 @@ object UltimaEvoSyncManager {
 
         if (now - lastSync < SYNC_THROTTLE_MS) return
 
-        val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-        val targetProviders = getSyncTargets(prefs, instanceCount)
-        if (targetProviders.isEmpty()) return
-
         isSyncing = true
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                performSync(context, forceSyncAll = false, onProgress = null, selectedTargets = targetProviders)
+                performSync(context, forceSyncAll = false, null)
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
@@ -89,8 +74,7 @@ object UltimaEvoSyncManager {
     suspend fun performSync(
         context: Context,
         forceSyncAll: Boolean = false,
-        onProgress: (suspend (current: Int, total: Int) -> Unit)? = null,
-        selectedTargets: List<MainAPI>? = null
+        onProgress: (suspend (current: Int, total: Int) -> Unit)? = null
     ) {
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
@@ -98,7 +82,14 @@ object UltimaEvoSyncManager {
         val targetProviders = if (forceSyncAll) {
             getSafeAllProviders().filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         } else {
-            selectedTargets ?: getSyncTargets(prefs, instanceCount)
+            getSafeAllProviders().filter { provider ->
+                !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
+                (1..instanceCount).any { instId ->
+                    prefs.getBoolean("provider_enabled_${instId}_${provider.name}", true) &&
+                        (prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
+                            prefs.getBoolean("auto_add_${instId}_${provider.name}", false))
+                }
+            }
         }
 
         if (targetProviders.isEmpty()) return
