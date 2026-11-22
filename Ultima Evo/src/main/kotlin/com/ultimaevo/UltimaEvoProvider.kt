@@ -3,6 +3,7 @@ package com.ultimaevo
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.SharedPreferences
 import android.content.Intent
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
@@ -28,10 +29,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 // --- [리플렉션 안전 우회 프록시 엔진] ---
+private val allProvidersMethod by lazy {
+    APIHolder::class.java.methods.find { it.name == "getAllProviders" }
+}
+
 fun getSafeAllProviders(): List<MainAPI> {
     return try {
-        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
-        val obj = method?.invoke(APIHolder)
+        val obj = allProvidersMethod?.invoke(APIHolder)
         when (obj) {
             is Iterable<*> -> obj.filterIsInstance<MainAPI>()
             is Array<*> -> obj.filterIsInstance<MainAPI>()
@@ -45,7 +49,17 @@ fun getSafeAllProviders(): List<MainAPI> {
 
 object UltimaEvoSyncManager {
     private var isSyncing = false
-    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L 
+    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L
+
+    private fun getSyncTargets(prefs: SharedPreferences, instanceCount: Int): List<MainAPI> =
+        getSafeAllProviders().filter { provider ->
+            !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
+                (1..instanceCount).any { instId ->
+                    prefs.getBoolean("provider_enabled_${instId}_${provider.name}", true) &&
+                        (prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
+                            prefs.getBoolean("auto_add_${instId}_${provider.name}", false))
+                }
+        }
 
     fun triggerAutoSync(context: Context) {
         if (isSyncing) return
@@ -56,10 +70,14 @@ object UltimaEvoSyncManager {
 
         if (now - lastSync < SYNC_THROTTLE_MS) return
 
+        val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+        val targetProviders = getSyncTargets(prefs, instanceCount)
+        if (targetProviders.isEmpty()) return
+
         isSyncing = true
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                performSync(context, forceSyncAll = false, null)
+                performSync(context, forceSyncAll = false, onProgress = null, selectedTargets = targetProviders)
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
@@ -71,7 +89,8 @@ object UltimaEvoSyncManager {
     suspend fun performSync(
         context: Context,
         forceSyncAll: Boolean = false,
-        onProgress: (suspend (current: Int, total: Int) -> Unit)? = null
+        onProgress: (suspend (current: Int, total: Int) -> Unit)? = null,
+        selectedTargets: List<MainAPI>? = null
     ) {
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
@@ -79,14 +98,7 @@ object UltimaEvoSyncManager {
         val targetProviders = if (forceSyncAll) {
             getSafeAllProviders().filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         } else {
-            getSafeAllProviders().filter { provider ->
-                !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
-                (1..instanceCount).any { instId ->
-                    prefs.getBoolean("provider_enabled_${instId}_${provider.name}", true) &&
-                        (prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
-                            prefs.getBoolean("auto_add_${instId}_${provider.name}", false))
-                }
-            }
+            selectedTargets ?: getSyncTargets(prefs, instanceCount)
         }
 
         if (targetProviders.isEmpty()) return
@@ -166,11 +178,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     private fun applyAdBlockPatch() {
         try {
-            val cncverseProviders = getSafeAllProviders().filter { 
-                it::class.java.name.startsWith("com.cncverse.") 
-            }
-            
-            for (provider in cncverseProviders) {
+            for (provider in getSafeAllProviders()) {
+                if (!provider::class.java.name.startsWith("com.cncverse.")) continue
                 try {
                     val clazz = provider::class.java
                     val field = clazz.getDeclaredField("context")
@@ -228,7 +237,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             for (p in targetProviders) {
                 val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_${p.name}", false)
                 if (isAutoAdd && prefs.getBoolean("provider_enabled_${instanceId}_${p.name}", true)) {
-                    val staticCats = p.mainPage.map { it.name }
+                    val staticPages = p.mainPage
+                    val staticCats = staticPages.map { it.name }
                     val dynamicCats = prefs.getString("dynamic_catalogs_${p.name}", "")?.split("|||") ?: emptyList()
                     val combinedCats = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
 
@@ -237,7 +247,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                             val isEnabled = prefs.getBoolean("cat_toggle_${instanceId}_${p.name}_$cName", true)
                             if (isEnabled) {
                                 val customName = prefs.getString("cat_rename_${instanceId}_${p.name}_$cName", cName) ?: cName
-                                val origData = p.mainPage.find { it.name == cName }?.data ?: ""
+                                val origData = staticPages.find { it.name == cName }?.data ?: ""
                                 val newConfig = EvoCatalogConfig(p.name, cName, customName, origData, dynamicOrder)
                                 val combinedData = newConfig.toJson()
                                 pages.add(Pair(MainPageData(customName, combinedData), dynamicOrder))
