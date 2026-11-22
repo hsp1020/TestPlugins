@@ -1136,6 +1136,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             })();
         """.trimIndent()
         private val responseProbeBytes by lazy { (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8) }
+        @Volatile private var observedPlayerJsUrl: String? = null
         /** Intercept only the embedded player's JavaScript, not its auth or media API.
          * Prepend the response probe before daddy.min.js runs while retaining the script body. */
         private data class PrefetchedPlayerScript(
@@ -1218,6 +1219,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         private fun instrumentPlayerScript(request: WebResourceRequest, session: Session): WebResourceResponse? {
             val address = request.url.toString()
             val started = android.os.SystemClock.elapsedRealtime()
+            observedPlayerJsUrl = address
             session.milestone("script_request")
             val cached = session.prefetchedPlayerScript
             val age = cached?.let { started - it.savedAt } ?: -1L
@@ -1321,6 +1323,15 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var issuedTokenAt = 0L
             @Volatile var signedManifestHttp = -1
             @Volatile var unsignedManifestHttp = -1
+            @Volatile var rejectedSignedManifest = ""
+            fun markRejectedManifest(address: String, code: Int) {
+                if (code != 404 || browserManifestBody != null || address != url ||
+                    Uri.parse(address).getQueryParameter("t").isNullOrBlank()) return
+                rejectedSignedManifest = address
+                Trace.event("HLS_BROWSER", "SIGNED_404_TERMINAL",
+                    "sid=${id.take(8)} ${Trace.urlShape(address)}")
+                if (!browserManifestReady.isCompleted) browserManifestReady.complete(false)
+            }
             fun reportOutcome(status: String) {
                 if (!reported.compareAndSet(0, 1)) return
                 fun gap(a: String, b: String): Long {
@@ -1348,6 +1359,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             private val embedResources = AtomicInteger()
             private val externalResources = AtomicInteger()
             private val externalScripts = AtomicInteger()
+            val blockedAdResources = AtomicInteger()
             private val parentHost = Uri.parse(parent).host.orEmpty()
 
             fun milestone(step: String, detail: String = "") {
@@ -1382,7 +1394,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 Trace.event("AUTH_RESOURCE", "SUMMARY",
                     "sid=${id.take(8)} step=$step navigations=${mainNavigations.get()} " +
                     "parent=${parentResources.get()} embed=${embedResources.get()} " +
-                    "external=${externalResources.get()} scripts=${externalScripts.get()}")
+                    "external=${externalResources.get()} scripts=${externalScripts.get()} " +
+                        "adsBlocked=${blockedAdResources.get()}")
             }
             val id: String = UUID.randomUUID().toString().replace("-", "")
             @Volatile var prefetchedPlayerScript: PrefetchedPlayerScript? = null
@@ -1551,6 +1564,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         val signature = runCatching { Uri.parse(address).getQueryParameter("t") }.getOrNull()
                         val signed = !signature.isNullOrBlank()
                         if (signed) signedManifestHttp = status else unsignedManifestHttp = status
+                        if (signed) markRejectedManifest(address, status)
                         Trace.event("AUTH_CHAIN", "MANIFEST_RESPONSE",
                             "sid=${id.take(8)} http=$status ${Trace.urlShape(address)} " +
                                 "signed=$signed tokenId=${Trace.valueId(signature)} issuedId=$issuedTokenId " +
@@ -2056,6 +2070,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                                 "elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                                     } else if (path.endsWith(".m3u8", true)) {
                                         session.manifestHttpError = status
+                                        session.markRejectedManifest(target, status)
                                         Trace.event("HLS_BROWSER", "HTTP_FAIL",
                                             "sid=${session.id.take(8)} http=$status target=${Trace.target(target)} " +
                                                 "signed=${request?.url?.getQueryParameter("t")?.isNotBlank() == true} " +
@@ -2092,15 +2107,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     val uri = request.url
                                     session.observeResource(request)
                                     val address = uri.toString()
-                                    // Block only a confirmed unrelated parent-page ad script.
+                                    // Suppress documented ad/analytics subresources only, not
+                                    // player, challenge, media or navigation requests.
                                     val host = uri.host.orEmpty()
-                                    if (uri.scheme == "https" && request.method.equals("GET", true) &&
-                                        (host == "profitableratecpmnetwork.com" ||
-                                         host.endsWith(".profitableratecpmnetwork.com")) &&
-                                        uri.path?.endsWith(".js", true) == true) {
-                                        Trace.event("AUTH_RESOURCE", "BLOCK_AD_SCRIPT",
-                                            "sid=${session.id.take(8)} host=$host")
-                                        return WebResourceResponse("application/javascript", "UTF-8",
+                                    val adDomains = arrayOf("profitableratecpmnetwork.com",
+                                        "histats.com", "tynt.com", "dtscout.com",
+                                        "dtscdn.com", "xadsmart.com")
+                                    if (!request.isForMainFrame && uri.scheme == "https" &&
+                                        request.method.equals("GET", true) &&
+                                        adDomains.any { host == it || host.endsWith(".$it") }) {
+                                        val blocked = session.blockedAdResources.incrementAndGet()
+                                        if (blocked <= 4) Trace.event("AUTH_RESOURCE", "BLOCK_AD",
+                                            "sid=${session.id.take(8)} host=$host count=$blocked")
+                                        return WebResourceResponse("text/plain", "UTF-8",
                                             ByteArrayInputStream(ByteArray(0)))
                                     }
                                     if (request.method.equals("GET", true) &&
@@ -2154,10 +2173,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     return null
                                 }
                             }
-                            // Read only the static player JS concurrently with the original parent.
-                            val scriptUrl = runCatching {
-                                URL(URL(embedded), "daddy.min.js").toString()
-                            }.getOrNull()
+                            // Prefetch the exact versioned JS URL previously requested by WebView.
+                            // For first use or a changed version, the browser's actual request
+                            // refreshes this URL. No guessed query-string or duplicate HTML fetch.
+                            val expectedJs = runCatching { URL(URL(embedded), "daddy.min.js") }.getOrNull()
+                            val scriptUrl = observedPlayerJsUrl?.takeIf { known ->
+                                runCatching {
+                                    val verified = URL(known)
+                                    verified.protocol == "https" && expectedJs != null &&
+                                        verified.host.equals(expectedJs.host, true) &&
+                                        verified.path == expectedJs.path
+                                }.getOrDefault(false)
+                            }
+                            Trace.event("SCRIPT_PREFETCH", if (scriptUrl == null) "SKIP" else "SCHEDULED",
+                                "sid=${session.id.take(8)} reason=${if (scriptUrl == null) "no_known_version" else "real_webview_version"} " +
+                                    "url=${Trace.urlShape(scriptUrl)}")
                             if (scriptUrl != null) io.launch {
                                 val cookie = scriptCookie(scriptUrl)
                                 val agent = session.userAgent
@@ -2215,6 +2245,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             session.milestone("manifest_bridge_complete")
             val actual = session.browserManifestUrl.ifBlank { session.url.ifBlank { captured } }
             val signed = !Uri.parse(actual).getQueryParameter("t").isNullOrBlank()
+            if (signed && session.browserManifestBody == null &&
+                actual == session.rejectedSignedManifest) {
+                Trace.event("HLS_FETCH", "SKIP_SIGNED_404",
+                    "sid=${session.id.take(8)} ${Trace.urlShape(actual)} " +
+                        "reason=browser_404_same_uri_no_replay")
+                session.close()
+                return null
+            }
             Trace.event("PLAYER_URL", "FOUND",
                 "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
                     "authRequests=${session.authRequestCount} authHttpError=${session.authHttpError ?: -1} " +
@@ -2555,10 +2593,15 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }.getOrNull()
 
-        // Clip only the unverified tail of the first simple live playlist.
-        // A refresh is always fetched and independently decoded as before.
+        // Once the penultimate live segment was verified, keep a one-segment
+        // safety margin on the initial and refreshed simple root live windows.
         private fun stableInitialPlaylist(playlist: String, session: Session): String {
-            if (!session.skipInitialTail) return playlist
+            if (!session.skipInitialTail || !playlist.startsWith("#EXTM3U") ||
+                !playlist.contains("#EXT-X-MEDIA-SEQUENCE", true) ||
+                !playlist.contains("#EXT-X-TARGETDURATION", true) ||
+                playlist.contains("#EXT-X-ENDLIST", true) ||
+                playlist.contains("#EXT-X-KEY", true) ||
+                playlist.contains("#EXT-X-MAP", true)) return playlist
             val lines = playlist.lines()
             val segments = lines.indices.filter { index ->
                 val line = lines[index].trim()
@@ -2574,7 +2617,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (cut > 0 && lines[cut - 1].trim().equals("#EXT-X-DISCONTINUITY", true))
                 cut--
             val stable = lines.take(cut).joinToString("\n").trimEnd() + "\n"
-            Trace.event("SEGMENT_WINDOW", "INITIAL_TAIL_HELD",
+            Trace.event("SEGMENT_WINDOW", "TAIL_HELD",
                 "sid=${session.id.take(8)} entries=${segments.size} remaining=${segments.size - 1}")
             return stable
         }
@@ -3106,7 +3149,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 } else loadManifest(session, resource)
                                 if (manifest != null) {
                                     session.registerManifestSegments(manifest.second, manifest.first)
-                                    data = rewrite(manifest.second, manifest.first, session).toByteArray()
+                                    // The first manifest was already trimmed when assigned.
+                                    // Only fresh root reloads need a new safety margin.
+                                    val mediaPlaylist = if (resource == null && first == null)
+                                        stableInitialPlaylist(manifest.second, session) else manifest.second
+                                    data = rewrite(mediaPlaylist, manifest.first, session).toByteArray()
                                     type = "application/vnd.apple.mpegurl"
                                 }
                                 Trace.event("PROXY_PLAYLIST", if (data != null) "OK" else "FAILED",
