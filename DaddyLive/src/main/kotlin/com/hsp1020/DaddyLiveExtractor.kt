@@ -160,11 +160,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
-        // A shared Dembed result can arrive through stream and watch together.
-        // Publish each actual URL once, favoring stream regardless of completion order.
-        val publishedUrls = HashSet<String>()
-        var pendingWatch: Pair<String, ExtractorLink>? = null
-        var streamCompleted = false
         supervisorScope {
             repeat(workers) { slot ->
                 launch(Dispatchers.IO) {
@@ -179,8 +174,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                             if (link != null) {
                                 val original = if (candidate.player == "player")
                                     DaddyLiveDembed.wrapDirectHls(link) else link
-                                // Preserve each candidate's display name even when a
-                                // shared Dembed extraction was initiated by another candidate.
+                                // Keep stream/watch names distinct even when their Dembed URL and WebView are shared.
                                 val playing = newExtractorLink(
                                     candidate.player, sourceName,
                                     if (original.url.startsWith("http://127.0.0.1:"))
@@ -197,12 +191,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 }
                                 callbackMutex.lock()
                                 try {
-                                    val canonical = original.url
-                                    if (candidate.player == "watch" && !streamCompleted) {
-                                        pendingWatch = canonical to playing
-                                    } else if (publishedUrls.add(canonical)) {
-                                        withContext(callbackContext) { callback(playing) }
-                                    }
+                                    withContext(callbackContext) { callback(playing) }
                                 } finally {
                                     callbackMutex.unlock()
                                 }
@@ -210,21 +199,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                         } catch (cancel: CancellationException) {
                             throw cancel
                         } catch (_: Exception) {
-                        } finally {
-                            if (candidate.player == "stream") {
-                                callbackMutex.lock()
-                                try {
-                                    streamCompleted = true
-                                    pendingWatch?.let { (canonical, link) ->
-                                        if (publishedUrls.add(canonical)) {
-                                            withContext(callbackContext) { callback(link) }
-                                        }
-                                    }
-                                    pendingWatch = null
-                                } finally {
-                                    callbackMutex.unlock()
-                                }
-                            }
                         }
                         index = next.getAndIncrement()
                     }
@@ -1564,7 +1538,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             embedded: String, parent: String, name: String, previousId: String? = null
         ): ExtractorLink? {
             val initialEpoch = sessionEpoch
-            val initiallySelected = activeSessionId
             val session = Session(parent, embedded, previousId ?: UUID.randomUUID().toString().replace("-", ""))
             val captured = withTimeoutOrNull(20000L) {
                 suspendCancellableCoroutine<String?> { continuation ->
@@ -1797,10 +1770,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     return null
                                 }
                                 remember(sessionRecipes, session.id, SessionRecipe(embedded, parent, name))
-                                if (initiallySelected != activeSessionId &&
-                                    activeSessionId != null && activeSessionId != session.id) {
-                                    if (sessions.remove(session.id, session)) session.close()
-                                }
                                 val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
                                 newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
                                     referer = "$EMBED_ORIGIN/"
@@ -1907,18 +1876,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             return false
         }
 
-        // A root playlist request identifies the selected mirror/episode, not merely a
-        // prefetched candidate. Release every nonselected WebView immediately.
+        // Track selection without destroying other source sessions; the same Dembed
+        // WebView may be selected again after the Direct HLS player.
         private fun sourceActivated(id: String) {
-            synchronized(selectionLock) {
-                activeSessionId = id
-                sessions.forEach { (other, session) ->
-                    if (other != id && sessions.remove(other, session)) session.close()
-                }
-                directSessions.keys.forEach { other ->
-                    if (other != id) directSessions.remove(other)
-                }
-            }
+            synchronized(selectionLock) { activeSessionId = id }
         }
 
         // A CloudStream source list can outlive its browser authorization and WebView.
