@@ -1926,7 +1926,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             return try {
                 val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
-                socket.soTimeout = 15000
                 server = socket
                 port = socket.localPort
                 io.launch {
@@ -1934,23 +1933,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         try {
                             val client = socket.accept()
                             launch { serve(client) }
-                        } catch (_: SocketTimeoutException) {
                         } catch (_: Exception) {
-                        }
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        sessions.forEach { (key, session) ->
-                            if (now - session.lastUse > 5 * 60 * 1000L && sessions.remove(key, session)) {
-                                session.close()
-                            }
-                        }
-                        directSessions.forEach { (key, direct) ->
-                            if (now - direct.lastUse > 5 * 60 * 1000L) directSessions.remove(key, direct)
-                        }
-                        if (sessions.isEmpty() && directSessions.isEmpty() && sessionRecipes.isEmpty() && directRecipes.isEmpty()) {
-                            runCatching { socket.close() }
-                            synchronized(DaddyLiveDembed) {
-                                if (server === socket) { server = null; port = 0 }
-                            }
                         }
                     }
                 }
