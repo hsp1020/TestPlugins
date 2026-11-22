@@ -1081,7 +1081,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             return try {
                 val script = if (result == "hit") {
-                    cached.body
+                    cached!!.body
                 } else fetchPlayerScript(address, request.requestHeaders, session) ?: return null
                 val probe = responseProbeBytes
                 val bytes = ByteArray(probe.size + script.size)
