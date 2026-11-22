@@ -239,7 +239,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 HomePageList(
                     section.title,
                     section.events.map { eventToSearchResponse(it) },
-                    isHorizontalImages = true
+                    isHorizontalImages = false
                 )
             }
 

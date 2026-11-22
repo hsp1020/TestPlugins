@@ -19,16 +19,24 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 @CloudstreamPlugin
 class DaddyLivePlugin : Plugin() {
     private var playerCleanup: PlayerExitCleanup? = null
+    private var cardHook: DaddyLiveCardHook? = null
 
     override fun load(context: Context) {
         registerMainAPI(DaddyLiveScheduleProvider())
         registerExtractorAPI(DaddyLiveExtractor())
+        (context.applicationContext as? Application)?.let { application ->
+            val hook = DaddyLiveCardHook(application)
+            cardHook = hook
+            Handler(Looper.getMainLooper()).post { if (cardHook === hook) hook.start() }
+        }
         playerCleanup = (context.applicationContext as? Application)?.let { application ->
             PlayerExitCleanup(application).also { it.start() }
         }
     }
 
     override fun beforeUnload() {
+        cardHook?.let { hook -> Handler(Looper.getMainLooper()).post { hook.stop() } }
+        cardHook = null
         playerCleanup?.stop()
         playerCleanup = null
         DaddyLiveExtractor.releaseSessionsOnPlayerExit("plugin_unload")
