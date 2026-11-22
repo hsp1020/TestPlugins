@@ -52,7 +52,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -60,6 +60,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.json.JSONArray
@@ -195,70 +196,60 @@ class DaddyLiveExtractor : ExtractorApi() {
         Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
         if (candidates.isEmpty()) return
 
-        // A slow stream player must not delay an independently playable fallback.
-        // Limit outstanding work to three candidates (including any embedded WebView).
+        // Keep the existing candidate order and at most three simultaneous probes.
+        // Publish each validated source as soon as it is ready, not just the first.
         val attemptedDembed = ConcurrentHashMap.newKeySet<String>()
-        // Independent, bounded diagnostics: returning the first playable link must
-        // not cancel stream's token, manifest, segment and HTTP/P2P observations.
-        val scanJob = SupervisorJob()
-        val scanScope = CoroutineScope(scanJob + Dispatchers.IO)
         val permits = Semaphore(3)
-        val remaining = AtomicInteger(candidates.size)
-        val first = CompletableDeferred<Pair<PlayerCandidate, ExtractorLink>?>()
-        candidates.forEach { candidate ->
-            scanScope.launch {
-                try {
-                    permits.acquire()
+        val callbackMutex = Mutex()
+        val callbackContext = currentCoroutineContext()
+        val emitted = AtomicInteger(0)
+        supervisorScope {
+            candidates.forEach { candidate ->
+                launch(Dispatchers.IO) {
                     try {
-                        val sourceName = "${selected.channelName} - ${candidate.player}"
-                        Trace.event("PLAYER_CANDIDATE", "TRY",
-                            "player=${candidate.player} target=${Trace.target(candidate.url)}")
-                        val link = withTimeoutOrNull(35000L) {
-                            extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
+                        permits.acquire()
+                        try {
+                            val sourceName = "${selected.channelName} - ${candidate.player}"
+                            Trace.event("PLAYER_CANDIDATE", "TRY",
+                                "player=${candidate.player} target=${Trace.target(candidate.url)}")
+                            val link = withTimeoutOrNull(35000L) {
+                                extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
+                            }
+                            if (link == null) {
+                                Trace.event("PLAYER_CANDIDATE", "FALLBACK",
+                                    "player=${candidate.player} reason=no_valid_link_or_timeout")
+                            } else {
+                                val playing = if (candidate.player == "player")
+                                    DaddyLiveDembed.wrapDirectHls(link) else link
+                                callbackMutex.lock()
+                                try {
+                                    // Preserve the caller's callback context and serialize delivery.
+                                    withContext(callbackContext) { callback(playing) }
+                                    emitted.incrementAndGet()
+                                    Trace.event("MEDIA3_LINK", "EMITTED",
+                                        "player=${candidate.player} mode=${if (playing.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(playing.url)}")
+                                } catch (e: Exception) {
+                                    DaddyLiveDembed.discardUnused(playing.url)
+                                    throw e
+                                } finally {
+                                    callbackMutex.unlock()
+                                }
+                            }
+                        } finally {
+                            permits.release()
                         }
-                        if (link == null) {
-                            Trace.event("PLAYER_CANDIDATE", "FALLBACK",
-                                "player=${candidate.player} reason=no_valid_link_or_timeout")
-                        } else if (!first.complete(candidate to link)) {
-                            DaddyLiveDembed.discardUnused(link.url)
-                            Trace.event("PLAYER_CANDIDATE", "DIAGNOSTIC_LINK",
-                                "player=${candidate.player} result=validated_not_selected")
-                        }
-                    } finally {
-                        permits.release()
-                    }
-                } catch (cancel: CancellationException) {
-                    throw cancel
-                } catch (e: Exception) {
-                    Trace.event("PLAYER_CANDIDATE", "ERROR",
-                        "player=${candidate.player} reason=${e.javaClass.simpleName}")
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        first.complete(null)
-                        Trace.event("PLAYER_DIAGNOSTICS", "COMPLETE",
-                            "channel=${selected.streamId} candidates=${candidates.size}")
-                        scanJob.cancel()
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (e: Exception) {
+                        Trace.event("PLAYER_CANDIDATE", "ERROR",
+                            "player=${candidate.player} reason=${e.javaClass.simpleName}")
                     }
                 }
             }
         }
-        val selectedLink = try {
-            first.await()
-        } catch (cancel: CancellationException) {
-            scanJob.cancel()
-            throw cancel
-        }
-        if (selectedLink != null) {
-            Trace.event("PLAYER_DIAGNOSTICS", "CONTINUE",
-                "channel=${selected.streamId} remaining=${remaining.get()}")
-        }
-        if (selectedLink != null) {
-            val (candidate, link) = selectedLink
-            val playing = if (candidate.player == "player") DaddyLiveDembed.wrapDirectHls(link) else link
-            Trace.event("MEDIA3_LINK", "EMITTED",
-                "player=${candidate.player} mode=${if (playing.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(playing.url)}")
-            callback(playing)
-        } else {
+        Trace.event("PLAYER_DIAGNOSTICS", "COMPLETE",
+            "channel=${selected.streamId} candidates=${candidates.size} emitted=${emitted.get()}")
+        if (emitted.get() == 0) {
             Trace.event("PLAYER_DISCOVERY", "EXHAUSTED",
                 "candidates=${candidates.size} reason=all_failed")
         }
