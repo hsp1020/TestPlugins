@@ -60,7 +60,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
             "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming2.png"
 
         internal const val cardPosterUrl =
-            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
+            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming3.png"
 
         private const val SCHEDULE_CACHE_TTL_MS = 60_000L
 
