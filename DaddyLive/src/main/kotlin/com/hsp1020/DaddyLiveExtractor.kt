@@ -30,12 +30,15 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -63,6 +66,25 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (_: Exception) { "invalid-url" }
         fun event(phase: String, status: String, detail: String = "") {
             android.util.Log.i(TAG, "phase=$phase status=$status $detail")
+        }
+        private fun digest(raw: String): String = try {
+            MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+                .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
+        } catch (_: Exception) { "unknown" }
+        fun key(url: String): String = digest(url)
+        fun fingerprint(raw: String): String = try {
+            val parsed = URL(raw)
+            "urlId=${key(raw)} pathId=${digest(parsed.host + parsed.path)} " +
+                "host=${parsed.host} queryKeys=${Uri.parse(raw).queryParameterNames.sorted().joinToString(",").take(90)}"
+        } catch (_: Exception) { "invalid_url" }
+        private fun host(raw: String?): String = try {
+            if (raw.isNullOrBlank()) "none" else URL(raw).host
+        } catch (_: Exception) { "unavailable" }
+        fun headerProfile(headers: Map<String, String>): String {
+            fun get(key: String) = headers.entries.firstOrNull { it.key.equals(key, true) }?.value
+            val names = headers.keys.map { it.lowercase() }.sorted().joinToString(",").take(180)
+            return "headerNames=$names originHost=${host(get("Origin"))} refHost=${host(get("Referer"))} " +
+                "cookie=${get("Cookie") != null} auth=${get("Authorization") != null} range=${get("Range") != null}"
         }
         fun bodyReason(text: String): String {
             val body = text.take(512).lowercase()
@@ -500,10 +522,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 currentCoroutineContext().ensureActive()
                 val target = resolveUrl(base, item) ?: continue
                 if (URL(target).path.endsWith(".m3u8", true)) { variant = target; continue }
-                val response = try { app.get(target, headers = headers + ("Range" to "bytes=0-575"), timeout = 4) }
+                val response = try { app.get(target, headers = headers, timeout = 4) }
                     catch (e: CancellationException) { throw e } catch (_: Exception) { null }
                 val buf = ByteArray(576)
-                val n = try { response?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { it.read(buf) } ?: 0 } catch (_: Exception) { 0 }
+                val n = try { response?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, buf) } ?: 0 } catch (_: Exception) { 0 }
                 val valid = validMediaPrefix(buf, n, playlist)
                 Trace.event("DIRECT_SEGMENT", if (valid) "OK" else "FAILED",
                     "target=" + Trace.target(target) + " http=" + (response?.code ?: -1) + " bytes=" + n)
@@ -725,6 +747,7 @@ class DaddyLiveExtractor : ExtractorApi() {
               var bridge = window.DaddyResponseTrace;
               function emit(x) { try { if (bridge) { x.origin = location.origin; bridge.postMessage(JSON.stringify(x)); } } catch (_) {} }
               function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
+              function absoluteOf(raw) { try { return new URL(raw,location.href).href; } catch (_) { return String(raw); } }
               function kindOf(raw, method) {
                 var p = pathOf(raw);
                 if (p === "/api/playlist-token") return "token";
@@ -758,8 +781,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                   var start = performance.now();
                   var promise = nativeFetch.apply(this, arguments);
                    if (!kind && String(method).toUpperCase()==='GET' && /^\/premium[^/]*\//.test(pathOf(url))) {
-                     Promise.resolve(promise).then(function(r) {emit({stage:'native_segment',transport:'fetch',http:r.status,url:r.url||url});},
-                       function(){emit({stage:'native_segment',transport:'fetch',http:0,url:url});});
+                     var opts=init||{}, req=input && input.headers ? input : null;
+                     var names="";try{names=headerNames(new Headers(opts.headers||req && req.headers));}catch(_){}
+                     var credentials=opts.credentials||req && req.credentials||"default";
+                     Promise.resolve(promise).then(function(r) {
+                       emit({stage:'native_segment',transport:'fetch',method:method,http:r.status,
+                         url:r.url||absoluteOf(url),requestUrl:absoluteOf(url),requestHeaders:names,credentials:credentials,
+                         contentType:r.headers.get("content-type")||"",contentLength:r.headers.get("content-length")||"",
+                         responseType:r.type||"",elapsedMs:Math.round(performance.now()-start)});
+                     },function(e){emit({stage:'native_segment',transport:'fetch',method:method,http:0,
+                         url:absoluteOf(url),requestUrl:absoluteOf(url),requestHeaders:names,credentials:credentials,
+                         error:String(e && e.name||"network_error"),elapsedMs:Math.round(performance.now()-start)});});
                    }
                   if (kind) Promise.resolve(promise).then(function(r) {
                     var ms = performance.now()-start;
@@ -776,14 +808,28 @@ class DaddyLiveExtractor : ExtractorApi() {
               if (window.XMLHttpRequest && XMLHttpRequest.prototype) {
                 var open = XMLHttpRequest.prototype.open;
                 var send = XMLHttpRequest.prototype.send;
+                var setHeader = XMLHttpRequest.prototype.setRequestHeader;
+                XMLHttpRequest.prototype.setRequestHeader = function(name,value) {
+                  if(this.__daddyProbe) this.__daddyProbe.headers.push(String(name).toLowerCase());
+                  return setHeader.apply(this,arguments);
+                };
                 XMLHttpRequest.prototype.open = function(method,url) {
-                  this.__daddyProbe = {kind:kindOf(url,method),url:String(url),method:String(method)};
+                  this.__daddyProbe = {kind:kindOf(url,method),url:String(url),method:String(method),headers:[]};
                   return open.apply(this,arguments);
                 };
                 XMLHttpRequest.prototype.send = function() {
                   var self=this, entry=this.__daddyProbe;
                    if (entry && !entry.kind && !self.__daddySynthetic && /^\/premium[^/]*\//.test(pathOf(entry.url))) {
-                     this.addEventListener('loadend',function(){emit({stage:'native_segment',transport:'xhr',http:self.status,url:self.responseURL||entry.url});});
+                     var begun=performance.now();
+                     this.addEventListener('loadend',function(){
+                       var mime="",len="",bytes=0;
+                       try{mime=self.getResponseHeader("content-type")||"";len=self.getResponseHeader("content-length")||"";}catch(_){}
+                       try{bytes=self.response && self.response.byteLength||0;}catch(_){}
+                       emit({stage:'native_segment',transport:'xhr',method:entry.method,http:self.status,
+                         requestUrl:absoluteOf(entry.url),url:self.responseURL||absoluteOf(entry.url),requestHeaders:entry.headers.join(","),
+                         credentials:self.withCredentials?'include':'default',contentType:mime,contentLength:len,
+                         responseType:self.responseType||"",bytes:bytes,elapsedMs:Math.round(performance.now()-begun)});
+                     });
                    }
                   if (entry && entry.kind) {
                     var start=performance.now();
@@ -847,10 +893,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                     xhr.open("GET", target.toString(), true);
                     xhr.responseType = "arraybuffer";
                     xhr.timeout = 5000;
+                    var started = performance.now();
                     xhr.onload = function() {
                       if (xhr.status < 200 || xhr.status >= 300) {
                         emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
-                          error:"xhr_http_"+xhr.status});
+                          url:target.toString(),transport:"xhr",method:"GET",contentType:xhr.getResponseHeader("content-type")||"",
+                          elapsedMs:Math.round(performance.now()-started),error:"xhr_http_"+xhr.status});
                         return;
                       }
                       try {
@@ -861,7 +909,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                         for (var i=0; i<bytes.length; i+=step)
                           pieces.push(String.fromCharCode.apply(null, bytes.subarray(i,i+step)));
                         emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
-                          url:target.toString(),data:btoa(pieces.join(""))});
+                          url:target.toString(),transport:"xhr",method:"GET",contentType:xhr.getResponseHeader("content-type")||"",
+                          elapsedMs:Math.round(performance.now()-started),data:btoa(pieces.join(""))});
                       } catch (e) {
                         emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
                           error:String(e && e.message || "segment_decode_failed")});
@@ -869,11 +918,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                     };
                     xhr.onerror = function() {
                       emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status || 0,
-                        error:"xhr_network_or_cors"});
+                        url:target.toString(),transport:"xhr",method:"GET",elapsedMs:Math.round(performance.now()-started),error:"xhr_network_or_cors"});
                     };
                     xhr.ontimeout = function() {
                       emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
-                        error:"xhr_timeout"});
+                        url:target.toString(),transport:"xhr",method:"GET",elapsedMs:Math.round(performance.now()-started),error:"xhr_timeout"});
                     };
                     xhr.send();
                     return;
@@ -995,7 +1044,67 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var segmentTransport = "client"
             @Volatile var directAllowed = false
             @Volatile var encryptedMedia = false
-            @Volatile var nativeSegmentCount = 0
+            val nativeSegmentCount = AtomicInteger()
+            val nativeRequestCount = AtomicInteger()
+            val nativeHeaders = ConcurrentHashMap<String, Map<String, String>>()
+            val nativeStatuses = ConcurrentHashMap<String, Int>()
+            @Volatile var preflightStarted = false
+
+            fun observeNativeRequest(address: String, method: String, original: Map<String, String>) {
+                if (nativeRequestCount.incrementAndGet() > 12) return
+                nativeHeaders[Trace.key(address)] = original.toMap()
+                Trace.event("ORIGINAL_REQUEST", "OBSERVED",
+                    "sid=${id.take(8)} method=$method ${Trace.fingerprint(address)} ${Trace.headerProfile(original)}")
+            }
+
+            fun recordNativeResponse(address: String, status: Int, method: String, transport: String,
+                headerNames: String, mime: String, bytes: String, elapsed: Long
+            ) {
+                val key = Trace.key(address)
+                if (nativeStatuses.size < 24 && (status != 0 || nativeStatuses[key] == null)) {
+                    nativeStatuses[key] = status
+                }
+                if (nativeSegmentCount.incrementAndGet() <= 12) {
+                    Trace.event("ORIGINAL_SEGMENT", "RESPONSE",
+                        "sid=${id.take(8)} ${Trace.fingerprint(address)} method=$method http=$status " +
+                            "transport=$transport requestNames=${headerNames.take(160)} mime=${mime.take(75)} " +
+                            "bytes=$bytes elapsedMs=$elapsed")
+                }
+            }
+
+            fun compare(address: String, source: String, http: Int, mediaHeaders: Map<String, String>) {
+                val original = nativeStatuses[Trace.key(address)]
+                val previous = nativeHeaders[Trace.key(address)]
+                val headerDifference = previous?.keys?.map { it.lowercase() }?.toSet()
+                    ?.let { it != mediaHeaders.keys.map { key -> key.lowercase() }.toSet() } ?: false
+                val result = when {
+                    original == null -> "ORIGINAL_NOT_OBSERVED"
+                    original in 200..299 && http !in 200..299 -> "ORIGINAL_OK_REPLAY_FAILED"
+                    original == 404 && http == 404 -> "BOTH_404"
+                    original == 0 && http == 404 -> "CORS_OR_NETWORK_VS_404"
+                    original == http -> "SAME_HTTP"
+                    else -> "DIFFERENT_HTTP"
+                }
+                Trace.event("SEGMENT_COMPARE", result,
+                    "sid=${id.take(8)} source=$source originalHttp=${original ?: -1} replayHttp=$http " +
+                        "headerNameMismatch=$headerDifference ${Trace.fingerprint(address)} " +
+                        "original=[${Trace.headerProfile(previous.orEmpty())}] replay=[${Trace.headerProfile(mediaHeaders)}]")
+            }
+
+            fun mediaHeaders(address: String): Map<String, String> {
+                val original = nativeHeaders[Trace.key(address)]
+                val base = original ?: headers
+                val result = linkedMapOf<String, String>()
+                base.forEach { (name, value) ->
+                    if (name.lowercase() !in setOf("host", "connection", "content-length",
+                            "accept-encoding", "range") && value.isNotBlank()) result[name] = value
+                }
+                runCatching { CookieManager.getInstance().getCookie(address) }.getOrNull()?.let { value ->
+                    result.keys.firstOrNull { it.equals("Cookie", true) }?.let { result.remove(it) }
+                    result["Cookie"] = value
+                }
+                return result
+            }
             @Volatile var browser: WebView? = null
             @Volatile var url: String = ""
             @Volatile var token: String = ""
@@ -1133,11 +1242,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                             "sid=${id.take(8)} reason=${message.optString("error").take(64)}")
                     }
                     "native_segment" -> {
-                        val count = ++nativeSegmentCount
-                        if (count <= 5) Trace.event("ORIGINAL_SEGMENT", "OBSERVED",
-                            "sid=" + this.id.take(8) + " http=" + message.optInt("http", 0) +
-                            " transport=" + message.optString("transport") +
-                            " target=" + Trace.target(message.optString("url")))
+                        val address = message.optString("requestUrl").ifBlank { message.optString("url") }
+                        recordNativeResponse(address, message.optInt("http", 0),
+                            message.optString("method", "GET"), message.optString("transport"),
+                            message.optString("requestHeaders"), message.optString("contentType"),
+                            message.optString("contentLength").ifBlank { message.optString("bytes") },
+                            message.optLong("elapsedMs"))
+                        val responseAddress = message.optString("url")
+                        if (responseAddress != address && responseAddress.isNotBlank() && nativeSegmentCount.get() <= 12)
+                            Trace.event("ORIGINAL_REDIRECT", "CHANGED",
+                                "sid=${id.take(8)} request=${Trace.fingerprint(address)} response=${Trace.fingerprint(responseAddress)}")
                     }
                     "proxy_resource" -> {
                         val id = message.optString("id")
@@ -1153,6 +1267,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                         Trace.event("PROXY_BROWSER", if (status in 200..299 && (body != null || bytes != null)) "OK" else "FAILED",
                             "sid=${this.id.take(8)} kind=$kind http=$status text=${body?.length ?: 0} " +
                                 "bytes=${bytes?.size ?: 0} reason=${message.optString("error").take(64)}")
+                        if (kind == "segment") {
+                            Trace.event("BROWSER_SEGMENT", "RESPONSE",
+                                "sid=${this.id.take(8)} ${Trace.fingerprint(message.optString("url"))} " +
+                                    "http=$status mime=${message.optString("contentType").take(75)} " +
+                                    "elapsedMs=${message.optLong("elapsedMs")}")
+                        }
                         request.complete(result)
                     }
                     "network_error", "read_error", "clone_error", "install_error", "js_error", "promise_error" -> {
@@ -1391,6 +1511,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                                                 "signed=${request?.url?.getQueryParameter("t")?.isNotBlank() == true} " +
                                                 "headerNames=${headers.keys.sorted().joinToString(",")}")
                                     } else if (request?.isForMainFrame == true || path.contains("/premium")) {
+                                        val nativeSource = session.url.takeIf { it.isNotBlank() }
+                                        if (!session.preflightStarted && nativeSource != null &&
+                                            request?.isForMainFrame != true && !path.endsWith(".m3u8", true) &&
+                                            request?.url?.host.equals(Uri.parse(nativeSource).host, true) &&
+                                            path.startsWith(Uri.parse(nativeSource).path.orEmpty().substringBeforeLast('/') + "/")
+                                        ) {
+                                            session.recordNativeResponse(target, status, request?.method ?: "GET", "webview",
+                                                request?.requestHeaders?.keys?.joinToString(",").orEmpty(),
+                                                headers.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value.orEmpty(),
+                                                headers.entries.firstOrNull { it.key.equals("Content-Length", true) }?.value.orEmpty(), 0)
+                                        }
                                         Trace.event("AUTH_WEBVIEW", "HTTP_ERROR",
                                             "sid=${session.id.take(8)} target=${Trace.target(target)} http=$status " +
                                                 "reason=${errorResponse?.reasonPhrase?.take(64)}")
@@ -1448,6 +1579,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                                                 continuation.resume(session.url)
                                             }
                                         }, if (signed) 100L else 2400L)
+                                    }
+                                    val source = session.url.takeIf { it.isNotBlank() }
+                                    val path = uri.path.orEmpty()
+                                    if (source != null && uri.scheme == "https" &&
+                                        uri.host.equals(Uri.parse(source).host, true) &&
+                                        path.startsWith(Uri.parse(source).path.orEmpty().substringBeforeLast('/') + "/") &&
+                                        !path.endsWith(".m3u8", true) &&
+                                        request.method.equals("GET", true)
+                                    ) {
+                                        if (!session.preflightStarted)
+                                            session.observeNativeRequest(address, request.method, request.requestHeaders)
                                     }
                                     return null
                                 }
@@ -1552,7 +1694,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         if (!probePlayable(session, playlist, actual)) {
                             session.close()
                             null
-                        } else if (!signed && session.directAllowed) {
+                        } else if (session.directAllowed && (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
                             Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                             // Probe a media segment before bypassing the wrapper decoder.
                             session.close()
@@ -1562,6 +1704,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 headers = session.headers
                             }
                         } else {
+                            Trace.event("MEDIA3_ROUTE", "PROXY_REQUIRED",
+                                "sid=${session.id.take(8)} reason=${if (signed && !playlist.contains("#EXT-X-ENDLIST")) "signed_live_refresh" else "browser_only_segments"}")
                             val openPort = startServer()
                             if (openPort == 0) {
                                 Trace.event("MEDIA3_LINK", "FAILED", "sid=${session.id.take(8)} reason=proxy_bind_failed")
@@ -1593,6 +1737,7 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         /** A playlist alone is not a playable link: verify newest media segment bytes first. */
         private suspend fun probePlayable(session: Session, playlist: String, manifestUrl: String): Boolean {
+            session.preflightStarted = true
             session.encryptedMedia = playlist.contains("#EXT-X-KEY", true)
             val targets = playlist.lineSequence().map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("#") }
@@ -1605,17 +1750,24 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             for ((index, target) in targets.withIndex()) {
                 currentCoroutineContext().ensureActive()
+                val forwarded = session.mediaHeaders(target)
+                Trace.event("SEGMENT_ATTEMPT", "CLIENT",
+                    "sid=${session.id.take(8)} entry=$index ${Trace.fingerprint(target)} ${Trace.headerProfile(forwarded)}")
                 val client = try {
-                    app.get(target, headers = session.headers + ("Range" to "bytes=0-575"), timeout = 4)
+                    app.get(target, headers = forwarded, timeout = 4)
                 } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
                 val prefix = ByteArray(576)
-                val n = try { client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { it.read(prefix) } ?: 0 } catch (_: Exception) { 0 }
+                val n = try { client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, prefix) } ?: 0 } catch (_: Exception) { 0 }
+                session.compare(target, "client_preflight", client?.code ?: -1, forwarded)
                 if (client?.isSuccessful == true && validMediaPrefix(prefix, n, playlist)) {
                     session.segmentTransport = "client"; session.directAllowed = true
                     Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=client entry=" + index + " http=" + client.code + " bytes=" + n)
                     return true
                 }
-                Trace.event("SEGMENT_PREFLIGHT", "CLIENT_FAIL", "sid=" + session.id.take(8) + " entry=" + index + " http=" + (client?.code ?: -1) + " bytes=" + n)
+                Trace.event("SEGMENT_PREFLIGHT", "CLIENT_FAIL",
+                    "sid=${session.id.take(8)} entry=$index http=${client?.code ?: -1} bytes=$n " +
+                        "mime=${client?.headers?.get("Content-Type")?.substringBefore(';').orEmpty().take(60)} " +
+                        "contentLength=${client?.headers?.get("Content-Length").orEmpty().take(15)}")
                 val browser = session.browserRequest("segment", target)
                 val chunk = browser?.bytes
                 if (browser?.status in 200..299 && chunk != null && validMediaPrefix(chunk, chunk.size, playlist)) {
@@ -1623,6 +1775,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=browser entry=" + index + " bytes=" + chunk.size)
                     return true
                 }
+                session.compare(target, "browser_preflight", browser?.status ?: -1, forwarded)
                 Trace.event("SEGMENT_PREFLIGHT", "BROWSER_FAIL", "sid=" + session.id.take(8) + " entry=" + index +
                     " http=" + (browser?.status ?: -1) + " bytes=" + (chunk?.size ?: 0) + " target=" + Trace.target(target))
             }
@@ -1804,14 +1957,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     var clientHttp = -1
                                     if (bytes == null) {
                                         val response = runCatching {
-                                            app.get(resource.url, headers = session.headers, timeout = 8)
+                                            app.get(resource.url, headers = session.mediaHeaders(resource.url), timeout = 8)
                                         }.getOrNull()
                                         clientHttp = response?.code ?: -1
+                                        session.compare(resource.url, "client_proxy", clientHttp, session.mediaHeaders(resource.url))
                                         if (response?.isSuccessful == true) bytes = response.body.bytes()
                                     }
                                     if (bytes == null && browser == null) {
                                         browser = session.browserRequest("segment", resource.url)
                                         bytes = browser?.takeIf { it.status in 200..299 }?.bytes
+                                        session.compare(resource.url, "browser_proxy", browser?.status ?: -1, session.mediaHeaders(resource.url))
                                     }
                                     if (bytes != null) {
                                         data = bytes.takeIf { validMediaPrefix(it, it.size, if (session.encryptedMedia) "#EXT-X-KEY" else "") }
@@ -1856,6 +2011,17 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
+}
+
+private fun readMediaPrefix(stream: InputStream, target: ByteArray): Int {
+    var read = 0
+    val required = minOf(376, target.size)
+    while (read < required) {
+        val n = stream.read(target, read, required - read)
+        if (n <= 0) break
+        read += n
+    }
+    return read
 }
 
 private fun validMediaPrefix(bytes: ByteArray, length: Int, manifest: String): Boolean {
