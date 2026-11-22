@@ -1,6 +1,21 @@
 package com.hsp1020
 
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.util.Base64
+import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.JavascriptInterface
+import java.net.HttpURLConnection
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
@@ -10,15 +25,62 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import java.io.BufferedReader
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.util.zip.GZIPInputStream
 import java.io.IOException
+import java.io.InputStreamReader
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.nio.charset.StandardCharsets
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.resume
 import kotlin.math.ceil
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 
 class DaddyLiveExtractor : ExtractorApi() {
+    private object Trace {
+        private const val TAG = "DaddyLiveTrace"
+        fun target(raw: String): String = try {
+            val parsed = URL(raw)
+            val path = parsed.path
+            parsed.host + if (path.length > 160) path.take(52) + "/[opaquePathChars=${path.length}]" else path
+        } catch (_: Exception) { "invalid-url" }
+        fun event(phase: String, status: String, detail: String = "") {
+            android.util.Log.i(TAG, "phase=$phase status=$status $detail")
+        }
+        fun bodyReason(text: String): String {
+            val body = text.take(512).lowercase()
+            return when {
+                "turnstile" in body || "captcha" in body -> "challenge_required"
+                "expired" in body -> "expired"
+                "invalid ticket" in body -> "invalid_ticket"
+                "invalid token" in body -> "invalid_token"
+                "rate limit" in body || "too many" in body -> "rate_limited"
+                "forbidden" in body -> "forbidden_unspecified"
+                "denied" in body || "blocked" in body -> "access_denied_unspecified"
+                "<html" in body -> "html_error_page"
+                body.isBlank() -> "empty_error_body"
+                else -> "unclassified_error_body"
+            }
+        }
+    }
+
     override var mainUrl = "https://thedaddy.li"
     override val name = "DaddyLive"
     override val requiresReferer = false
@@ -38,6 +100,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         "cast",
         "casting"
     )
+    private val dembedPlayerPath = Regex("""^/premiumtv/[a-z0-9_-]+\.php$""", RegexOption.IGNORE_CASE)
 
     private data class ExtractorChannelSelection(
         val origin: String,
@@ -58,7 +121,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         currentCoroutineContext().ensureActive()
-
+        Trace.event("PLAYER_ENTRY", "START", "target=${Trace.target(url)}")
         val selected = try {
             mapper.readValue<ExtractorChannelSelection>(url)
         } catch (_: Exception) {
@@ -71,6 +134,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sourceName = name,
                 parentReferer = referer
             )
+            Trace.event("MEDIA3_LINK", if (direct != null) "EMITTED" else "NO_LINK", "mode=direct_entry")
             if (direct != null) callback(direct)
             return
         }
@@ -85,12 +149,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             entryUrl = entryUrl,
             streamId = selected.streamId
         )
-
+        Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
 
         for (candidate in candidates) {
             currentCoroutineContext().ensureActive()
 
             val sourceName = "${selected.channelName} - ${candidate.player}"
+            Trace.event("PLAYER_CANDIDATE", "TRY", "player=${candidate.player} target=${Trace.target(candidate.url)}")
 
             val link = extractVideo(
                 url = candidate.url,
@@ -99,11 +164,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (link != null) {
+                Trace.event("MEDIA3_LINK", "EMITTED", "player=${candidate.player} mode=${if (link.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(link.url)}")
                 callback(link)
                 return
             }
+            Trace.event("PLAYER_CANDIDATE", "FALLBACK", "player=${candidate.player} reason=no_valid_link")
         }
-
+        Trace.event("PLAYER_DISCOVERY", "EXHAUSTED", "candidates=${candidates.size} reason=all_failed")
     }
 
     /*
@@ -130,6 +197,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
+            Trace.event("PLAYER_DISCOVERY", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                "target=${Trace.target(entryUrl)} http=${response.code}")
             if (response.isSuccessful) {
                 val html = response.text
 
@@ -197,6 +266,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("PLAYER_DISCOVERY", "ERROR", "reason=${e.javaClass.simpleName}")
         }
 
         /*
@@ -211,6 +281,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
         }
 
+        Trace.event("PLAYER_DISCOVERY", "DONE", "players=${discovered.keys.joinToString(",")} count=${discovered.size}")
         return players.mapNotNull { player ->
             discovered[player]?.let { PlayerCandidate(player, it) }
         }
@@ -238,6 +309,11 @@ class DaddyLiveExtractor : ExtractorApi() {
 
 
             val targetOrigin = originOf(url) ?: mainUrl
+            Trace.event("PLAYER_PAGE", "START", "target=${Trace.target(url)}")
+            if (targetOrigin == "https://dembed.st" && URL(url).path.endsWith(".php", true)) {
+                Trace.event("PLAYER_PAGE", "DEMBED_ROUTE", "target=" + Trace.target(url))
+                return DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName)
+            }
             val referer = parentReferer ?: "$targetOrigin/"
             val refererOrigin = originOf(referer) ?: targetOrigin
 
@@ -251,6 +327,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
+            Trace.event("PLAYER_PAGE", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                "target=${Trace.target(url)} http=${response.code}")
             if (!response.isSuccessful) {
                 return null
             }
@@ -263,18 +341,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 visited = linkedSetOf()
             )
 
-            if (link != null) {
-                return link
-            }
-
-            return null
+            Trace.event("PLAYER_PAGE", if (link != null) "LINK_FOUND" else "NO_LINK",
+                "target=${Trace.target(url)}")
+            return link
         } catch (e: CancellationException) {
             throw e
         } catch (e: SocketTimeoutException) {
+            Trace.event("PLAYER_PAGE", "TIMEOUT", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: IOException) {
+            Trace.event("PLAYER_PAGE", "IO_ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: Exception) {
+            Trace.event("PLAYER_PAGE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         }
     }
@@ -350,46 +429,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         )
     }
 
-    private fun decodeEConfig(encoded: String): Map<String, Any?>? {
-        return try {
-            val first = base64Decode(encoded)
-            val order = intArrayOf(2, 0, 3, 1)
-            val partLength = ceil(first.length / 4.0).toInt()
-
-            val parts = mutableListOf<String>()
-            var offset = 0
-
-            repeat(4) {
-                val end = minOf(offset + partLength, first.length)
-                parts += if (offset < first.length) {
-                    first.substring(offset, end)
-                } else {
-                    ""
-                }
-                offset += partLength
-            }
-
-            val decoded = arrayOfNulls<String>(4)
-            for (i in 0 until 4) {
-                val part = parts[i]
-                if (part.length <= 3) return null
-
-                val cleaned =
-                    part.substring(0, 3) +
-                        part.substring(4)
-
-                decoded[order[i]] = base64Decode(cleaned)
-            }
-
-            val joined = decoded.joinToString("") { it.orEmpty() }
-            val json = base64Decode(joined)
-
-            mapper.readValue<Map<String, Any?>>(json)
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     private suspend fun validateHls(
         url: String,
         headers: Map<String, String>
@@ -404,20 +443,18 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
+                Trace.event("HLS_VALIDATE", "HTTP_FAIL", "target=${Trace.target(url)} http=${response.code}")
                 return false
             }
-
             val body = response.text.trimStart()
-            val valid = body.startsWith("#EXTM3U")
-
-            if (valid) {
-            } else {
-            }
-
+            val valid = body.startsWith("#EXTM3U") && probeDirectSegments(url, body, headers)
+            Trace.event("HLS_VALIDATE", if (valid) "VALID" else "INVALID",
+                "target=${Trace.target(url)} http=${response.code} chars=${body.length} reason=${if (valid) "extm3u" else "missing_extm3u"}")
             valid
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("HLS_VALIDATE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             false
         }
     }
@@ -430,8 +467,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         origin: String,
         headers: Map<String, String> = hlsHeaders(origin, referer)
     ): ExtractorLink? {
-        if (!validateHls(url, headers)) return null
-
+        if (!validateHls(url, headers)) {
+            Trace.event("MEDIA3_LINK", "REJECTED", "target=${Trace.target(url)} reason=playlist_validation_failed")
+            return null
+        }
+        Trace.event("MEDIA3_LINK", "BUILD", "mode=direct target=${Trace.target(url)} headerNames=${headers.keys.joinToString(",")}")
         return newExtractorLink(
             source = sourceName,
             name = displayName,
@@ -449,62 +489,33 @@ class DaddyLiveExtractor : ExtractorApi() {
      * CloudStream은 P2P service worker를 사용하지 않으므로
      * stream_url_nop2p를 최우선으로 사용한다.
      */
-    private suspend fun extractEConfigStream(
-        pageUrl: String,
-        pageHtml: String,
-        pageOrigin: String,
-        sourceName: String
-    ): ExtractorLink? {
-        /*
-         * v4의 raw-string 정규식은 역슬래시를 이중 이스케이프해서
-         * window._econfig를 놓칠 수 있었다. v5에서 정확히 수정.
-         */
-        val encoded = Regex(
-            """(?i)(?:window\.)?_econfig\s*=\s*["']([^"']+)["']"""
-        ).find(pageHtml)?.groupValues?.getOrNull(1)
-            ?: return null
-
-
-        val config = decodeEConfig(encoded) ?: return null
-
-        val candidates = listOf(
-            "stream_url_nop2p" to config["stream_url_nop2p"]?.toString(),
-            "stream_url" to config["stream_url"]?.toString()
-        ).mapNotNull { (kind, raw) ->
-            val value = raw
-                ?.takeIf { it.isNotBlank() && it != "null" }
-                ?: return@mapNotNull null
-
-            val resolved = resolveUrl(pageUrl, value)
-                ?: return@mapNotNull null
-
-            kind to resolved
-        }.distinctBy { it.second }
-
-        val finalHeaders = hlsHeaders(
-            origin = pageOrigin,
-            referer = "$pageOrigin/"
-        )
-
-        for ((kind, candidate) in candidates) {
-            currentCoroutineContext().ensureActive()
-
-
-            val link = buildValidatedLink(
-                url = candidate,
-                sourceName = sourceName,
-                displayName = "$sourceName [$kind]",
-                referer = "$pageOrigin/",
-                origin = pageOrigin,
-                headers = finalHeaders
-            )
-
-            if (link != null) {
-                return link
+    /** Direct links are returned only after their media URI is readable. */
+    private suspend fun probeDirectSegments(url: String, initial: String, headers: Map<String, String>): Boolean {
+        var playlist = initial; var base = url
+        repeat(2) {
+            val entries = playlist.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+            if (entries.isEmpty()) return false
+            var variant: String? = null
+            for (item in entries.takeLast(2).asReversed()) {
+                currentCoroutineContext().ensureActive()
+                val target = resolveUrl(base, item) ?: continue
+                if (URL(target).path.endsWith(".m3u8", true)) { variant = target; continue }
+                val response = try { app.get(target, headers = headers + ("Range" to "bytes=0-575"), timeout = 4) }
+                    catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                val buf = ByteArray(576)
+                val n = try { response?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { it.read(buf) } ?: 0 } catch (_: Exception) { 0 }
+                val valid = validMediaPrefix(buf, n, playlist)
+                Trace.event("DIRECT_SEGMENT", if (valid) "OK" else "FAILED",
+                    "target=" + Trace.target(target) + " http=" + (response?.code ?: -1) + " bytes=" + n)
+                if (valid) return true
             }
+            if (variant == null) return false
+            val next = try { app.get(variant, headers = headers, timeout = 5) }
+                catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+            if (next?.isSuccessful != true || !next.text.trimStart().startsWith("#EXTM3U")) return false
+            playlist = next.text; base = variant
         }
-
-        return null
+        return false
     }
 
     private suspend fun parseAndExtract(
@@ -521,15 +532,6 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         val pageOrigin = originOf(pageUrl) ?: return null
 
-
-        // 1) 최신 tiestep/stream.js _econfig 방식 최우선.
-        val eConfigLink = extractEConfigStream(
-            pageUrl = pageUrl,
-            pageHtml = pageHtml,
-            pageOrigin = pageOrigin,
-            sourceName = sourceName
-        )
-        if (eConfigLink != null) return eConfigLink
 
         // 2) HTML/JS에 signed m3u8 URL이 직접 노출된 경우.
         val directM3u8Candidates = Regex(
@@ -557,109 +559,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (link != null) return link
         }
 
-        // 3) embedsports 계열 JS 변수 복원.
-        val edm = Regex(
-            """(?i)\bedm\s*=\s*["']([^"']+)["']"""
-        ).find(pageHtml)?.groupValues?.getOrNull(1)
-
-        val zmid = Regex(
-            """(?i)\bzmid\s*=\s*["']([^"']+)["']"""
-        ).find(pageHtml)?.groupValues?.getOrNull(1)
-
-        if (!edm.isNullOrBlank() && !zmid.isNullOrBlank()) {
-            val constructed = "https://$edm/court/$zmid.php"
-            val dynamicLink = crawlChild(
-                childUrl = constructed,
-                parentUrl = pageUrl,
-                sourceName = sourceName,
-                depth = depth,
-                visited = visited
-            )
-            if (dynamicLink != null) return dynamicLink
-        }
-
-        // 4) 실제/동적 player URL 후보 수집 후 순차 탐색.
-        val nestedCandidates = collectNestedCandidates(
-            pageUrl = pageUrl,
-            pageHtml = pageHtml
-        )
-
-        if (nestedCandidates.isNotEmpty()) {
-        }
-
-        for (nestedUrl in nestedCandidates) {
+        val nested = collectNestedCandidates(pageUrl, pageHtml)
+        Trace.event("PLAYER_NESTED", "FOUND", "parent=" + Trace.target(pageUrl) + " count=" + nested.size)
+        for (candidate in nested) {
             currentCoroutineContext().ensureActive()
-
-            val nestedLink = crawlChild(
-                childUrl = nestedUrl,
-                parentUrl = pageUrl,
-                sourceName = sourceName,
-                depth = depth,
-                visited = visited
-            )
-            if (nestedLink != null) return nestedLink
+            crawlChild(candidate, pageUrl, sourceName, depth, visited)?.let { return it }
         }
-
-        // 5) wiki.js / Ignite legacy resolver.
-        val wikiLink = extractWikiStream(
-            pageUrl = pageUrl,
-            pageHtml = pageHtml,
-            pageOrigin = pageOrigin,
-            sourceName = sourceName
-        )
-        if (wikiLink != null) return wikiLink
-
-        // 6) atob 후보는 실제 HLS 검증 후에만 성공 처리.
-        val atobMatches = Regex(
-            """(?i)atob\(\s*["']([^"']+)["']\s*\)"""
-        ).findAll(pageHtml)
-
-        for (match in atobMatches) {
-            currentCoroutineContext().ensureActive()
-
-            val decoded = try {
-                base64Decode(match.groupValues[1])
-                    .replace("\\/", "/")
-                    .replace("\"", "")
-                    .trim()
-            } catch (_: Exception) {
-                continue
-            }
-
-            val candidate = resolveUrl(pageUrl, decoded) ?: continue
-            if (!candidate.contains(".m3u8", ignoreCase = true)) continue
-
-            val headers = hlsHeaders(
-                origin = pageOrigin,
-                referer = "$pageOrigin/"
-            )
-
-
-            val link = buildValidatedLink(
-                url = candidate,
-                sourceName = sourceName,
-                referer = "$pageOrigin/",
-                origin = pageOrigin,
-                headers = headers
-            )
-
-            if (link != null) {
-                return link
-            }
-
-        }
-
-        // 7) Popcdn/Freeshot legacy resolver.
-        val popLink = extractPopcdnStream(
-            pageUrl = pageUrl,
-            pageOrigin = pageOrigin,
-            sourceName = sourceName
-        )
-        if (popLink != null) return popLink
-
         return null
     }
-
     private fun collectNestedCandidates(
         pageUrl: String,
         pageHtml: String
@@ -671,18 +578,18 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (resolved == pageUrl) return
 
             val lower = resolved.lowercase()
-
-            if (
-                lower.endsWith(".js") ||
-                lower.endsWith(".css") ||
-                lower.endsWith(".png") ||
-                lower.endsWith(".jpg") ||
-                lower.endsWith(".jpeg") ||
-                lower.endsWith(".gif") ||
-                lower.endsWith(".svg") ||
-                lower.contains("doubleclick") ||
-                lower.contains("googlesyndication")
-            ) {
+            val url = runCatching { URL(resolved) }.getOrNull() ?: return
+            val path = url.path.lowercase()
+            val extension = path.substringAfterLast('.', "")
+            if (extension in setOf("js", "css", "png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "json", "map", "woff", "woff2", "ttf") ||
+                lower.contains("doubleclick") || lower.contains("googlesyndication")) {
+                if (url.host.equals("dembed.st", true))
+                    Trace.event("PLAYER_FILTER", "REJECT", "target=${Trace.target(resolved)} reason=static_resource")
+                return
+            }
+            if (url.host.equals("dembed.st", true) &&
+                !dembedPlayerPath.matches(path)) {
+                Trace.event("PLAYER_FILTER", "REJECT", "target=${Trace.target(resolved)} reason=not_dembed_player_php")
                 return
             }
 
@@ -698,7 +605,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     lower.contains("ksohls") ||
                     lower.contains("live=") ||
                     lower.contains("zmid=") ||
-                    (runCatching { URL(resolved).path.endsWith(".php", true) }.getOrDefault(false))
+                    (runCatching { URL(resolved).path.endsWith(".php", true) }.getOrDefault(false)) ||
+                    (url.host.equals("dembed.st", true) && path.startsWith("/premiumtv/") && path.endsWith(".php"))
 
             if (likelyPlayer) result += resolved
         }
@@ -735,6 +643,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             .sortedByDescending { candidate ->
                 val lower = candidate.lowercase()
                 when {
+                    runCatching { URL(candidate).host.equals("dembed.st", true) && URL(candidate).path.endsWith(".php", true) }.getOrDefault(false) -> 1100
                     lower.contains("tiestep.") -> 1000
                     lower.contains("/e/") -> 900
                     lower.contains("/embed/") -> 800
@@ -760,9 +669,16 @@ class DaddyLiveExtractor : ExtractorApi() {
         depth: Int,
         visited: MutableSet<String>
     ): ExtractorLink? {
-        if (childUrl in visited) return null
-
+        if (childUrl in visited) {
+            Trace.event("PLAYER_NESTED", "SKIP", "reason=already_visited target=${Trace.target(childUrl)}")
+            return null
+        }
+        Trace.event("PLAYER_NESTED", "TRY", "target=${Trace.target(childUrl)} depth=$depth")
         val parentOrigin = originOf(parentUrl) ?: return null
+        if (originOf(childUrl) == "https://dembed.st" && URL(childUrl).path.endsWith(".php", true)) {
+            Trace.event("PLAYER_NESTED", "DEMBED_ROUTE", "target=" + Trace.target(childUrl))
+            return DaddyLiveDembed.extract(childUrl, parentUrl, sourceName)
+        }
 
         return try {
             currentCoroutineContext().ensureActive()
@@ -778,9 +694,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
+                Trace.event("PLAYER_NESTED", "HTTP_FAIL", "target=${Trace.target(childUrl)} http=${response.code}")
                 return null
             }
-
+            Trace.event("PLAYER_NESTED", "HTTP_OK", "target=${Trace.target(childUrl)} http=${response.code}")
             parseAndExtract(
                 pageUrl = childUrl,
                 pageHtml = response.text,
@@ -791,190 +708,1161 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Trace.event("PLAYER_NESTED", "ERROR", "target=${Trace.target(childUrl)} reason=${e.javaClass.simpleName}")
             null
         }
     }
 
-    private suspend fun extractWikiStream(
-        pageUrl: String,
-        pageHtml: String,
-        pageOrigin: String,
-        sourceName: String
-    ): ExtractorLink? {
-        val wikiJsMatch = Regex(
-            """(?i)src=["'](https?://[^"']+|//[^"']+)wiki\.js"""
-        ).find(pageHtml) ?: return null
+    private object DaddyLiveDembed {
+        private const val EMBED_ORIGIN = "https://dembed.st"
 
-        var rawWikiHost = wikiJsMatch.groupValues[1]
-        if (rawWikiHost.startsWith("//")) {
-            rawWikiHost = "https:$rawWikiHost"
-        }
-
-        var igniteHost = rawWikiHost.trimEnd('/')
-        if (igniteHost.contains("stellarthread.com", ignoreCase = true)) {
-            igniteHost = "https://igniteandship.com"
-        }
-
-        val pageName = try {
-            URL(pageUrl).path
-                .substringAfterLast("/")
-                .substringBefore(".php")
-        } catch (_: Exception) {
-            ""
-        }
-
-        val fid = Regex(
-            """(?i)\bfid\s*=\s*["']([^"']+)["']"""
-        ).find(pageHtml)?.groupValues?.getOrNull(1)
-
-        val zmid = Regex(
-            """(?i)\bzmid\s*=\s*["']([^"']+)["']"""
-        ).find(pageHtml)?.groupValues?.getOrNull(1)
-
-        val liveId = when {
-            !fid.isNullOrBlank() -> fid
-            !zmid.isNullOrBlank() -> zmid
-            pageName.isNotBlank() -> pageName
-            else -> return null
-        }
-
-        val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
-
-        return try {
-            val response = app.get(
-                playerUrl,
-                headers = pageHeaders(
-                    parentUrl = pageUrl,
-                    parentOrigin = pageOrigin
-                ),
-                timeout = 5
-            )
-
-            if (!response.isSuccessful) return null
-
-            val playerHtml = response.text
-            val arrayMatch = Regex(
-                """\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]"""
-            ).find(playerHtml) ?: return null
-
-            var streamUrl = arrayMatch.value
-                .replace("[", "")
-                .replace("]", "")
-                .replace("\"", "")
-                .replace("\\/", "/")
-                .replace(",", "")
-                .trim()
-
-            val idMatch = Regex(
-                """document\.getElementById\(["']([^"']+)["']\)"""
-            ).find(playerHtml)?.groupValues?.getOrNull(1)
-
-            if (!idMatch.isNullOrBlank()) {
-                val safeId = Regex.escape(idMatch)
-                val span = Regex(
-                    """(?is)id=["']?$safeId["']?[^>]*>([^<]*)"""
-                ).find(playerHtml)?.groupValues?.getOrNull(1).orEmpty()
-                streamUrl += span
+        // Document-start injection executes inside dembed.st's iframe, before daddy.min.js.
+        // Copy only token/manifest/ticket responses; never consume or replace the originals.
+        private val responseProbe = """
+            (function() {
+              if (window.__daddyResponseProbe) return;
+              window.__daddyResponseProbe = true;
+              var bridge = window.DaddyResponseTrace;
+              function emit(x) { try { if (bridge) { x.origin = location.origin; bridge.postMessage(JSON.stringify(x)); } } catch (_) {} }
+              function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
+              function kindOf(raw, method) {
+                var p = pathOf(raw);
+                if (p === "/api/playlist-token") return "token";
+                if (/\.m3u8$/i.test(p) && p.indexOf("/premium") !== -1) return "manifest";
+                if (p.indexOf("/premiumtv/") === 0 && String(method).toUpperCase() === "POST") return "ticket";
+                return "";
+              }
+              function observed(kind, method, raw, status, type, response, elapsed, headers) {
+                var max = kind === "manifest" ? 262144 : 32768;
+                var x = {stage:"response", kind:kind, method:String(method), url:String(raw),
+                  http:status, responseType:String(type || ""), elapsedMs:Math.round(elapsed),
+                  headers:String(headers || ""), length:response ? response.length : 0,
+                  truncated:!!(response && response.length > max),
+                  body:typeof response === "string" ? response.slice(0, max) : ""};
+                emit(x);
+              }
+              function observedError(kind, method, raw, stage, err) {
+                emit({stage:stage, kind:kind, method:String(method), url:String(raw),
+                  error:String(err && err.name || "unavailable")});
+              }
+              function headerNames(h) {
+                try { var keys=[]; h.forEach(function(v,k){keys.push(k)}); return keys.join(","); }
+                catch (_) { return ""; }
+              }
+              if (typeof window.fetch === "function") {
+                var nativeFetch = window.fetch;
+                window.fetch = function(input, init) {
+                  var url = typeof input === "string" ? input : input && input.url || "";
+                  var method = init && init.method || input && input.method || "GET";
+                  var kind = kindOf(url, method);
+                  var start = performance.now();
+                  var promise = nativeFetch.apply(this, arguments);
+                   if (!kind && String(method).toUpperCase()==='GET' && /^\/premium[^/]*\//.test(pathOf(url))) {
+                     Promise.resolve(promise).then(function(r) {emit({stage:'native_segment',transport:'fetch',http:r.status,url:r.url||url});},
+                       function(){emit({stage:'native_segment',transport:'fetch',http:0,url:url});});
+                   }
+                  if (kind) Promise.resolve(promise).then(function(r) {
+                    var ms = performance.now()-start;
+                    try {
+                      var copy = r.clone();
+                      copy.text().then(function(body) {
+                        observed(kind,method,r.url || url,r.status,r.type,body,ms,headerNames(r.headers));
+                      },function(e){ observedError(kind,method,url,"read_error",e); });
+                    } catch(e){ observedError(kind,method,url,"clone_error",e); }
+                  },function(e){ observedError(kind,method,url,"network_error",e); });
+                  return promise;
+                };
+              } else emit({stage:"install_error",error:"fetch_missing"});
+              if (window.XMLHttpRequest && XMLHttpRequest.prototype) {
+                var open = XMLHttpRequest.prototype.open;
+                var send = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open = function(method,url) {
+                  this.__daddyProbe = {kind:kindOf(url,method),url:String(url),method:String(method)};
+                  return open.apply(this,arguments);
+                };
+                XMLHttpRequest.prototype.send = function() {
+                  var self=this, entry=this.__daddyProbe;
+                   if (entry && !entry.kind && !self.__daddySynthetic && /^\/premium[^/]*\//.test(pathOf(entry.url))) {
+                     this.addEventListener('loadend',function(){emit({stage:'native_segment',transport:'xhr',http:self.status,url:self.responseURL||entry.url});});
+                   }
+                  if (entry && entry.kind) {
+                    var start=performance.now();
+                    this.addEventListener("loadend",function() {
+                      var body="",readError="";
+                      try {
+                        if (self.responseType === "" || self.responseType === "text") body=self.responseText;
+                        else if (self.responseType === "arraybuffer" && self.response) {
+                          var bytes=new Uint8Array(self.response);
+                          if (bytes.byteLength <= 262144) body=new TextDecoder().decode(bytes);
+                          else readError="arraybuffer_too_large";
+                        } else readError="unsupported_response_type_"+self.responseType;
+                      } catch(e){ readError=String(e && e.name || "read_failed"); }
+                      if (readError) observedError(entry.kind,entry.method,entry.url,"read_error",readError);
+                      var h="";try{h=self.getAllResponseHeaders().split("\n").map(function(v){return v.split(":")[0]}).join(",");}catch(_){}
+                      observed(entry.kind,entry.method,self.responseURL || entry.url,
+                        self.status,self.responseType,body,performance.now()-start,h);
+                    });
+                  }
+                  return send.apply(this,arguments);
+                };
+              } else emit({stage:"install_error",error:"xhr_missing"});
+              window.addEventListener("error",function(e) {
+                emit({stage:"js_error",error:String(e.message || "script_error").slice(0,180),
+                    source:String(e.filename || ""),line:e.lineno || 0});
+              });
+              window.addEventListener("unhandledrejection",function(e) {
+                var r=e.reason;
+                emit({stage:"promise_error",error:String(r && (r.message || r.name) || "rejection").slice(0,180)});
+              });
+              // Proxy requests run in the original authenticated iframe, not a new HTTP session.
+              window.addEventListener("message", function(ev) {
+                if (ev.source !== window.parent || ev.origin !== "https://thedaddy.li") return;
+                var cmd = ev.data;
+                if (!cmd || cmd.daddyProxy !== 1 ||
+                    !/^[a-f0-9]{32}$/.test(String(cmd.id)) ||
+                    (cmd.kind !== "manifest" && cmd.kind !== "segment")) return;
+                (async function() {
+                  var target = new URL(cmd.url);
+                  if (target.protocol !== "https:" || !/^\/premium/.test(target.pathname)) throw Error("invalid_resource_url");
+                  if (cmd.kind === "manifest") {
+                    // Refresh in the dembed iframe rather than the unrelated parent page.
+                    var renew = typeof fetchPlaylistToken === "function" ? fetchPlaylistToken :
+                      (typeof window.fetchPlaylistToken === "function" ? window.fetchPlaylistToken : null);
+                    if (renew) {
+                      try {
+                        var next = await renew();
+                        var valid = typeof next === "string" && !!next;
+                        if (valid) {
+                          target.searchParams.set("t", next);
+                          target.searchParams.set("_", String(Date.now()));
+                        }
+                        emit({stage:"proxy_refresh_info", available:true, token:valid});
+                      } catch (e) { emit({stage:"proxy_refresh_error", error:String(e && e.name || "refresh_failed")}); }
+                    } else emit({stage:"proxy_refresh_info", available:false, token:false});
+                  }
+                  if (cmd.kind === "segment") {
+                    // Match LiveLoader's binary XHR path; fetch() may be handled differently.
+                    var xhr = new XMLHttpRequest();
+                     xhr.__daddySynthetic = true;
+                    xhr.open("GET", target.toString(), true);
+                    xhr.responseType = "arraybuffer";
+                    xhr.timeout = 5000;
+                    xhr.onload = function() {
+                      if (xhr.status < 200 || xhr.status >= 300) {
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
+                          error:"xhr_http_"+xhr.status});
+                        return;
+                      }
+                      try {
+                        var buffer = xhr.response;
+                        if (!buffer || !buffer.byteLength || buffer.byteLength > 4*1024*1024)
+                          throw Error("invalid_segment_length");
+                        var bytes = new Uint8Array(buffer), pieces = [], step = 8192;
+                        for (var i=0; i<bytes.length; i+=step)
+                          pieces.push(String.fromCharCode.apply(null, bytes.subarray(i,i+step)));
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status,
+                          url:target.toString(),data:btoa(pieces.join(""))});
+                      } catch (e) {
+                        emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                          error:String(e && e.message || "segment_decode_failed")});
+                      }
+                    };
+                    xhr.onerror = function() {
+                      emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:xhr.status || 0,
+                        error:"xhr_network_or_cors"});
+                    };
+                    xhr.ontimeout = function() {
+                      emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                        error:"xhr_timeout"});
+                    };
+                    xhr.send();
+                    return;
+                  }
+                  var response = await fetch(target.toString(), {cache:"no-store", credentials:"omit"});
+                  if (!response.ok) {
+                    emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                      url:target.toString(),error:"upstream_http_"+response.status});
+                    return;
+                  }
+                  var text = await response.text();
+                  if (text.length > 262144) throw Error("manifest_too_large");
+                  emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:response.status,
+                    url:target.toString(),body:text});
+                })().catch(function(e) {
+                  emit({stage:"proxy_resource",id:cmd.id,kind:cmd.kind,http:0,
+                    error:String(e && e.name || e || "browser_request_failed")});
+                });
+              });
+              emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
+            })();
+        """.trimIndent()
+        /** Intercept only the embedded player's JavaScript, not its auth or media API.
+         * Prepend the response probe before daddy.min.js runs while retaining the script body. */
+        private fun instrumentPlayerScript(request: WebResourceRequest, session: Session): WebResourceResponse? {
+            val address = request.url.toString()
+            val begun = android.os.SystemClock.elapsedRealtime()
+            Trace.event("RESPONSE_BRIDGE", "SCRIPT_FETCH",
+                "sid=${session.id.take(8)} target=${Trace.target(address)} mode=original_js_with_probe")
+            var connection: HttpURLConnection? = null
+            return try {
+                val active = URL(address).openConnection() as HttpURLConnection
+                connection = active
+                active.connectTimeout = 4500
+                active.readTimeout = 4500
+                active.setRequestProperty("Accept-Encoding", "identity")
+                request.requestHeaders.forEach { (name, value) ->
+                    if (!name.equals("Host", true) && !name.equals("Accept-Encoding", true) &&
+                        !name.equals("Content-Length", true) && value.isNotBlank()) {
+                        active.setRequestProperty(name, value)
+                    }
+                }
+                if (request.requestHeaders.keys.none { it.equals("Referer", true) }) {
+                    active.setRequestProperty("Referer", session.embedded)
+                }
+                if (request.requestHeaders.keys.none { it.equals("User-Agent", true) }) {
+                    active.setRequestProperty("User-Agent", session.userAgent)
+                }
+                runCatching { CookieManager.getInstance().getCookie(address) }.getOrNull()?.let {
+                    active.setRequestProperty("Cookie", it)
+                }
+                val status = active.responseCode
+                if (status != 200 || !active.url.host.equals("dembed.st", true)) {
+                    Trace.event("RESPONSE_BRIDGE", "SCRIPT_HTTP_FAIL",
+                        "sid=${session.id.take(8)} http=$status redirectedHost=${active.url.host} " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun} fallback=browser_native")
+                    return null
+                }
+                val stream = if (active.contentEncoding.equals("gzip", true)) {
+                    GZIPInputStream(active.inputStream)
+                } else active.inputStream
+                val out = ByteArrayOutputStream()
+                stream.use { input ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        if (out.size() + n > 2 * 1024 * 1024) {
+                            Trace.event("RESPONSE_BRIDGE", "SCRIPT_TOO_LARGE",
+                                "sid=${session.id.take(8)} fallback=browser_native")
+                            return null
+                        }
+                        out.write(buffer, 0, n)
+                    }
+                }
+                val original = out.toByteArray()
+                if (original.isEmpty()) {
+                    Trace.event("RESPONSE_BRIDGE", "SCRIPT_EMPTY",
+                        "sid=${session.id.take(8)} fallback=browser_native")
+                    return null
+                }
+                val probeBytes = (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8)
+                val result = ByteArray(probeBytes.size + original.size)
+                System.arraycopy(probeBytes, 0, result, 0, probeBytes.size)
+                System.arraycopy(original, 0, result, probeBytes.size, original.size)
+                Trace.event("RESPONSE_BRIDGE", "SCRIPT_INJECTED",
+                    "sid=${session.id.take(8)} originalBytes=${original.size} " +
+                        "probeBytes=${probeBytes.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun}")
+                WebResourceResponse(
+                    "application/javascript", "UTF-8",
+                    200, "OK", mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(result)
+                )
+            } catch (e: Exception) {
+                Trace.event("RESPONSE_BRIDGE", "SCRIPT_ERROR",
+                    "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun} fallback=browser_native")
+                null
+            } finally {
+                connection?.disconnect()
             }
-
-            if (!streamUrl.startsWith("http")) return null
-
-            val headers = hlsHeaders(
-                origin = igniteHost,
-                referer = "$igniteHost/"
-            )
-
-            buildValidatedLink(
-                url = streamUrl,
-                sourceName = sourceName,
-                referer = "$igniteHost/",
-                origin = igniteHost,
-                headers = headers
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private suspend fun extractPopcdnStream(
-        pageUrl: String,
-        pageOrigin: String,
-        sourceName: String
-    ): ExtractorLink? {
-        if (
-            !pageUrl.contains("freeshot", ignoreCase = true) &&
-            !pageUrl.contains("popcdn", ignoreCase = true)
-        ) {
-            return null
         }
 
-        val channelCode = Regex(
-            """(?i)embed/([^/.?]+)(?:\.php)?"""
-        ).find(pageUrl)?.groupValues?.getOrNull(1)
-            ?: try {
-                URL(pageUrl).path
-                    .substringAfterLast("/")
-                    .substringBefore(".")
-            } catch (_: Exception) {
-                ""
-            }
+        private val main = Handler(Looper.getMainLooper())
+        private val sessions = ConcurrentHashMap<String, Session>()
+        private val io = CoroutineScope(Dispatchers.IO)
+        private val attribute = Regex("""URI="([^"]+)"""")
+        private var server: ServerSocket? = null
+        @Volatile private var port = 0
 
-        if (channelCode.isBlank()) return null
+        private class Resource(val url: String, val playlist: Boolean)
+        private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
+        private class Session(val parent: String, val embedded: String) {
+            val id: String = UUID.randomUUID().toString().replace("-", "")
+            val resources = ConcurrentHashMap<String, Resource>()
+            private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
+            val manifestMutex = Mutex()
+            val failedSegments = ConcurrentHashMap<String, Long>()
+            @Volatile var segmentTransport = "client"
+            @Volatile var directAllowed = false
+            @Volatile var encryptedMedia = false
+            @Volatile var nativeSegmentCount = 0
+            @Volatile var browser: WebView? = null
+            @Volatile var url: String = ""
+            @Volatile var token: String = ""
+            @Volatile var firstPlaylist: String? = null
+            @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
+            @Volatile var userAgent = "Mozilla/5.0"
+            @Volatile var browserHeaders: Map<String, String> = emptyMap()
+            @Volatile var authHttpError: Int? = null
+            @Volatile var manifestHttpError: Int? = null
+            @Volatile var authRequestCount = 0
+            @Volatile var probeAvailable = false
+            @Volatile var probeInstalled = false
+            @Volatile var browserManifestBody: String? = null
+            @Volatile var browserManifestUrl: String = ""
+            @Volatile var browserManifestAt = 0L
+            @Volatile var browserTokenHttp = -1
+            @Volatile var browserTicketHttp = -1
+            val browserManifestReady = CompletableDeferred<Boolean>()
+            val headers: Map<String, String>
+                get() = mutableMapOf(
+                    "Origin" to EMBED_ORIGIN,
+                    "Referer" to embedded,
+                    "User-Agent" to userAgent,
+                    "Accept" to "*/*"
+                ).also { map ->
+                    browserHeaders.forEach { (key, value) ->
+                        if (key.lowercase() !in setOf("host", "content-length", "connection",
+                                "accept-encoding", "range") && value.isNotBlank()) {
+                            map.keys.firstOrNull { it.equals(key, true) }?.let { map.remove(it) }
+                            map[key] = value
+                        }
+                    }
+                    if (url.isNotBlank()) {
+                        runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
+                            ?.let {
+                                map.keys.firstOrNull { key -> key.equals("Cookie", true) }?.let { key -> map.remove(key) }
+                                map["Cookie"] = it
+                            }
+                    }
+                }
 
-        val targetUrl = "https://popcdn.day/player/$channelCode"
-
-        return try {
-            val response = app.get(
-                targetUrl,
-                headers = pageHeaders(
-                    parentUrl = pageUrl,
-                    parentOrigin = pageOrigin
-                ),
-                timeout = 5
-            )
-
-            if (!response.isSuccessful) return null
-
-            val body = response.text
-            var finalM3u8 = Regex(
-                """(?i)streamUrl\s*:\s*["']([^"']+)["']"""
-            ).find(body)?.groupValues?.getOrNull(1)
-                ?.replace("\\/", "/")
-                .orEmpty()
-
-            if (finalM3u8.isBlank()) {
-                val token = Regex(
-                    """(?i)token=([^&"']+)"""
-                ).find(body)?.groupValues?.getOrNull(1)
-
-                if (!token.isNullOrBlank()) {
-                    finalM3u8 =
-                        "https://planetary.lovecdn.ru/$channelCode/tracks-v1a1/mono.m3u8?token=$token"
+            private fun responseState(kind: String, status: Int, address: String, body: String, truncated: Boolean) {
+                val code = if (status in 200..299) "OK" else if (status == 0) "NETWORK_OR_CORS" else "HTTP_FAIL"
+                val reason = if (status in 200..299) "none" else Trace.bodyReason(body)
+                Trace.event("BROWSER_RESPONSE", code,
+                    "sid=${id.take(8)} kind=$kind http=$status target=${Trace.target(address)} " +
+                        "bodyChars=${body.length} truncated=$truncated reason=$reason")
+                when (kind) {
+                    "ticket" -> {
+                        browserTicketHttp = status
+                        Trace.event("AUTH_TICKET", code, "sid=${id.take(8)} http=$status reason=$reason")
+                    }
+                    "token" -> {
+                        browserTokenHttp = status
+                        authHttpError = status.takeIf { it !in 200..299 }
+                        Trace.event("AUTH_RESPONSE", if (status in 200..299) "BROWSER_HTTP_OK" else "BROWSER_HTTP_FAIL",
+                            "sid=${id.take(8)} http=$status chars=${body.length} " +
+                                "reason=$reason truncated=$truncated")
+                        if (status in 200..299 && !truncated) onToken(body.toByteArray(Charsets.UTF_8))
+                    }
+                    "manifest" -> {
+                        manifestHttpError = status.takeIf { it !in 200..299 }
+                        val decoded = body.trimStart().startsWith("#EXTM3U")
+                        val signed = runCatching { !Uri.parse(address).getQueryParameter("t").isNullOrBlank() }
+                            .getOrDefault(false)
+                        Trace.event("HLS_BROWSER", code,
+                            "sid=${id.take(8)} http=$status signed=$signed extm3u=$decoded " +
+                                "chars=${body.length} truncated=$truncated reason=$reason")
+                        if (status in 200..299 && !truncated && body.isNotEmpty()) {
+                            if (browserManifestBody == null || signed ||
+                                Uri.parse(browserManifestUrl).getQueryParameter("t").isNullOrBlank()) {
+                                browserManifestBody = body
+                                browserManifestUrl = address
+                                browserManifestAt = android.os.SystemClock.elapsedRealtime()
+                                if (!browserManifestReady.isCompleted) browserManifestReady.complete(true)
+                            }
+                        }
+                    }
                 }
             }
 
-            if (finalM3u8.isBlank()) return null
+            @JavascriptInterface
+            fun postMessage(raw: String) = onBrowserMessage(raw)
 
-            val origin = "https://popcdn.day"
-            val headers = hlsHeaders(
-                origin = origin,
-                referer = "$origin/"
-            )
+            fun onBrowserMessage(raw: String) {
+                if (raw.length > 6 * 1024 * 1024) {
+                    Trace.event("RESPONSE_BRIDGE", "REJECT", "sid=${id.take(8)} reason=message_over_limit bytes=${raw.length}")
+                    return
+                }
+                val message = runCatching { JSONObject(raw) }.getOrNull()
+                if (message == null) {
+                    Trace.event("RESPONSE_BRIDGE", "ERROR", "sid=${id.take(8)} reason=invalid_json")
+                    return
+                }
+                if (message.optString("origin") != EMBED_ORIGIN) {
+                    Trace.event("RESPONSE_BRIDGE", "REJECT",
+                        "sid=${id.take(8)} reason=invalid_frame_origin")
+                    return
+                }
+                val stage = message.optString("stage")
+                when (stage) {
+                    "installed" -> {
+                        probeInstalled = true
+                        Trace.event("RESPONSE_BRIDGE", "INSTALLED", "sid=${id.take(8)} type=${message.optString("kind")}")
+                    }
+                    "response" -> {
+                        val kind = message.optString("kind")
+                        if (kind !in setOf("token", "manifest", "ticket")) return
+                        val target = message.optString("url")
+                        val urlPath = runCatching { URL(target).path }.getOrDefault("")
+                        if (kind == "token" && urlPath != "/api/playlist-token" ||
+                            kind == "manifest" && !urlPath.endsWith(".m3u8", true) ||
+                            kind == "ticket" && !urlPath.startsWith("/premiumtv/")) {
+                            Trace.event("RESPONSE_BRIDGE", "REJECT",
+                                "sid=${id.take(8)} kind=$kind reason=wrong_endpoint")
+                            return
+                        }
+                        val body = message.optString("body")
+                        val status = message.optInt("http", -1)
+                        val truncated = message.optBoolean("truncated", false)
+                        val method = message.optString("method")
+                        Trace.event("RESPONSE_BRIDGE", "RECEIVED",
+                            "sid=${id.take(8)} kind=$kind method=$method http=$status " +
+                                "transport=${message.optString("responseType")} elapsedMs=${message.optLong("elapsedMs")} " +
+                                "reportedChars=${message.optInt("length")} truncated=$truncated " +
+                                "headers=${message.optString("headers").take(180)}")
+                        responseState(kind, status, target, body, truncated)
+                    }
+                    "proxy_refresh_info" -> {
+                        Trace.event("AUTH_REFRESH", if (message.optBoolean("token")) "BROWSER_OK" else "BROWSER_UNAVAILABLE",
+                            "sid=${id.take(8)} functionAvailable=${message.optBoolean("available")} tokenPresent=${message.optBoolean("token")}")
+                    }
+                    "proxy_refresh_error" -> {
+                        Trace.event("AUTH_REFRESH", "BROWSER_ERROR",
+                            "sid=${id.take(8)} reason=${message.optString("error").take(64)}")
+                    }
+                    "native_segment" -> {
+                        val count = ++nativeSegmentCount
+                        if (count <= 5) Trace.event("ORIGINAL_SEGMENT", "OBSERVED",
+                            "sid=" + this.id.take(8) + " http=" + message.optInt("http", 0) +
+                            " transport=" + message.optString("transport") +
+                            " target=" + Trace.target(message.optString("url")))
+                    }
+                    "proxy_resource" -> {
+                        val id = message.optString("id")
+                        val request = pendingResources[id] ?: return
+                        val kind = message.optString("kind")
+                        val status = message.optInt("http", 0)
+                        val body = if (kind == "manifest") message.optString("body") else null
+                        val bytes = if (kind == "segment" && status in 200..299) {
+                            runCatching { Base64.decode(message.optString("data"), Base64.DEFAULT) }
+                                .getOrNull()?.takeIf { it.isNotEmpty() }
+                        } else null
+                        val result = BrowserReply(status, message.optString("url"), body, bytes)
+                        Trace.event("PROXY_BROWSER", if (status in 200..299 && (body != null || bytes != null)) "OK" else "FAILED",
+                            "sid=${this.id.take(8)} kind=$kind http=$status text=${body?.length ?: 0} " +
+                                "bytes=${bytes?.size ?: 0} reason=${message.optString("error").take(64)}")
+                        request.complete(result)
+                    }
+                    "network_error", "read_error", "clone_error", "install_error", "js_error", "promise_error" -> {
+                        val error = message.optString("error").lowercase()
+                        val category = when {
+                            "turnstile" in error || "captcha" in error -> "turnstile"
+                            "cors" in error -> "cors"
+                            "security" in error -> "security"
+                            "fetch" in error || "network" in error -> "network"
+                            "timeout" in error -> "timeout"
+                            "invalid" in error -> "invalid"
+                            else -> "other"
+                        }
+                        Trace.event("RESPONSE_BRIDGE", "ERROR",
+                            "sid=${id.take(8)} stage=$stage kind=${message.optString("kind")} " +
+                                "category=$category errorClass=${message.optString("error").substringBefore(':').take(50)} " +
+                                "source=${Trace.target(message.optString("source"))} line=${message.optInt("line")}")
+                    }
+                }
+            }
 
-            buildValidatedLink(
-                url = finalM3u8,
-                sourceName = sourceName,
-                displayName = "Freeshot Server",
-                referer = "$origin/",
-                origin = origin,
-                headers = headers
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
+            fun onToken(response: ByteArray) {
+                val data = runCatching { JSONObject(String(response, Charsets.UTF_8)) }.getOrNull()
+                if (data == null) {
+                    Trace.event("AUTH_TOKEN", "PARSE_FAIL", "sid=${id.take(8)} bytes=${response.size} reason=invalid_json")
+                    return
+                }
+                val current = data.optString("token").ifBlank { data.optString("t") }
+                if (current.isNotBlank()) token = current
+                Trace.event("AUTH_TOKEN", if (current.isNotBlank()) "ACQUIRED" else "MISSING",
+                    "sid=" + id.take(8) + " tokenPresent=" + current.isNotBlank() + " responseBytes=" + response.size)
+            }
+
+            fun captureManifest(request: WebResourceRequest) {
+                val address = request.url.toString()
+                val t = request.url.getQueryParameter("t")
+                if (token.isNotBlank() && t.isNullOrBlank() &&
+                    Uri.parse(url).getQueryParameter("t")?.isNotBlank() == true) {
+                    Trace.event("PLAYER_URL", "PRESERVE_SIGNED", "sid=${id.take(8)} reason=ignore_late_unsigned_request")
+                    return
+                }
+                url = address
+                browserHeaders = request.requestHeaders.toMap()
+                if (!t.isNullOrBlank()) token = t
+                Trace.event("PLAYER_URL", "CAPTURED",
+                    "sid=${id.take(8)} target=${Trace.target(address)} signed=${!t.isNullOrBlank()} " +
+                        "headerNames=${browserHeaders.keys.sorted().joinToString(",")} " +
+                        "cookieStored=${runCatching { !CookieManager.getInstance().getCookie(address).isNullOrBlank() }.getOrDefault(false)} " +
+                        "authRequests=$authRequestCount authHttpError=${authHttpError ?: -1}")
+            }
+
+            suspend fun browserRequest(kind: String, address: String): BrowserReply? {
+                if (!probeInstalled || browser == null) {
+                    Trace.event("PROXY_BROWSER", "UNAVAILABLE", "sid=${id.take(8)} kind=$kind installed=$probeInstalled")
+                    return null
+                }
+                // Only forward a resource from this specific player's origin and channel directory.
+                val valid = runCatching {
+                    val source = URL(url)
+                    val target = URL(address)
+                    source.protocol == "https" && target.protocol == "https" &&
+                        source.host.equals(target.host, true) &&
+                        target.path.startsWith(source.path.substringBeforeLast('/') + "/")
+                }.getOrDefault(false)
+                if (!valid) {
+                    Trace.event("PROXY_BROWSER", "REJECT", "sid=${id.take(8)} kind=$kind reason=outside_channel")
+                    return null
+                }
+                val requestId = UUID.randomUUID().toString().replace("-", "")
+                val result = CompletableDeferred<BrowserReply?>()
+                pendingResources[requestId] = result
+                val command = JSONObject().put("daddyProxy", 1).put("id", requestId)
+                    .put("kind", kind).put("url", address).toString()
+                val script = """(function(){
+                    var cmd=$command, n=0, frames=document.querySelectorAll('iframe');
+                    for(var i=0;i<frames.length;i++) {
+                        try {
+                            if(new URL(frames[i].src).origin==='https://dembed.st') {
+                                frames[i].contentWindow.postMessage(cmd,'https://dembed.st'); n++;
+                            }
+                        }catch(e){}
+                    }
+                    return n;
+                })();""".trimIndent()
+                main.post {
+                    val view = browser
+                    if (view == null) result.complete(null)
+                    else runCatching {
+                        view.evaluateJavascript(script) { response ->
+                            if (response?.trim()?.toIntOrNull() == 0) {
+                                Trace.event("PROXY_BROWSER", "NO_FRAME", "sid=${id.take(8)} kind=$kind")
+                                result.complete(null)
+                            }
+                        }
+                    }.onFailure {
+                        Trace.event("PROXY_BROWSER", "DISPATCH_ERROR",
+                            "sid=${id.take(8)} kind=$kind reason=${it.javaClass.simpleName}")
+                        result.complete(null)
+                    }
+                }
+                return try {
+                    withTimeoutOrNull(if (kind == "segment") 5500L else 7000L) { result.await() }.also {
+                        if (it == null) Trace.event("PROXY_BROWSER", "TIMEOUT",
+                            "sid=${id.take(8)} kind=$kind target=${Trace.target(address)}")
+                    }
+                } finally {
+                    pendingResources.remove(requestId)
+                }
+            }
+
+            fun signed(address: String): String {
+                if (token.isBlank() || !address.substringBefore('?').endsWith(".m3u8", true)) return address
+                val input = Uri.parse(address)
+                val out = input.buildUpon().clearQuery()
+                input.queryParameterNames.filterNot { it == "t" || it == "_" }.forEach { name ->
+                    input.getQueryParameters(name).forEach { out.appendQueryParameter(name, it) }
+                }
+                out.appendQueryParameter("t", token)
+                out.appendQueryParameter("_", System.currentTimeMillis().toString())
+                return out.build().toString()
+            }
+
+            fun reference(target: String, manifest: Boolean): String {
+                val key = UUID.nameUUIDFromBytes(target.toByteArray(Charsets.UTF_8)).toString().replace("-", "")
+                resources.putIfAbsent(key, Resource(target, manifest))
+                return "http://127.0.0.1:$port/$id/$key"
+            }
+
+            fun close() {
+                pendingResources.values.forEach { it.complete(null) }
+                pendingResources.clear()
+                val player = browser
+                browser = null
+                main.post { runCatching { player?.stopLoading(); player?.destroy() } }
+            }
+        }
+
+        suspend fun extract(embedded: String, parent: String, name: String): ExtractorLink? {
+            if (!runCatching {
+                    val uri = Uri.parse(embedded)
+                    uri.scheme == "https" && uri.host == "dembed.st" &&
+                        uri.path?.matches(Regex("""^/premiumtv/[a-z0-9_-]+\.php$""", RegexOption.IGNORE_CASE)) == true
+                }.getOrDefault(false)) {
+                Trace.event("DEMBED", "SKIP", "target=${Trace.target(embedded)} reason=invalid_player_endpoint")
+                return null
+            }
+            val session = Session(parent, embedded)
+            val startMs = android.os.SystemClock.elapsedRealtime()
+            Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
+            val captured = withTimeoutOrNull(20000L) {
+                suspendCancellableCoroutine<String?> { continuation ->
+                    var web: WebView? = null
+                    val timeout = Runnable {
+                        Trace.event("PLAYER_URL", "TIMEOUT", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                        if (continuation.isActive) continuation.resume(null)
+                    }
+                    continuation.invokeOnCancellation {
+                        main.post {
+                            main.removeCallbacks(timeout)
+                            runCatching { web?.destroy() }
+                        }
+                    }
+                    main.post {
+                        try {
+                            val context = (CloudStreamApp.context ?: app) as android.content.Context
+                            web = WebView(context)
+                            val view = web!!
+                            Trace.event("AUTH_WEBVIEW", "CREATED", "sid=${session.id.take(8)}")
+                            session.browser = view
+                            session.userAgent = view.settings.userAgentString
+                            view.settings.javaScriptEnabled = true
+                            view.settings.domStorageEnabled = true
+                            view.settings.mediaPlaybackRequiresUserGesture = false
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+                            // Android framework bridge: available to isolated CloudStream plugins
+                            // without depending on AndroidX WebKit classes at runtime.
+                            session.probeAvailable = true
+                            view.addJavascriptInterface(session, "DaddyResponseTrace")
+                            Trace.event("RESPONSE_BRIDGE", "READY",
+                                "sid=${session.id.take(8)} mode=framework_js_interface " +
+                                    "injection=player_js_prepend")
+                            view.webChromeClient = object : WebChromeClient() {
+                                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                                    val raw = message?.message().orEmpty()
+                                    if (message?.message() != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                                        val kind = when {
+                                            raw.contains("turnstile", true) || raw.contains("captcha", true) -> "challenge"
+                                            raw.contains("ticket", true) -> "ticket"
+                                            raw.contains("token", true) -> "token"
+                                            raw.contains("cors", true) -> "cors"
+                                            raw.contains("network", true) -> "network"
+                                            else -> "script_error"
+                                        }
+                                        Trace.event("AUTH_JS", "ERROR",
+                                            "sid=${session.id.take(8)} kind=$kind source=${Trace.target(message.sourceId())} line=${message.lineNumber()}")
+                                    }
+                                    return false
+                                }
+                            }
+                            view.webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
+                                        "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())} " +
+                                        "probeAvailable=${session.probeAvailable} installed=${session.probeInstalled}")
+                                }
+
+                                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                    if (request?.isForMainFrame == true || request?.url?.path?.contains("/premium") == true) {
+                                        Trace.event("AUTH_WEBVIEW", "LOAD_ERROR",
+                                            "sid=${session.id.take(8)} target=${Trace.target(request?.url?.toString().orEmpty())} code=${error?.errorCode} " +
+                                                "description=${error?.description?.toString()?.substringBefore('?')?.take(90)}")
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?
+                                ) {
+                                    val target = request?.url?.toString().orEmpty()
+                                    val path = request?.url?.path.orEmpty()
+                                    val status = errorResponse?.statusCode ?: -1
+                                    val headers = errorResponse?.responseHeaders.orEmpty()
+                                    if (path == "/api/playlist-token") {
+                                        session.authHttpError = status
+                                        Trace.event("AUTH_RESPONSE", "BROWSER_HTTP_FAIL",
+                                            "sid=${session.id.take(8)} http=$status reason=${errorResponse?.reasonPhrase?.take(64)} " +
+                                                "target=${Trace.target(target)} method=${request?.method} " +
+                                                "headerNames=${headers.keys.sorted().joinToString(",")} " +
+                                                "cfMitigation=${headers.keys.any { it.equals("cf-mitigated", true) }} " +
+                                                "wwwAuth=${headers.keys.any { it.equals("www-authenticate", true) }} " +
+                                                "retryAfter=${headers.keys.any { it.equals("retry-after", true) }} " +
+                                                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                                    } else if (path.endsWith(".m3u8", true)) {
+                                        session.manifestHttpError = status
+                                        Trace.event("HLS_BROWSER", "HTTP_FAIL",
+                                            "sid=${session.id.take(8)} http=$status target=${Trace.target(target)} " +
+                                                "signed=${request?.url?.getQueryParameter("t")?.isNotBlank() == true} " +
+                                                "headerNames=${headers.keys.sorted().joinToString(",")}")
+                                    } else if (request?.isForMainFrame == true || path.contains("/premium")) {
+                                        Trace.event("AUTH_WEBVIEW", "HTTP_ERROR",
+                                            "sid=${session.id.take(8)} target=${Trace.target(target)} http=$status " +
+                                                "reason=${errorResponse?.reasonPhrase?.take(64)}")
+                                    }
+                                    if (request?.url?.host == "dembed.st" &&
+                                        path == Uri.parse(embedded).path && status in 400..599) {
+                                        Trace.event("PLAYER_URL", "REJECTED",
+                                            "sid=${session.id.take(8)} reason=embedded_page_http_$status")
+                                        main.post {
+                                            if (continuation.isActive) {
+                                                main.removeCallbacks(timeout)
+                                                continuation.resume(null)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                override fun shouldInterceptRequest(
+                                    view: WebView?, request: WebResourceRequest?
+                                ): WebResourceResponse? {
+                                    if (request == null) return null
+                                    val uri = request.url
+                                    val address = uri.toString()
+                                    if (request.method.equals("GET", true) &&
+                                        uri.scheme == "https" && uri.host.equals("dembed.st", true) &&
+                                        uri.path?.equals("/premiumtv/daddy.min.js", true) == true) {
+                                        return instrumentPlayerScript(request, session)
+                                    }
+                                    if (uri.scheme == "https" && uri.path == "/api/playlist-token" &&
+                                        (uri.getQueryParameter("slug")?.startsWith("premium") == true ||
+                                            uri.getQueryParameter("channel")?.startsWith("premium") == true ||
+                                            uri.getQueryParameter("tk") != null)
+                                    ) {
+                                        session.authHttpError = null
+                                        session.authRequestCount++
+                                        Trace.event("AUTH_REQUEST", "BROWSER_NATIVE",
+                                            "sid=${session.id.take(8)} method=${request.method} " +
+                                                "target=${Trace.target(address)} hasTk=${uri.getQueryParameter("tk")?.isNotBlank() == true} " +
+                                                "hasTicket=${uri.getQueryParameter("ticket")?.isNotBlank() == true} " +
+                                                "headerNames=${request.requestHeaders.keys.sorted().joinToString(",")} " +
+                                                "cookieStored=${runCatching { !CookieManager.getInstance().getCookie(address).isNullOrBlank() }.getOrDefault(false)} " +
+                                                "note=no_replay_browser_handles_original_request")
+                                        return null
+                                    }
+                                    if (uri.scheme == "https" && uri.path?.endsWith(".m3u8", true) == true &&
+                                        uri.path?.contains("/premium") == true &&
+                                        uri.path?.substringAfterLast("/") == "index.m3u8"
+                                    ) {
+                                        session.captureManifest(request)
+                                        val signed = !uri.getQueryParameter("t").isNullOrBlank()
+                                        // Allow the browser's own token exchange to finish before validating HLS.
+                                        main.postDelayed({
+                                            if (continuation.isActive && session.url.isNotBlank()) {
+                                                main.removeCallbacks(timeout)
+                                                continuation.resume(session.url)
+                                            }
+                                        }, if (signed) 100L else 2400L)
+                                    }
+                                    return null
+                                }
+                            }
+                            main.postDelayed(timeout, 19000L)
+                            val url = if (parent.startsWith("https://") && !parent.contains("dembed.st")) parent else ""
+                            if (url.isNotBlank()) {
+                                Trace.event("AUTH_WEBVIEW", "LOAD_PARENT", "sid=${session.id.take(8)} target=${Trace.target(url)}")
+                                view.loadUrl(url)
+                            } else {
+                                // The player explicitly requires an iframe (it rejects top-level navigation).
+                                val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
+                                val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
+                                Trace.event("AUTH_WEBVIEW", "LOAD_EMBED_IFRAME", "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
+                                view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
+                            }
+                        } catch (e: Exception) {
+                            Trace.event("AUTH_WEBVIEW", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
+                            main.removeCallbacks(timeout)
+                            if (continuation.isActive) continuation.resume(null)
+                        }
+                    }
+                }
+            }
+            if (captured.isNullOrBlank()) {
+                Trace.event("PLAYER_URL", "NOT_FOUND", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs} reason=no_manifest_request")
+                session.close()
+                return null
+            }
+            if (session.probeAvailable) {
+                val capturedByBrowser = withTimeoutOrNull(if (session.probeInstalled) 6500L else 3000L) {
+                    session.browserManifestReady.await()
+                } == true
+                Trace.event("RESPONSE_BRIDGE",
+                    if (capturedByBrowser) "MANIFEST_CAPTURED" else "MANIFEST_UNAVAILABLE",
+                    "sid=${session.id.take(8)} installed=${session.probeInstalled} " +
+                        "browserTokenHttp=${session.browserTokenHttp} ticketHttp=${session.browserTicketHttp} " +
+                        "browserManifestHttp=${session.manifestHttpError ?: -1} " +
+                        "reason=${if (capturedByBrowser) "browser_response_body_ready" else if (!session.probeInstalled) "probe_not_installed" else "no_successful_readable_manifest"}")
+            } else {
+                Trace.event("RESPONSE_BRIDGE", "SKIPPED",
+                    "sid=${session.id.take(8)} reason=document_start_or_web_message_not_available")
+            }
+            val actual = session.browserManifestUrl.ifBlank { session.url.ifBlank { captured } }
+            val signed = !Uri.parse(actual).getQueryParameter("t").isNullOrBlank()
+            Trace.event("PLAYER_URL", "FOUND",
+                "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
+                    "authRequests=${session.authRequestCount} authHttpError=${session.authHttpError ?: -1} " +
+                    "browserHlsError=${session.manifestHttpError ?: -1} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+            if (session.authHttpError == 403 && !signed) {
+                Trace.event("AUTH_DIAG", "BLOCKED",
+                    "sid=${session.id.take(8)} reason=native_browser_token_403_no_signed_playlist " +
+                        "browserManifestHttp=${session.manifestHttpError ?: -1} " +
+                        "note=server_rejected_original_browser_request_not_replay")
+                session.close()
+                return null
+            }
+            if (!signed) {
+                Trace.event("AUTH_DIAG", "UNCONFIRMED",
+                    "sid=${session.id.take(8)} reason=no_signed_playlist_observed " +
+                        "authRequests=${session.authRequestCount} authHttpError=${session.authHttpError ?: -1} " +
+                        "browserManifestHttp=${session.manifestHttpError ?: -1}")
+            }
+            return try {
+                val requestHeaders = session.headers
+                val browserBody = session.browserManifestBody
+                val response = if (browserBody == null) {
+                    Trace.event("HLS_FETCH", "CLIENT_REQUEST",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
+                            "headerNames=${requestHeaders.keys.sorted().joinToString(",")} " +
+                            "cookiePresent=${requestHeaders.keys.any { it.equals("cookie", true) }}")
+                    app.get(actual, headers = requestHeaders, timeout = 5)
+                } else null
+                if (response != null) {
+                    Trace.event("HLS_FETCH", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} http=${response.code} " +
+                            "reason=${if (response.isSuccessful) "none" else Trace.bodyReason(response.text)} " +
+                            "browserHlsHttpError=${session.manifestHttpError ?: -1} " +
+                            "browserAuthHttpError=${session.authHttpError ?: -1} browserTokenHttp=${session.browserTokenHttp} " +
+                            "headerNames=${response.headers.names().sorted().joinToString(",")} " +
+                            "contentType=${response.headers["Content-Type"].orEmpty().substringBefore(';')}")
+                } else {
+                    Trace.event("HLS_FETCH", "BROWSER_REUSED",
+                        "sid=${session.id.take(8)} target=${Trace.target(actual)} " +
+                            "chars=${browserBody?.length ?: 0} reason=original_webview_http_200_no_replay")
+                }
+                val body = browserBody ?: response?.takeIf { it.isSuccessful }?.text
+                if (body == null) {
+                    Trace.event("HLS_DECODE", "NOT_REACHED",
+                        "sid=${session.id.take(8)} reason=manifest_http_failed " +
+                            "browserStatus=${session.manifestHttpError ?: -1} clientStatus=${response?.code ?: -1}")
+                    session.close()
+                    null
+                } else {
+                    val playlist = decodePlaylist(body)
+                    if (playlist == null || !playlist.trimStart().startsWith("#EXTM3U")) {
+                        Trace.event("HLS_DECODE", "FAILED", "sid=${session.id.take(8)} reason=invalid_playlist")
+                        session.close()
+                        null
+                    } else {
+                        Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!body.trimStart().startsWith("#EXTM3U")}")
+                        if (!probePlayable(session, playlist, actual)) {
+                            session.close()
+                            null
+                        } else if (!signed && session.directAllowed) {
+                            Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                            // Probe a media segment before bypassing the wrapper decoder.
+                            session.close()
+                            newExtractorLink(name, name, actual, ExtractorLinkType.M3U8) {
+                                referer = "$EMBED_ORIGIN/"
+                                quality = Qualities.Unknown.value
+                                headers = session.headers
+                            }
+                        } else {
+                            val openPort = startServer()
+                            if (openPort == 0) {
+                                Trace.event("MEDIA3_LINK", "FAILED", "sid=${session.id.take(8)} reason=proxy_bind_failed")
+                                session.close()
+                                null
+                            } else {
+                                Trace.event("MEDIA3_LINK", "PROXY", "sid=${session.id.take(8)} signed=$signed elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                                session.firstPlaylist = playlist
+                                session.url = actual
+                                sessions[session.id] = session
+                                val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
+                                newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
+                                    referer = "$EMBED_ORIGIN/"
+                                    quality = Qualities.Unknown.value
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (cancel: CancellationException) {
+                session.close()
+                throw cancel
+            } catch (e: Exception) {
+                Trace.event("DEMBED", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
+                session.close()
+                null
+            }
+        }
+
+        /** A playlist alone is not a playable link: verify newest media segment bytes first. */
+        private suspend fun probePlayable(session: Session, playlist: String, manifestUrl: String): Boolean {
+            session.encryptedMedia = playlist.contains("#EXT-X-KEY", true)
+            val targets = playlist.lineSequence().map { it.trim() }
+                .filter { it.isNotBlank() && !it.startsWith("#") }
+                .mapNotNull { absolute(manifestUrl, it) }
+                .filterNot { URL(it).path.endsWith(".m3u8", true) }
+                .toList().takeLast(3).asReversed()
+            if (targets.isEmpty()) {
+                Trace.event("SEGMENT_PREFLIGHT", "FAILED", "sid=" + session.id.take(8) + " reason=no_media_entries")
+                return false
+            }
+            for ((index, target) in targets.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                val client = try {
+                    app.get(target, headers = session.headers + ("Range" to "bytes=0-575"), timeout = 4)
+                } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                val prefix = ByteArray(576)
+                val n = try { client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { it.read(prefix) } ?: 0 } catch (_: Exception) { 0 }
+                if (client?.isSuccessful == true && validMediaPrefix(prefix, n, playlist)) {
+                    session.segmentTransport = "client"; session.directAllowed = true
+                    Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=client entry=" + index + " http=" + client.code + " bytes=" + n)
+                    return true
+                }
+                Trace.event("SEGMENT_PREFLIGHT", "CLIENT_FAIL", "sid=" + session.id.take(8) + " entry=" + index + " http=" + (client?.code ?: -1) + " bytes=" + n)
+                val browser = session.browserRequest("segment", target)
+                val chunk = browser?.bytes
+                if (browser?.status in 200..299 && chunk != null && validMediaPrefix(chunk, chunk.size, playlist)) {
+                    session.segmentTransport = "browser"
+                    Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=browser entry=" + index + " bytes=" + chunk.size)
+                    return true
+                }
+                Trace.event("SEGMENT_PREFLIGHT", "BROWSER_FAIL", "sid=" + session.id.take(8) + " entry=" + index +
+                    " http=" + (browser?.status ?: -1) + " bytes=" + (chunk?.size ?: 0) + " target=" + Trace.target(target))
+            }
+            Trace.event("SEGMENT_PREFLIGHT", "FAILED", "sid=" + session.id.take(8) + " reason=all_candidates_failed count=" + targets.size)
+            return false
+        }
+        @Synchronized private fun startServer(): Int {
+            if (server?.isClosed == false) {
+                Trace.event("PROXY", "REUSE", "port=$port")
+                return port
+            }
+            return try {
+                val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+                socket.soTimeout = 15000
+                server = socket
+                port = socket.localPort
+                Trace.event("PROXY", "LISTEN", "binding=127.0.0.1 port=$port")
+                io.launch {
+                    while (!socket.isClosed) {
+                        try {
+                            val client = socket.accept()
+                            launch { serve(client) }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) {
+                        }
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        sessions.forEach { (key, session) ->
+                            if (now - session.lastUse > 15 * 60 * 1000L && sessions.remove(key, session)) {
+                                session.close()
+                            }
+                        }
+                        if (sessions.isEmpty()) {
+                            runCatching { socket.close() }
+                            synchronized(DaddyLiveDembed) {
+                                if (server === socket) { server = null; port = 0 }
+                            }
+                        }
+                    }
+                }
+                port
+            } catch (e: Exception) {
+                Trace.event("PROXY", "BIND_FAIL", "reason=${e.javaClass.simpleName}")
+                0
+            }
+        }
+
+        private fun absolute(base: String, relative: String): String? = runCatching {
+            URL(URL(base), relative).toString().takeIf { target ->
+                val url = URL(target)
+                url.protocol == "https" && url.host.isNotBlank() &&
+                    url.host != "localhost" && url.host != "127.0.0.1" &&
+                    !url.host.endsWith(".local")
+            }
+        }.getOrNull()
+
+        private fun rewrite(playlist: String, source: String, session: Session): String =
+            playlist.lineSequence().joinToString("\n") { line ->
+                if (line.startsWith("#")) {
+                    attribute.replace(line) { match ->
+                        val target = absolute(source, match.groupValues[1])
+                        if (target == null) match.value
+                        else "URI=\"${session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))}\""
+                    }
+                } else if (line.isBlank()) line else {
+                    val target = absolute(source, line.trim())
+                    if (target == null) line
+                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))
+                }
+            } + "\n"
+        private fun decodePlaylist(body: String): String? =
+            body.takeIf { it.trimStart().startsWith("#EXTM3U") }
+
+        private suspend fun loadManifest(
+            session: Session, resource: Resource?
+        ): Pair<String, String>? {
+            session.manifestMutex.lock()
+            try {
+                val source = resource?.url ?: session.url
+                val now = android.os.SystemClock.elapsedRealtime()
+                val cached = if (resource == null) session.browserManifestBody else null
+                val cacheAge = now - session.browserManifestAt
+                // Reuse a recent original-browser live playlist instead of requesting it again.
+                if (cached != null && cacheAge in 0..1500L) {
+                    decodePlaylist(cached)?.let {
+                        Trace.event("HLS_REFRESH", "BROWSER_CACHE",
+                            "sid=${session.id.take(8)} ageMs=$cacheAge chars=${it.length}")
+                        return session.browserManifestUrl to it
+                    }
+                }
+                val browser = session.browserRequest("manifest", session.signed(source))
+                if (browser != null && browser.status in 200..299 && !browser.body.isNullOrBlank()) {
+                    val decoded = decodePlaylist(browser.body)
+                    if (decoded != null) {
+                        session.browserManifestBody = browser.body
+                        session.browserManifestUrl = browser.address
+                        session.browserManifestAt = android.os.SystemClock.elapsedRealtime()
+                        session.url = browser.address
+                        Trace.event("HLS_REFRESH", "BROWSER_OK",
+                            "sid=${session.id.take(8)} chars=${decoded.length}")
+                        return browser.address to decoded
+                    }
+                    Trace.event("HLS_REFRESH", "BROWSER_INVALID",
+                        "sid=${session.id.take(8)} reason=playlist_decode_failed")
+                }
+                // A failed browser request must not trigger repeated 403s through a different
+                // HTTP client. Use the last good live manifest briefly while the player recovers.
+                if (cached != null && cacheAge in 0..8000L) {
+                    decodePlaylist(cached)?.let {
+                        Trace.event("HLS_REFRESH", "LAST_GOOD",
+                            "sid=${session.id.take(8)} ageMs=$cacheAge browserHttp=${browser?.status ?: -1}")
+                        return session.browserManifestUrl to it
+                    }
+                }
+                if (browser != null && browser.status in 400..599) {
+                    Trace.event("HLS_REFRESH", "BROWSER_HTTP_FAIL",
+                        "sid=${session.id.take(8)} http=${browser.status} reason=browser_refused")
+                    return null
+                }
+                // Only fallback when the browser bridge is unavailable (e.g. unsupported frame).
+                val target = session.signed(source)
+                val response = runCatching { app.get(target, headers = session.headers, timeout = 5) }.getOrNull()
+                if (response?.isSuccessful == true) {
+                    val decoded = decodePlaylist(response.text)
+                    if (decoded != null) {
+                        Trace.event("HLS_REFRESH", "CLIENT_OK",
+                            "sid=${session.id.take(8)} chars=${decoded.length} fallback=bridge_unavailable")
+                        return target to decoded
+                    }
+                }
+                Trace.event("HLS_REFRESH", "FAILED",
+                    "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
+                        "clientHttp=${response?.code ?: -1} reason=${if (response == null) "client_exception" else if (!response.isSuccessful) Trace.bodyReason(response.text) else "invalid_manifest"}")
+                return null
+            } finally {
+                session.manifestMutex.unlock()
+            }
+        }
+
+        private suspend fun serve(client: Socket) {
+            try {
+                client.use { socket ->
+                    socket.soTimeout = 12000
+                    val request = BufferedReader(InputStreamReader(socket.getInputStream())).readLine().orEmpty()
+                    val fields = request.split(' ')
+                    val path = fields.getOrNull(1)?.substringBefore('?').orEmpty()
+                    val parts = path.trimStart('/').split('/')
+                    val session = sessions[parts.firstOrNull().orEmpty()]
+                    var data: ByteArray? = null
+                    var type = "application/octet-stream"
+                    if (fields.firstOrNull() == "GET" && session != null && parts.size == 2) {
+                        val start = android.os.SystemClock.elapsedRealtime()
+                        session.lastUse = android.os.SystemClock.elapsedRealtime()
+                        val resource = session.resources[parts[1]]
+                        when {
+                            parts[1] == "index.m3u8" || resource?.playlist == true -> {
+                                val first = if (resource == null) session.firstPlaylist else null
+                                val original = if (resource == null) session.url else resource.url
+                                val manifest = if (first != null) {
+                                    session.firstPlaylist = null
+                                    original to first
+                                } else loadManifest(session, resource)
+                                if (manifest != null) {
+                                    data = rewrite(manifest.second, manifest.first, session).toByteArray()
+                                    type = "application/vnd.apple.mpegurl"
+                                }
+                                Trace.event("PROXY_PLAYLIST", if (data != null) "OK" else "FAILED",
+                                    "sid=${session.id.take(8)} chars=${data?.size ?: 0} reason=${if (data == null) "manifest_unavailable" else "rewritten"}")
+
+                            }
+                            resource != null -> {
+                                val retryAfter = session.failedSegments[resource.url] ?: 0L
+                                if (start < retryAfter) {
+                                    Trace.event("PROXY_SEGMENT", "SKIP_REPEATED_FAILURE",
+                                        "sid=${session.id.take(8)} remainingMs=${retryAfter-start}")
+                                } else {
+                                    var browser = if (session.segmentTransport == "browser")
+                                        session.browserRequest("segment", resource.url) else null
+                                    var bytes = browser?.takeIf { it.status in 200..299 }?.bytes
+                                    var clientHttp = -1
+                                    if (bytes == null) {
+                                        val response = runCatching {
+                                            app.get(resource.url, headers = session.headers, timeout = 8)
+                                        }.getOrNull()
+                                        clientHttp = response?.code ?: -1
+                                        if (response?.isSuccessful == true) bytes = response.body.bytes()
+                                    }
+                                    if (bytes == null && browser == null) {
+                                        browser = session.browserRequest("segment", resource.url)
+                                        bytes = browser?.takeIf { it.status in 200..299 }?.bytes
+                                    }
+                                    if (bytes != null) {
+                                        data = bytes.takeIf { validMediaPrefix(it, it.size, if (session.encryptedMedia) "#EXT-X-KEY" else "") }
+                                        type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
+                                            else "application/octet-stream"
+                                        Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "DECODE_FAIL",
+                                            "sid=${session.id.take(8)} source=${if (browser?.bytes != null) "browser" else "client"} " +
+                                                "in=${bytes.size} out=${data?.size ?: 0} type=$type " +
+                                                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                    } else {
+                                        val http = clientHttp.takeIf { it in 400..599 }
+                                            ?: browser?.status?.takeIf { it != 0 } ?: clientHttp
+                                        if (data == null) {
+                                            if (http in 400..599) {
+                                                if (session.failedSegments.size > 32) session.failedSegments.clear()
+                                                session.failedSegments[resource.url] = start + 10000L
+                                            }
+                                            Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
+                                                "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
+                                                    "clientHttp=$clientHttp elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val status = if (data == null) "502 Bad Gateway" else "200 OK"
+                    if (data == null) Trace.event("PROXY", "NO_DATA", "request=${fields.firstOrNull()} sessionPresent=${session != null} parts=${parts.size}")
+                    val payload = data ?: ByteArray(0)
+                    val header = "HTTP/1.1 $status\r\nContent-Type: $type\r\n" +
+                        "Connection: close\r\nCache-Control: no-store\r\nContent-Length: ${payload.size}\r\n\r\n"
+                    socket.getOutputStream().apply {
+                        write(header.toByteArray(StandardCharsets.US_ASCII))
+                        write(payload)
+                        flush()
+                    }
+                }
+            } catch (e: Exception) {
+                Trace.event("PROXY", "ERROR", "reason=${e.javaClass.simpleName}")
+                runCatching { client.close() }
+            }
         }
     }
+
+}
+
+private fun validMediaPrefix(bytes: ByteArray, length: Int, manifest: String): Boolean {
+    if (length < 8) return false
+    val prefix = String(bytes, 0, minOf(length, 32), Charsets.US_ASCII).trimStart().lowercase()
+    if (prefix.startsWith("<") || prefix.startsWith("{") || prefix.startsWith("#extm3u")) return false
+    if (length > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte()) return true
+    if (String(bytes, 4, 4, Charsets.US_ASCII) in setOf("ftyp", "styp", "moof", "moov")) return true
+    return manifest.contains("#EXT-X-KEY", true) && length >= 16
 }
