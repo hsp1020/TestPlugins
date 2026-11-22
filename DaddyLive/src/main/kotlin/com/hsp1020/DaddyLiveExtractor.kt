@@ -1964,10 +1964,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                             session.userAgent = view.settings.userAgentString
                             view.settings.javaScriptEnabled = true
                             view.settings.domStorageEnabled = true
-                            // An unattached authentication WebView never renders images.
-                            // Avoid image fetch/decode and competing WebView renderer work.
-                            view.settings.loadsImagesAutomatically = false
-                            view.settings.blockNetworkImage = true
                             view.settings.mediaPlaybackRequiresUserGesture = false
                             CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
                             // Android framework bridge: available to isolated CloudStream plugins
