@@ -65,6 +65,7 @@ class DaddyLiveExtractor : ExtractorApi() {
     companion object {
         internal fun releaseSessionsOnPlayerExit(reason: String) =
             DaddyLiveDembed.releaseAllSessions(reason)
+        internal fun onPlayerCreated() = DaddyLiveDembed.playerEntered()
     }
 
     private object UrlKey {
@@ -1113,6 +1114,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         @Volatile private var activeSessionId: String? = null
         @Volatile private var sessionEpoch = 0L
         @Volatile private var selectedEpisode: String? = null
+        @Volatile private var cachedRecoveryAllowed = true
+
+        fun playerEntered() {
+            synchronized(selectionLock) { cachedRecoveryAllowed = true }
+        }
 
         fun selectEpisode(key: String): Long = synchronized(selectionLock) {
             if (selectedEpisode != key) {
@@ -1172,6 +1178,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (!browserManifestReady.isCompleted) browserManifestReady.complete(false)
             }
             @Volatile var prefetchedPlayerScript: PrefetchedPlayerScript? = null
+            @Volatile private var closed = false
+            fun attachBrowser(view: WebView): Boolean = synchronized(this) {
+                if (closed) false else {
+                    browser = view
+                    true
+                }
+            }
+            fun isClosed(): Boolean = closed
             val resources = ConcurrentHashMap<String, Resource>()
             private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
             val manifestMutex = Mutex()
@@ -1500,13 +1514,21 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             fun close() {
+                val player = synchronized(this) {
+                    if (closed) return
+                    closed = true
+                    val view = browser
+                    browser = null
+                    prefetchedPlayerScript = null
+                    view
+                }
                 DaddyLiveDembed.pendingSessions.remove(id, this)
                 pendingResources.values.forEach { it.complete(null) }
                 pendingResources.clear()
-                val player = browser
-                browser = null
-                prefetchedPlayerScript = null
-                main.post { runCatching { player?.stopLoading(); player?.destroy() } }
+                main.post {
+                    runCatching { player?.stopLoading() }
+                    runCatching { player?.destroy() }
+                }
             }
         }
 
@@ -1560,18 +1582,15 @@ class DaddyLiveExtractor : ExtractorApi() {
             val initialEpoch = sessionEpoch
             val session = Session(parent, embedded, previousId ?: UUID.randomUUID().toString().replace("-", ""))
             pendingSessions[session.id] = session
+            try {
             val captured = withTimeoutOrNull(20000L) {
                 suspendCancellableCoroutine<String?> { continuation ->
-                    var web: WebView? = null
                     val timeout = Runnable {
                         if (continuation.isActive) continuation.resume(null)
                     }
                     continuation.invokeOnCancellation {
                         session.close()
-                        main.post {
-                            main.removeCallbacks(timeout)
-                            runCatching { web?.destroy() }
-                        }
+                        main.post { main.removeCallbacks(timeout) }
                     }
                     main.post {
                         if (!continuation.isActive || initialEpoch != sessionEpoch) {
@@ -1580,10 +1599,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                         }
                         try {
                             val context = (CloudStreamApp.context ?: app) as android.content.Context
-                            web = WebView(context)
-                            val view = web!!
-                            session.browser = view
-                            if (initialEpoch != sessionEpoch) {
+                            val view = WebView(context)
+                            if (!session.attachBrowser(view)) {
+                                runCatching { view.destroy() }
+                                if (continuation.isActive) continuation.resume(null)
+                                return@post
+                            }
+                            if (initialEpoch != sessionEpoch || session.isClosed()) {
                                 session.close()
                                 if (continuation.isActive) continuation.resume(null)
                                 return@post
@@ -1818,6 +1840,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 session.close()
                 null
             }
+            } finally {
+                if (pendingSessions.remove(session.id, session)) session.close()
+            }
         }
 
         /** Verify actual media bytes before publishing a playable HLS link. */
@@ -1917,9 +1942,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         // A CloudStream source list can outlive its browser authorization and WebView.
         // Rebuild under its original loopback id so a cached URL remains reachable.
         private suspend fun recoverSession(id: String): Session? {
+            if (!cachedRecoveryAllowed) return null
             val recipe = sessionRecipes[id] ?: return null
             revivalMutex.lock()
             return try {
+                if (!cachedRecoveryAllowed) return null
                 sessions[id] ?: run {
                     if (extractDistinct(recipe.embedded, recipe.parent, recipe.name, id) == null)
                         null
@@ -1934,6 +1961,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             synchronized(selectionLock) {
                 activeSessionId = null
                 sessionEpoch++
+                if (reason == "player_exit" || reason == "plugin_unload")
+                    cachedRecoveryAllowed = false
                 if (reason == "plugin_unload") selectedEpisode = null
                 pendingSessions.values.forEach { it.close() }
                 sessions.forEach { (id, session) ->
@@ -2386,7 +2415,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     val id = parts.firstOrNull().orEmpty()
                     val root = fields.firstOrNull() == "GET" &&
                         parts.size == 2 && parts[1] == "index.m3u8"
-                    val direct = directSessions[id] ?: if (root) directRecipes[id]?.let {
+                    val direct = directSessions[id] ?: if (root && cachedRecoveryAllowed) directRecipes[id]?.let {
                         DirectSession(it.url, it.headers, id).also { session ->
                             directSessions.putIfAbsent(id, session)
                         }
@@ -2406,7 +2435,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                         serveDirect(socket, direct, parts[1], range)
                         return@use
                     }
-                    if (root && (sessions.containsKey(id) || sessionRecipes.containsKey(id)))
+                    if (root && (sessions.containsKey(id) ||
+                            (cachedRecoveryAllowed && sessionRecipes.containsKey(id))))
                         sourceActivated(id)
                     val session = sessions[id] ?: if (root) recoverSession(id) else null
                     var data: ByteArray? = null

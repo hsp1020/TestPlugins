@@ -68,6 +68,10 @@ private class PlayerExitCleanup(private val application: Application) :
         if ((host !is MainActivity && host !is DownloadedPlayerActivity) ||
             hosts.containsKey(host)) return
         val callback = object : FragmentManager.FragmentLifecycleCallbacks() {
+            override fun onFragmentCreated(fm: FragmentManager, fragment: Fragment, savedInstanceState: Bundle?) {
+                if (fragment is GeneratorPlayer) DaddyLiveExtractor.onPlayerCreated()
+            }
+
             override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
                 if (fragment is GeneratorPlayer && !host.isChangingConfigurations) checkLater()
             }
@@ -100,6 +104,7 @@ private class PlayerExitCleanup(private val application: Application) :
 
     override fun onActivityCreated(activity: Activity, state: Bundle?) {
         (activity as? FragmentActivity)?.let(::watch)
+        if (activity is DownloadedPlayerActivity) DaddyLiveExtractor.onPlayerCreated()
     }
 
     override fun onActivityStarted(activity: Activity) {
@@ -107,7 +112,10 @@ private class PlayerExitCleanup(private val application: Application) :
     }
 
     override fun onActivityResumed(activity: Activity) {
-        (activity as? FragmentActivity)?.let(::watch)
+        (activity as? FragmentActivity)?.let {
+            watch(it)
+            if (hasPlayer(it)) DaddyLiveExtractor.onPlayerCreated()
+        }
     }
 
     override fun onActivityDestroyed(activity: Activity) {
