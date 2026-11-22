@@ -176,16 +176,20 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     DaddyLiveDembed.wrapDirectHls(link) else link
                                 // One Dembed session can back multiple independent source URLs.
                                 // CloudStream deduplicates identical URLs; loopback ignores query.
-                                val playing = if (original.url.startsWith("http://127.0.0.1:"))
-                                    newExtractorLink(sourceName, sourceName,
+                                val playing = newExtractorLink(
+                                    candidate.player, original.name,
+                                    if (original.url.startsWith("http://127.0.0.1:"))
                                         Uri.parse(original.url).buildUpon()
-                                            .appendQueryParameter("source", candidate.player).build().toString(),
-                                        original.type) {
-                                        this.referer = original.referer
-                                        quality = original.quality
-                                        headers = original.headers
-                                    }
-                                else original
+                                            .appendQueryParameter("source", candidate.player).build().toString()
+                                    else original.url,
+                                    original.type
+                                ) {
+                                    referer = original.referer
+                                    quality = original.quality
+                                    headers = original.headers
+                                    extractorData = original.extractorData
+                                    audioTracks = original.audioTracks
+                                }
                                 callbackMutex.lock()
                                 try {
                                     withContext(callbackContext) { callback(playing) }
@@ -1097,6 +1101,21 @@ class DaddyLiveExtractor : ExtractorApi() {
         private val main = Handler(Looper.getMainLooper())
         private val sessions = ConcurrentHashMap<String, Session>()
         private val directSessions = ConcurrentHashMap<String, DirectSession>()
+        private data class SessionRecipe(val embedded: String, val parent: String, val name: String)
+        private data class DirectRecipe(val url: String, val headers: Map<String, String>)
+        private val sessionRecipes = ConcurrentHashMap<String, SessionRecipe>()
+        private val directRecipes = ConcurrentHashMap<String, DirectRecipe>()
+        private val revivalMutex = Mutex()
+        private val selectionLock = Any()
+        @Volatile private var activeSessionId: String? = null
+        @Volatile private var sessionEpoch = 0L
+        private const val MAX_SAVED_SOURCES = 128
+        private fun <T> remember(cache: ConcurrentHashMap<String, T>, id: String, recipe: T) {
+            cache[id] = recipe
+            if (cache.size > MAX_SAVED_SOURCES) {
+                cache.keys.firstOrNull { it != id && it != activeSessionId }?.let { cache.remove(it) }
+            }
+        }
         private val io = CoroutineScope(Dispatchers.IO)
         private val attribute = Regex("""URI="([^"]+)"""")
         private var server: ServerSocket? = null
@@ -1106,8 +1125,10 @@ class DaddyLiveExtractor : ExtractorApi() {
         private class DirectResource(
             val url: String, val playlist: Boolean, val seenAt: Long
         )
-        private class DirectSession(val url: String, val headers: Map<String, String>) {
-            val id = UUID.randomUUID().toString().replace("-", "")
+        private class DirectSession(
+            val url: String, val headers: Map<String, String>,
+            val id: String = UUID.randomUUID().toString().replace("-", "")
+        ) {
             val resources = ConcurrentHashMap<String, DirectResource>()
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
             fun reference(address: String, playlist: Boolean): String {
@@ -1124,7 +1145,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
         private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
-        private class Session(val parent: String, val embedded: String) {
+        private class Session(
+            val parent: String, val embedded: String,
+            val id: String = UUID.randomUUID().toString().replace("-", "")
+        ) {
             @Volatile var rejectedSignedManifest = ""
             fun markRejectedManifest(address: String, code: Int) {
                 if (code != 404 || browserManifestBody != null || address != url ||
@@ -1132,7 +1156,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 rejectedSignedManifest = address
                 if (!browserManifestReady.isCompleted) browserManifestReady.complete(false)
             }
-            val id: String = UUID.randomUUID().toString().replace("-", "")
             @Volatile var prefetchedPlayerScript: PrefetchedPlayerScript? = null
             val resources = ConcurrentHashMap<String, Resource>()
             private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
@@ -1480,6 +1503,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             val direct = DirectSession(link.url, link.headers)
             directSessions[direct.id] = direct
+            remember(directRecipes, direct.id, DirectRecipe(link.url, link.headers))
             return newExtractorLink(link.source, link.name,
                 "http://127.0.0.1:$openPort/${direct.id}/index.m3u8", ExtractorLinkType.M3U8) {
                 referer = link.referer
@@ -1511,8 +1535,12 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        private suspend fun extractDistinct(embedded: String, parent: String, name: String): ExtractorLink? {
-            val session = Session(parent, embedded)
+        private suspend fun extractDistinct(
+            embedded: String, parent: String, name: String, previousId: String? = null
+        ): ExtractorLink? {
+            val initialEpoch = sessionEpoch
+            val initiallySelected = activeSessionId
+            val session = Session(parent, embedded, previousId ?: UUID.randomUUID().toString().replace("-", ""))
             val captured = withTimeoutOrNull(20000L) {
                 suspendCancellableCoroutine<String?> { continuation ->
                     var web: WebView? = null
@@ -1712,7 +1740,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                             delay(280)
                             session.close()
                             null
-                        } else if (session.directAllowed && (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
+                        } else if (initialEpoch != sessionEpoch) {
+                            session.close()
+                            null
+                        } else if (previousId == null && session.directAllowed &&
+                            (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
                             // Probe a media segment before bypassing the wrapper decoder.
                             session.close()
                             newExtractorLink(name, name, actual, ExtractorLinkType.M3U8) {
@@ -1721,14 +1753,29 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 headers = session.headers
                             }
                         } else {
-                            val openPort = startServer()
+                            val openPort = if (initialEpoch != sessionEpoch ||
+                                (previousId != null && activeSessionId != previousId))
+                                0 else startServer()
                             if (openPort == 0) {
                                 session.close()
                                 null
                             } else {
                                 session.firstPlaylist = stableInitialPlaylist(playlist, session)
                                 session.url = actual
+                                if (previousId != null && activeSessionId != previousId) {
+                                    session.close()
+                                    return null
+                                }
                                 sessions[session.id] = session
+                                if (initialEpoch != sessionEpoch) {
+                                    if (sessions.remove(session.id, session)) session.close()
+                                    return null
+                                }
+                                remember(sessionRecipes, session.id, SessionRecipe(embedded, parent, name))
+                                if (initiallySelected != activeSessionId &&
+                                    activeSessionId != null && activeSessionId != session.id) {
+                                    if (sessions.remove(session.id, session)) session.close()
+                                }
                                 val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
                                 newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
                                     referer = "$EMBED_ORIGIN/"
@@ -1835,13 +1882,56 @@ class DaddyLiveExtractor : ExtractorApi() {
             return false
         }
 
-        fun releaseAllSessions(reason: String) {
-            sessions.forEach { (id, session) ->
-                if (sessions.remove(id, session)) {
-                    session.close()
+        // A root playlist request identifies the selected mirror/episode, not merely a
+        // prefetched candidate. Release every nonselected WebView immediately.
+        private fun sourceActivated(id: String) {
+            synchronized(selectionLock) {
+                activeSessionId = id
+                sessions.forEach { (other, session) ->
+                    if (other != id && sessions.remove(other, session)) session.close()
+                }
+                directSessions.keys.forEach { other ->
+                    if (other != id) directSessions.remove(other)
                 }
             }
+        }
+
+        // A CloudStream source list can outlive its browser authorization and WebView.
+        // Rebuild under its original loopback id so a cached URL remains reachable.
+        private suspend fun recoverSession(id: String): Session? {
+            val recipe = sessionRecipes[id] ?: return null
+            revivalMutex.lock()
+            return try {
+                sessions[id] ?: run {
+                    if (extractDistinct(recipe.embedded, recipe.parent, recipe.name, id) == null)
+                        null
+                    else sessions[id]
+                }
+            } finally {
+                revivalMutex.unlock()
+            }
+        }
+
+        fun releaseAllSessions(reason: String) {
+            synchronized(selectionLock) {
+                activeSessionId = null
+                sessionEpoch++
+            }
+            sessions.forEach { (id, session) ->
+                if (sessions.remove(id, session)) session.close()
+            }
             directSessions.clear()
+            // A player exit must not invalidate the cached localhost links.
+            // Unloading the plugin, on the other hand, releases everything.
+            if (reason == "plugin_unload") {
+                sessionRecipes.clear()
+                directRecipes.clear()
+                synchronized(this) {
+                    runCatching { server?.close() }
+                    server = null
+                    port = 0
+                }
+            }
         }
 
         @Synchronized private fun startServer(): Int {
@@ -1870,7 +1960,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         directSessions.forEach { (key, direct) ->
                             if (now - direct.lastUse > 5 * 60 * 1000L) directSessions.remove(key, direct)
                         }
-                        if (sessions.isEmpty() && directSessions.isEmpty()) {
+                        if (sessions.isEmpty() && directSessions.isEmpty() && sessionRecipes.isEmpty() && directRecipes.isEmpty()) {
                             runCatching { socket.close() }
                             synchronized(DaddyLiveDembed) {
                                 if (server === socket) { server = null; port = 0 }
@@ -2289,8 +2379,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                     val fields = request.split(' ')
                     val path = fields.getOrNull(1)?.substringBefore('?').orEmpty()
                     val parts = path.trimStart('/').split('/')
-                    val direct = directSessions[parts.firstOrNull().orEmpty()]
+                    val id = parts.firstOrNull().orEmpty()
+                    val root = fields.firstOrNull() == "GET" &&
+                        parts.size == 2 && parts[1] == "index.m3u8"
+                    val direct = directSessions[id] ?: if (root) directRecipes[id]?.let {
+                        DirectSession(it.url, it.headers, id).also { session ->
+                            directSessions.putIfAbsent(id, session)
+                        }
+                    } else null
                     if (direct != null && fields.firstOrNull() == "GET" && parts.size == 2) {
+                        if (root) sourceActivated(id)
                         var range: String? = null
                         for (i in 0 until 48) {
                             val line = reader.readLine() ?: break
@@ -2304,7 +2402,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                         serveDirect(socket, direct, parts[1], range)
                         return@use
                     }
-                    val session = sessions[parts.firstOrNull().orEmpty()]
+                    if (root && (sessions.containsKey(id) || sessionRecipes.containsKey(id)))
+                        sourceActivated(id)
+                    val session = sessions[id] ?: if (root) recoverSession(id) else null
                     var data: ByteArray? = null
                     var type = "application/octet-stream"
                     if (fields.firstOrNull() == "GET" && session != null && parts.size == 2) {
