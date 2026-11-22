@@ -417,7 +417,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     parentUrl = referer,
                     parentOrigin = refererOrigin
                 ),
-                timeout = 5
+                timeout = 10
             )
 
 
@@ -1813,7 +1813,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             session.milestone("extract_start")
             val startMs = android.os.SystemClock.elapsedRealtime()
             Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
-            val captured = withTimeoutOrNull(32000L) {
+            val captured = withTimeoutOrNull(20000L) {
                 suspendCancellableCoroutine<String?> { continuation ->
                     var web: WebView? = null
                     val timeout = Runnable {
@@ -2033,27 +2033,20 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     return null
                                 }
                             }
-                            main.postDelayed(timeout, 31000L)
-                            // Direct iframe avoids the parent page's advertising and scripts;
-                            // retain the original parent page as a no-auth-start fallback.
-                            val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
-                            val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
-                            Trace.event("AUTH_WEBVIEW", "FAST_IFRAME",
-                                "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
-                            session.milestone("navigate_iframe")
-                            view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
-                            val parentUrl = parent.takeIf {
-                                it.startsWith("https://") && !it.contains("dembed.st")
+                            main.postDelayed(timeout, 19000L)
+                            val url = if (parent.startsWith("https://") && !parent.contains("dembed.st")) parent else ""
+                            if (url.isNotBlank()) {
+                                Trace.event("AUTH_WEBVIEW", "LOAD_PARENT", "sid=${session.id.take(8)} target=${Trace.target(url)}")
+                                session.milestone("navigate_parent")
+                                view.loadUrl(url)
+                            } else {
+                                // The player explicitly requires an iframe (it rejects top-level navigation).
+                                val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
+                                val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
+                                Trace.event("AUTH_WEBVIEW", "LOAD_EMBED_IFRAME", "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
+                                session.milestone("navigate_iframe")
+                                view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
                             }
-                            if (parentUrl != null) main.postDelayed({
-                                if (continuation.isActive && session.url.isBlank() &&
-                                    session.browserTicketHttp < 0 && session.authRequestCount == 0) {
-                                    Trace.event("AUTH_WEBVIEW", "PARENT_FALLBACK",
-                                        "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
-                                    session.milestone("navigate_parent")
-                                    view.loadUrl(parentUrl)
-                                }
-                            }, 9000L)
                         } catch (e: Exception) {
                             Trace.event("AUTH_WEBVIEW", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
                             main.removeCallbacks(timeout)
