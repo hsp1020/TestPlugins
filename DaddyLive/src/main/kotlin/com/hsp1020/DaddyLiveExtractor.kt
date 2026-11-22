@@ -160,6 +160,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
+        // A shared Dembed result can arrive through stream and watch together.
+        // Publish each actual URL once, favoring stream regardless of completion order.
+        val publishedUrls = HashSet<String>()
+        var pendingWatch: Pair<String, ExtractorLink>? = null
+        var streamCompleted = false
         supervisorScope {
             repeat(workers) { slot ->
                 launch(Dispatchers.IO) {
@@ -174,10 +179,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                             if (link != null) {
                                 val original = if (candidate.player == "player")
                                     DaddyLiveDembed.wrapDirectHls(link) else link
-                                // One Dembed session can back multiple independent source URLs.
-                                // CloudStream deduplicates identical URLs; loopback ignores query.
+                                // Preserve each candidate's display name even when a
+                                // shared Dembed extraction was initiated by another candidate.
                                 val playing = newExtractorLink(
-                                    candidate.player, original.name,
+                                    candidate.player, sourceName,
                                     if (original.url.startsWith("http://127.0.0.1:"))
                                         Uri.parse(original.url).buildUpon()
                                             .appendQueryParameter("source", candidate.player).build().toString()
@@ -192,7 +197,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 }
                                 callbackMutex.lock()
                                 try {
-                                    withContext(callbackContext) { callback(playing) }
+                                    val canonical = original.url
+                                    if (candidate.player == "watch" && !streamCompleted) {
+                                        pendingWatch = canonical to playing
+                                    } else if (publishedUrls.add(canonical)) {
+                                        withContext(callbackContext) { callback(playing) }
+                                    }
                                 } finally {
                                     callbackMutex.unlock()
                                 }
@@ -200,6 +210,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                         } catch (cancel: CancellationException) {
                             throw cancel
                         } catch (_: Exception) {
+                        } finally {
+                            if (candidate.player == "stream") {
+                                callbackMutex.lock()
+                                try {
+                                    streamCompleted = true
+                                    pendingWatch?.let { (canonical, link) ->
+                                        if (publishedUrls.add(canonical)) {
+                                            withContext(callbackContext) { callback(link) }
+                                        }
+                                    }
+                                    pendingWatch = null
+                                } finally {
+                                    callbackMutex.unlock()
+                                }
+                            }
                         }
                         index = next.getAndIncrement()
                     }
