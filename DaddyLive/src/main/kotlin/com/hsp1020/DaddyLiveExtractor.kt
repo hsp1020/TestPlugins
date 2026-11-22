@@ -43,6 +43,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -1209,6 +1210,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nativeStarts++;
                     if (nativeStarts<=12) emit({stage:"native_start",transport:"fetch",method:method,url:absoluteOf(url)});
                   }
+                  if (kind) emit({stage:"auth_start",kind:kind});
                   var start = performance.now();
                   var promise = nativeFetch.apply(this, arguments);
                    if (nativeMedia(url,method,kind)) {
@@ -1290,6 +1292,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                      });
                    }
                   if (entry && entry.kind) {
+                    emit({stage:"auth_start",kind:entry.kind});
                     var start=performance.now();
                     this.addEventListener("loadend",function() {
                       var body="",readError="";
@@ -1405,11 +1408,13 @@ class DaddyLiveExtractor : ExtractorApi() {
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
             })();
         """.trimIndent()
+        private val responseProbeBytes by lazy { (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8) }
         /** Intercept only the embedded player's JavaScript, not its auth or media API.
          * Prepend the response probe before daddy.min.js runs while retaining the script body. */
         private fun instrumentPlayerScript(request: WebResourceRequest, session: Session): WebResourceResponse? {
             val address = request.url.toString()
             val begun = android.os.SystemClock.elapsedRealtime()
+            session.milestone("script_request")
             Trace.event("RESPONSE_BRIDGE", "SCRIPT_FETCH",
                 "sid=${session.id.take(8)} target=${Trace.target(address)} mode=original_js_with_probe")
             var connection: HttpURLConnection? = null
@@ -1418,7 +1423,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 connection = active
                 active.connectTimeout = 4500
                 active.readTimeout = 4500
-                active.setRequestProperty("Accept-Encoding", "identity")
+                active.setRequestProperty("Accept-Encoding", "gzip")
                 request.requestHeaders.forEach { (name, value) ->
                     if (!name.equals("Host", true) && !name.equals("Accept-Encoding", true) &&
                         !name.equals("Content-Length", true) && value.isNotBlank()) {
@@ -1435,6 +1440,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     active.setRequestProperty("Cookie", it)
                 }
                 val status = active.responseCode
+                val headersAt = android.os.SystemClock.elapsedRealtime()
+                session.milestone("script_headers", "http=$status encoding=${active.contentEncoding.orEmpty().take(16)}")
                 if (status != 200 || !active.url.host.equals("dembed.st", true)) {
                     Trace.event("RESPONSE_BRIDGE", "SCRIPT_HTTP_FAIL",
                         "sid=${session.id.take(8)} http=$status redirectedHost=${active.url.host} " +
@@ -1459,6 +1466,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     }
                 }
                 val original = out.toByteArray()
+                val bodyAt = android.os.SystemClock.elapsedRealtime()
+                session.milestone("script_body", "readMs=${bodyAt-headersAt} bytes=${original.size}")
                 if (original.isEmpty()) {
                     Trace.event("RESPONSE_BRIDGE", "SCRIPT_EMPTY",
                         "sid=${session.id.take(8)} fallback=browser_native")
@@ -1471,13 +1480,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 Trace.event("PLAYER_SCRIPT_SHAPE", "OBSERVED",
                     "sid=${session.id.take(8)} bytes=${original.size} markers=${markers.joinToString(",")} " +
                         "scriptHash=${Trace.key(address + ":" + original.size)}")
-                val probeBytes = (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8)
+                val probeBytes = responseProbeBytes
                 val result = ByteArray(probeBytes.size + original.size)
                 System.arraycopy(probeBytes, 0, result, 0, probeBytes.size)
                 System.arraycopy(original, 0, result, probeBytes.size, original.size)
                 Trace.event("RESPONSE_BRIDGE", "SCRIPT_INJECTED",
                     "sid=${session.id.take(8)} originalBytes=${original.size} " +
-                        "probeBytes=${probeBytes.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun}")
+                        "probeBytes=${probeBytes.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-begun} " +
+                        "assembleMs=${android.os.SystemClock.elapsedRealtime()-bodyAt}")
+                session.milestone("script_injected")
                 WebResourceResponse(
                     "application/javascript", "UTF-8",
                     200, "OK", mapOf("Cache-Control" to "no-store"),
@@ -1528,6 +1539,48 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
         private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
         private class Session(val parent: String, val embedded: String) {
+            private val timingStart = android.os.SystemClock.elapsedRealtime()
+            private val timingLast = AtomicLong(timingStart)
+            private val timingStages = ConcurrentHashMap.newKeySet<String>()
+            val mainNavigations = AtomicInteger()
+            private val parentResources = AtomicInteger()
+            private val embedResources = AtomicInteger()
+            private val externalResources = AtomicInteger()
+            private val externalScripts = AtomicInteger()
+            private val parentHost = Uri.parse(parent).host.orEmpty()
+
+            fun milestone(step: String, detail: String = "") {
+                if (!timingStages.add(step)) return
+                val now = android.os.SystemClock.elapsedRealtime()
+                val prior = timingLast.getAndSet(now)
+                Trace.event("AUTH_TIMING", "MARK", "sid=${id.take(8)} step=$step " +
+                    "totalMs=${now-timingStart} gapMs=${now-prior} $detail")
+            }
+
+            // P2 only measures: the original browser requests remain untouched.
+            fun observeResource(request: WebResourceRequest) {
+                val host = request.url.host.orEmpty()
+                if (host.isBlank()) return
+                when {
+                    host.equals(parentHost, true) -> parentResources.incrementAndGet()
+                    host.equals("dembed.st", true) -> embedResources.incrementAndGet()
+                    else -> {
+                        val count = externalResources.incrementAndGet()
+                        val script = request.url.path?.endsWith(".js", true) == true
+                        if (script) externalScripts.incrementAndGet()
+                        if (count <= 5) Trace.event("AUTH_RESOURCE", "EXTERNAL",
+                            "sid=${id.take(8)} host=${host.take(90)} script=$script " +
+                            "totalMs=${android.os.SystemClock.elapsedRealtime()-timingStart}")
+                    }
+                }
+            }
+
+            fun resourceSnapshot(step: String) {
+                Trace.event("AUTH_RESOURCE", "SUMMARY",
+                    "sid=${id.take(8)} step=$step navigations=${mainNavigations.get()} " +
+                    "parent=${parentResources.get()} embed=${embedResources.get()} " +
+                    "external=${externalResources.get()} scripts=${externalScripts.get()}")
+            }
             val id: String = UUID.randomUUID().toString().replace("-", "")
             val resources = ConcurrentHashMap<String, Resource>()
             private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
@@ -1722,6 +1775,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
 
             private fun responseState(kind: String, status: Int, address: String, body: String, truncated: Boolean) {
+                milestone("${kind}_response", "http=$status")
+                if (kind == "ticket") resourceSnapshot("ticket_response")
                 val code = if (status in 200..299) "OK" else if (status == 0) "NETWORK_OR_CORS" else "HTTP_FAIL"
                 val reason = if (status in 200..299) "none" else Trace.bodyReason(body)
                 Trace.event("BROWSER_RESPONSE", code,
@@ -1782,8 +1837,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val stage = message.optString("stage")
                 when (stage) {
                     "installed" -> {
+                        milestone("probe_installed")
                         probeInstalled = true
                         Trace.event("RESPONSE_BRIDGE", "INSTALLED", "sid=${id.take(8)} type=${message.optString("kind")}")
+                    }
+                    "auth_start" -> {
+                        val kind = message.optString("kind")
+                        if (kind in setOf("ticket", "token", "manifest")) milestone("${kind}_request")
                     }
                     "response" -> {
                         val kind = message.optString("kind")
@@ -2214,6 +2274,7 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         private suspend fun extractDistinct(embedded: String, parent: String, name: String): ExtractorLink? {
             val session = Session(parent, embedded)
+            session.milestone("extract_start")
             val startMs = android.os.SystemClock.elapsedRealtime()
             Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
             val captured = withTimeoutOrNull(20000L) {
@@ -2240,6 +2301,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 "sid=${session.id.take(8)} attached=${view.isAttachedToWindow} parentPresent=${view.parent != null} " +
                                     "shown=${view.isShown} size=${view.width}x${view.height}")
                             session.browser = view
+                            session.milestone("webview_created")
                             session.userAgent = view.settings.userAgentString
                             view.settings.javaScriptEnabled = true
                             view.settings.domStorageEnabled = true
@@ -2274,7 +2336,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 }
                             }
                             view.webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                    val count = session.mainNavigations.incrementAndGet()
+                                    session.milestone("page_started")
+                                    Trace.event("AUTH_PAGE", "NAVIGATE",
+                                        "sid=${session.id.take(8)} count=$count target=${Trace.target(url.orEmpty())}")
+                                }
+
                                 override fun onPageFinished(view: WebView?, url: String?) {
+                                    session.milestone("page_finished")
+                                    session.resourceSnapshot("page_finished")
                                     Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
                                         "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())} " +
                                         "probeAvailable=${session.probeAvailable} installed=${session.probeInstalled}")
@@ -2352,6 +2423,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 ): WebResourceResponse? {
                                     if (request == null) return null
                                     val uri = request.url
+                                    session.observeResource(request)
                                     val address = uri.toString()
                                     if (request.method.equals("GET", true) &&
                                         uri.scheme == "https" && uri.host.equals("dembed.st", true) &&
@@ -2408,12 +2480,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                             val url = if (parent.startsWith("https://") && !parent.contains("dembed.st")) parent else ""
                             if (url.isNotBlank()) {
                                 Trace.event("AUTH_WEBVIEW", "LOAD_PARENT", "sid=${session.id.take(8)} target=${Trace.target(url)}")
+                                session.milestone("navigate_parent")
                                 view.loadUrl(url)
                             } else {
                                 // The player explicitly requires an iframe (it rejects top-level navigation).
                                 val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
                                 val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
                                 Trace.event("AUTH_WEBVIEW", "LOAD_EMBED_IFRAME", "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
+                                session.milestone("navigate_iframe")
                                 view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
                             }
                         } catch (e: Exception) {
@@ -2429,6 +2503,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 session.close()
                 return null
             }
+            session.milestone("playlist_url_captured")
             if (session.probeAvailable) {
                 val capturedByBrowser = withTimeoutOrNull(if (session.probeInstalled) 6500L else 3000L) {
                     session.browserManifestReady.await()
@@ -2443,6 +2518,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 Trace.event("RESPONSE_BRIDGE", "SKIPPED",
                     "sid=${session.id.take(8)} reason=document_start_or_web_message_not_available")
             }
+            session.milestone("manifest_bridge_complete")
             val actual = session.browserManifestUrl.ifBlank { session.url.ifBlank { captured } }
             val signed = !Uri.parse(actual).getQueryParameter("t").isNullOrBlank()
             Trace.event("PLAYER_URL", "FOUND",
@@ -2501,8 +2577,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                         null
                     } else {
                         Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!body.trimStart().startsWith("#EXTM3U")}")
+                        session.milestone("playlist_decoded", "sealed=${session.sealedPlaylist}")
                         session.snapshot("before_preflight")
-                        if (session.nativeRequestCount.get() == 0 && session.jsMediaRequests.get() == 0) delay(700)
+                        // Sealed AES playlists already contain decrypted media URLs;
+                        // retain the browser-observation wait only for plain playlists.
+                        val waitForNative = !session.sealedPlaylist &&
+                            session.nativeRequestCount.get() == 0 && session.jsMediaRequests.get() == 0
+                        Trace.event("SEGMENT_PREFLIGHT", if (waitForNative) "WAIT_NATIVE" else "NO_WAIT",
+                            "sid=${session.id.take(8)} sealed=${session.sealedPlaylist} " +
+                            "waitMs=${if (waitForNative) 700 else 0}")
+                        if (waitForNative) delay(700)
+                        session.milestone("preflight_start")
                         if (!probePlayable(session, playlist, actual)) {
                             session.snapshot("after_preflight")
                             delay(280)
@@ -2511,6 +2596,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                         } else if (session.directAllowed && (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
                             Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                             // Probe a media segment before bypassing the wrapper decoder.
+                            session.milestone("link_ready")
+                            session.resourceSnapshot("link_ready")
                             session.close()
                             newExtractorLink(name, name, actual, ExtractorLinkType.M3U8) {
                                 referer = "$EMBED_ORIGIN/"
@@ -2530,6 +2617,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 session.firstPlaylist = playlist
                                 session.url = actual
                                 sessions[session.id] = session
+                                session.milestone("link_ready")
+                                session.resourceSnapshot("link_ready")
                                 val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
                                 newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
                                     referer = "$EMBED_ORIGIN/"
@@ -2650,6 +2739,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (client?.isSuccessful == true && validMediaPrefix(prefix, n, playlist)) {
                     session.segmentTransport = "client"; session.directAllowed = true
                     Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=client entry=" + index + " http=" + client.code + " bytes=" + n)
+                    session.milestone("preflight_ok", "source=client")
                     return true
                 }
                 Trace.event("SEGMENT_PREFLIGHT", "CLIENT_FAIL",
@@ -2686,6 +2776,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (browser?.status in 200..299 && chunk != null && validMediaPrefix(chunk, chunk.size, playlist)) {
                     session.segmentTransport = "browser"
                     Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=browser entry=" + index + " bytes=" + chunk.size)
+                    session.milestone("preflight_ok", "source=browser")
                     return true
                 }
                 session.compare(target, "browser_preflight", browser?.status ?: -1, forwarded)
