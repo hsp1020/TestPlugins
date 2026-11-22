@@ -48,7 +48,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -194,45 +194,66 @@ class DaddyLiveExtractor : ExtractorApi() {
         // A slow stream player must not delay an independently playable fallback.
         // Limit outstanding work to three candidates (including any embedded WebView).
         val attemptedDembed = ConcurrentHashMap.newKeySet<String>()
-        val selectedLink = supervisorScope {
-            val permits = Semaphore(3)
-            val remaining = AtomicInteger(candidates.size)
-            val first = CompletableDeferred<Pair<PlayerCandidate, ExtractorLink>?>()
-            val jobs = candidates.map { candidate ->
-                launch {
+        // Independent, bounded diagnostics: returning the first playable link must
+        // not cancel stream's token, manifest, segment and HTTP/P2P observations.
+        val scanJob = SupervisorJob()
+        val scanScope = CoroutineScope(scanJob + Dispatchers.IO)
+        val permits = Semaphore(3)
+        val remaining = AtomicInteger(candidates.size)
+        val first = CompletableDeferred<Pair<PlayerCandidate, ExtractorLink>?>()
+        candidates.forEach { candidate ->
+            scanScope.launch {
+                try {
+                    permits.acquire()
                     try {
-                        permits.acquire()
-                        try {
-                            val sourceName = "${selected.channelName} - ${candidate.player}"
-                            Trace.event("PLAYER_CANDIDATE", "TRY",
-                                "player=${candidate.player} target=${Trace.target(candidate.url)}")
-                            val link = extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
-                            if (link == null) {
-                                Trace.event("PLAYER_CANDIDATE", "FALLBACK",
-                                    "player=${candidate.player} reason=no_valid_link")
-                            } else if (!first.complete(candidate to link)) {
-                                DaddyLiveDembed.discardUnused(link.url)
-                            }
-                        } finally {
-                            permits.release()
+                        val sourceName = "${selected.channelName} - ${candidate.player}"
+                        Trace.event("PLAYER_CANDIDATE", "TRY",
+                            "player=${candidate.player} target=${Trace.target(candidate.url)}")
+                        val link = withTimeoutOrNull(35000L) {
+                            extractVideo(candidate.url, sourceName, entryUrl, attemptedDembed)
                         }
-                    } catch (cancel: CancellationException) {
-                        throw cancel
-                    } catch (e: Exception) {
-                        Trace.event("PLAYER_CANDIDATE", "ERROR",
-                            "player=${candidate.player} reason=${e.javaClass.simpleName}")
+                        if (link == null) {
+                            Trace.event("PLAYER_CANDIDATE", "FALLBACK",
+                                "player=${candidate.player} reason=no_valid_link_or_timeout")
+                        } else if (!first.complete(candidate to link)) {
+                            DaddyLiveDembed.discardUnused(link.url)
+                            Trace.event("PLAYER_CANDIDATE", "DIAGNOSTIC_LINK",
+                                "player=${candidate.player} result=validated_not_selected")
+                        }
                     } finally {
-                        if (remaining.decrementAndGet() == 0) first.complete(null)
+                        permits.release()
+                    }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (e: Exception) {
+                    Trace.event("PLAYER_CANDIDATE", "ERROR",
+                        "player=${candidate.player} reason=${e.javaClass.simpleName}")
+                } finally {
+                    if (remaining.decrementAndGet() == 0) {
+                        first.complete(null)
+                        Trace.event("PLAYER_DIAGNOSTICS", "COMPLETE",
+                            "channel=${selected.streamId} candidates=${candidates.size}")
+                        scanJob.cancel()
                     }
                 }
             }
-            try { first.await() } finally { jobs.forEach { it.cancel() } }
+        }
+        val selectedLink = try {
+            first.await()
+        } catch (cancel: CancellationException) {
+            scanJob.cancel()
+            throw cancel
+        }
+        if (selectedLink != null) {
+            Trace.event("PLAYER_DIAGNOSTICS", "CONTINUE",
+                "channel=${selected.streamId} remaining=${remaining.get()}")
         }
         if (selectedLink != null) {
             val (candidate, link) = selectedLink
+            val playing = if (candidate.player == "player") DaddyLiveDembed.wrapDirectHls(link) else link
             Trace.event("MEDIA3_LINK", "EMITTED",
-                "player=${candidate.player} mode=${if (link.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(link.url)}")
-            callback(link)
+                "player=${candidate.player} mode=${if (playing.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(playing.url)}")
+            callback(playing)
         } else {
             Trace.event("PLAYER_DISCOVERY", "EXHAUSTED",
                 "candidates=${candidates.size} reason=all_failed")
@@ -1477,12 +1498,37 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         private val main = Handler(Looper.getMainLooper())
         private val sessions = ConcurrentHashMap<String, Session>()
+        private val directSessions = ConcurrentHashMap<String, DirectSession>()
         private val io = CoroutineScope(Dispatchers.IO)
         private val attribute = Regex("""URI="([^"]+)"""")
         private var server: ServerSocket? = null
         @Volatile private var port = 0
 
         private class Resource(val url: String, val playlist: Boolean)
+        private class DirectResource(
+            val url: String, val playlist: Boolean, val manifest: String, val seenAt: Long
+        )
+        private data class DirectWindow(
+            val sequence: String, val entries: Set<String>, val first: String, val last: String
+        )
+        private class DirectSession(val url: String, val headers: Map<String, String>) {
+            val id = UUID.randomUUID().toString().replace("-", "")
+            val resources = ConcurrentHashMap<String, DirectResource>()
+            val windows = ConcurrentHashMap<String, DirectWindow>()
+            @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
+            fun reference(address: String, playlist: Boolean, manifest: String): String {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (resources.size > 256) {
+                    resources.forEach { (key, resource) ->
+                        if (now - resource.seenAt > 120000L) resources.remove(key, resource)
+                    }
+                }
+                val key = UUID.nameUUIDFromBytes(address.toByteArray(Charsets.UTF_8))
+                    .toString().replace("-", "")
+                resources[key] = DirectResource(address, playlist, manifest, now)
+                return "http://127.0.0.1:$port/$id/$key"
+            }
+        }
         private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
         private class Session(val parent: String, val embedded: String) {
             val id: String = UUID.randomUUID().toString().replace("-", "")
@@ -2110,6 +2156,25 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
+        fun wrapDirectHls(link: ExtractorLink): ExtractorLink {
+            if (!link.url.substringBefore('?').endsWith(".m3u8", true) ||
+                !link.url.startsWith("https://")) return link
+            val openPort = startServer()
+            if (openPort == 0) {
+                Trace.event("DIRECT_HLS_DIAG", "SKIPPED", "reason=proxy_bind_failed")
+                return link
+            }
+            val direct = DirectSession(link.url, link.headers)
+            directSessions[direct.id] = direct
+            Trace.event("DIRECT_HLS_DIAG", "ENABLED",
+                "sid=${direct.id.take(8)} transport=local_proxy_okhttp upstream=${Trace.fingerprint(link.url)}")
+            return newExtractorLink(link.source, link.name,
+                "http://127.0.0.1:$openPort/${direct.id}/index.m3u8", ExtractorLinkType.M3U8) {
+                referer = link.referer
+                quality = link.quality
+            }
+        }
+
         fun discardUnused(address: String) {
             val uri = Uri.parse(address)
             if (uri.scheme != "http" || uri.host != "127.0.0.1") return
@@ -2627,7 +2692,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 session.close()
                             }
                         }
-                        if (sessions.isEmpty()) {
+                        directSessions.forEach { (key, direct) ->
+                            if (now - direct.lastUse > 15 * 60 * 1000L) directSessions.remove(key, direct)
+                        }
+                        if (sessions.isEmpty() && directSessions.isEmpty()) {
                             runCatching { socket.close() }
                             synchronized(DaddyLiveDembed) {
                                 if (server === socket) { server = null; port = 0 }
@@ -2665,6 +2733,179 @@ class DaddyLiveExtractor : ExtractorApi() {
                     else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))
                 }
             } + "\n"
+
+        // Instrument direct HTTP HLS only for the player fallback. This shares the
+        // existing loopback server, but never rewrites an unverified CDN URL.
+        private fun rewriteDirect(playlist: String, source: String, session: DirectSession): String =
+            playlist.lineSequence().joinToString("\n") { line ->
+                if (line.startsWith("#")) {
+                    attribute.replace(line) { match ->
+                        val target = absolute(source, match.groupValues[1])
+                        if (target == null) match.value
+                        else "URI=\"${session.reference(target, target.substringBefore('?').endsWith(".m3u8", true), source)}\""
+                    }
+                } else if (line.isBlank()) line else {
+                    val target = absolute(source, line.trim())
+                    if (target == null) line
+                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true), source)
+                }
+            } + "\n"
+
+        private fun trackDirectWindow(session: DirectSession, source: String, playlist: String) {
+            val entries = playlist.lineSequence().map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+                .mapNotNull { absolute(source, it) }
+                .filterNot { it.substringBefore('?').endsWith(".m3u8", true) }
+                .toList()
+            val sequence = playlist.lineSequence().firstOrNull {
+                it.startsWith("#EXT-X-MEDIA-SEQUENCE:")
+            }?.substringAfter(':').orEmpty()
+            session.windows[source] = DirectWindow(sequence, entries.toSet(),
+                entries.firstOrNull().orEmpty(), entries.lastOrNull().orEmpty())
+            if (entries.isNotEmpty()) {
+                Trace.event("DIRECT_HLS_WINDOW", "UPDATED",
+                    "sid=${session.id.take(8)} manifest=${Trace.fingerprint(source)} " +
+                        "sequence=$sequence count=${entries.size} " +
+                        "first=${Trace.key(entries.first())} last=${Trace.key(entries.last())}")
+            }
+        }
+
+        private suspend fun direct404Evidence(session: DirectSession, target: String,
+            parentManifest: String, http: Int, range: String?
+        ) {
+            val refreshed = runCatching {
+                app.get(parentManifest, headers = session.headers + ("Cache-Control" to "no-cache"), timeout = 5)
+            }.getOrNull()
+            val body = refreshed?.takeIf { it.isSuccessful }?.text
+            if (body?.trimStart()?.startsWith("#EXTM3U") == true)
+                trackDirectWindow(session, parentManifest, body)
+            val current = session.windows[parentManifest]
+            val presence = when {
+                body == null -> "refresh_unavailable"
+                !body.trimStart().startsWith("#EXTM3U") -> "refresh_invalid"
+                current == null -> "no_media_entries"
+                target in current.entries -> "still_in_latest_manifest"
+                else -> "outside_latest_manifest"
+            }
+            Trace.event("DIRECT_HLS_404", "CHECKED",
+                "sid=${session.id.take(8)} upstreamHttp=$http " +
+                    "request=${Trace.fingerprint(target)} path=${Trace.target(target)} " +
+                    "parent=${Trace.fingerprint(parentManifest)} range=${range ?: "none"} " +
+                    "freshManifestHttp=${refreshed?.code ?: -1} " +
+                    "sequence=${current?.sequence.orEmpty()} first=${Trace.key(current?.first.orEmpty())} " +
+                    "last=${Trace.key(current?.last.orEmpty())} presence=$presence")
+        }
+
+        private suspend fun serveDirect(
+            socket: Socket, session: DirectSession, key: String, range: String?
+        ) {
+            session.lastUse = android.os.SystemClock.elapsedRealtime()
+            val resource = session.resources[key]
+            val playlist = key == "index.m3u8" || resource?.playlist == true
+            val address = if (key == "index.m3u8") session.url else resource?.url
+            val output = socket.getOutputStream()
+            if (address == null) {
+                output.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
+                return
+            }
+            val start = android.os.SystemClock.elapsedRealtime()
+            val upstreamHeaders = if (range != null) session.headers + ("Range" to range) else session.headers
+            val response = try {
+                app.get(address, headers = upstreamHeaders, timeout = 12)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Trace.event("DIRECT_HLS_UPSTREAM", "EXCEPTION",
+                    "sid=${session.id.take(8)} request=${Trace.fingerprint(address)} " +
+                        "reason=${e.javaClass.simpleName}")
+                null
+            }
+            val code = response?.code ?: 502
+            if (code !in 200..299) {
+                if (!playlist && code == 404 && resource != null) {
+                    try {
+                        direct404Evidence(session, address, resource.manifest, code, range)
+                    } catch (e: Exception) {
+                        Trace.event("DIRECT_HLS_404", "DIAGNOSTIC_ERROR",
+                            "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
+                    }
+                }
+                Trace.event("DIRECT_HLS_UPSTREAM", "HTTP_FAIL",
+                    "sid=${session.id.take(8)} manifest=$playlist http=$code " +
+                        "request=${Trace.fingerprint(address)} path=${Trace.target(address)} " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                val localCode = code.takeIf { it in 400..599 } ?: 502
+                val reason = if (localCode == 404) "Not Found" else "Bad Gateway"
+                output.write(("HTTP/1.1 $localCode $reason\r\nConnection: close\r\n" +
+                    "Cache-Control: no-store\r\nContent-Length: 0\r\n\r\n").toByteArray(StandardCharsets.US_ASCII))
+                return
+            }
+            if (playlist) {
+                val raw = response!!.text
+                if (!raw.trimStart().startsWith("#EXTM3U")) {
+                    Trace.event("DIRECT_HLS_PLAYLIST", "INVALID",
+                        "sid=${session.id.take(8)} upstream=${Trace.fingerprint(address)}")
+                    output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
+                    return
+                }
+                trackDirectWindow(session, address, raw)
+                val data = rewriteDirect(raw, address, session).toByteArray(Charsets.UTF_8)
+                output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n" +
+                    "Cache-Control: no-store\r\nConnection: close\r\nContent-Length: ${data.size}\r\n\r\n")
+                    .toByteArray(StandardCharsets.US_ASCII))
+                output.write(data)
+                Trace.event("DIRECT_HLS_PLAYLIST", "OK",
+                    "sid=${session.id.take(8)} target=${Trace.fingerprint(address)} " +
+                        "bytes=${data.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+                return
+            }
+            val reply = response!!
+            val contentType = reply.headers["Content-Type"]?.substringBefore(';')
+                ?.takeIf { it.matches(Regex("[a-zA-Z0-9._+/-]+")) } ?: "application/octet-stream"
+            val length = reply.headers["Content-Length"]?.toLongOrNull()?.takeIf { it >= 0L }
+            val contentRange = reply.headers["Content-Range"]?.takeIf {
+                it.matches(Regex("bytes [0-9*]+-[0-9*]+/[0-9*]+"))
+            }
+            val status = if (code == 206) "206 Partial Content" else "200 OK"
+            val header = buildString {
+                append("HTTP/1.1 $status\r\n")
+                append("Content-Type: $contentType\r\n")
+                if (contentRange != null) append("Content-Range: $contentRange\r\n")
+                append("Accept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n")
+                if (length != null) append("Content-Length: $length\r\n")
+                else append("Transfer-Encoding: chunked\r\n")
+                append("\r\n")
+            }
+            output.write(header.toByteArray(StandardCharsets.US_ASCII))
+            var total = 0L
+            try {
+                reply.body.byteStream().use { stream ->
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        val read = stream.read(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        if (length == null)
+                            output.write("${read.toString(16)}\r\n".toByteArray(StandardCharsets.US_ASCII))
+                        output.write(buffer, 0, read)
+                        if (length == null) output.write("\r\n".toByteArray(StandardCharsets.US_ASCII))
+                        total += read
+                    }
+                }
+                if (length == null) output.write("0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
+                Trace.event("DIRECT_HLS_SEGMENT",
+                    if (length != null && length != total) "SHORT_READ" else "HTTP_OK",
+                    "sid=${session.id.take(8)} upstreamHttp=$code " +
+                        "url=${Trace.fingerprint(address)} path=${Trace.target(address)} " +
+                        "range=${range ?: "none"} bytes=$total expectedBytes=${length ?: -1} " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
+            } catch (e: Exception) {
+                Trace.event("DIRECT_HLS_SEGMENT", "TRANSFER_ERROR",
+                    "sid=${session.id.take(8)} url=${Trace.fingerprint(address)} " +
+                        "bytes=$total reason=${e.javaClass.simpleName}")
+            }
+        }
+
         private fun decodePlaylist(body: String): String? =
             body.takeIf { it.trimStart().startsWith("#EXTM3U") }
 
@@ -2738,10 +2979,26 @@ class DaddyLiveExtractor : ExtractorApi() {
             try {
                 client.use { socket ->
                     socket.soTimeout = 12000
-                    val request = BufferedReader(InputStreamReader(socket.getInputStream())).readLine().orEmpty()
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    val request = reader.readLine().orEmpty()
                     val fields = request.split(' ')
                     val path = fields.getOrNull(1)?.substringBefore('?').orEmpty()
                     val parts = path.trimStart('/').split('/')
+                    val direct = directSessions[parts.firstOrNull().orEmpty()]
+                    if (direct != null && fields.firstOrNull() == "GET" && parts.size == 2) {
+                        var range: String? = null
+                        for (i in 0 until 48) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) break
+                            if (line.startsWith("Range:", true)) {
+                                val candidate = line.substringAfter(':').trim()
+                                if (candidate.matches(Regex("""bytes=\d+-\d*(,\d+-\d*)*""")))
+                                    range = candidate
+                            }
+                        }
+                        serveDirect(socket, direct, parts[1], range)
+                        return@use
+                    }
                     val session = sessions[parts.firstOrNull().orEmpty()]
                     var data: ByteArray? = null
                     var type = "application/octet-stream"
