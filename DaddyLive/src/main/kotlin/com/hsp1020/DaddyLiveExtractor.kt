@@ -4,21 +4,18 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
-import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
 import java.net.HttpURLConnection
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -43,12 +40,10 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
-import kotlin.math.ceil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -63,8 +58,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import org.json.JSONArray
 import org.json.JSONTokener
+import org.json.JSONArray
 
 class DaddyLiveExtractor : ExtractorApi() {
     companion object {
@@ -72,71 +67,23 @@ class DaddyLiveExtractor : ExtractorApi() {
             DaddyLiveDembed.releaseAllSessions(reason)
     }
 
-    private object Trace {
-        private const val TAG = "DaddyLiveTrace"
-        fun target(raw: String): String = try {
-            val parsed = URL(raw)
-            val path = parsed.path
-            parsed.host + if (path.length > 160) path.take(52) + "/[opaquePathChars=${path.length}]" else path
-        } catch (_: Exception) { "invalid-url" }
-        fun event(phase: String, status: String, detail: String = "") {
-            android.util.Log.i(TAG, "phase=$phase status=$status $detail")
-        }
+    private object UrlKey {
+        private const val HEX = "0123456789abcdef"
         private fun digest(raw: String): String = try {
-            MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
-                .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
+            val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+            val chars = CharArray(12)
+            for (i in 0 until 6) {
+                val value = digest[i].toInt() and 255
+                chars[i * 2] = HEX[value ushr 4]
+                chars[i * 2 + 1] = HEX[value and 15]
+            }
+            String(chars)
         } catch (_: Exception) { "unknown" }
         fun key(url: String): String = digest(url)
-        fun urlShape(raw: String?): String = try {
-            if (raw.isNullOrBlank()) "absent" else {
-                val u = URL(raw)
-                "host=${u.host} pathId=${pathKey(raw)} urlId=${key(raw)} " +
-                    "queryKeys=${Uri.parse(raw).queryParameterNames.sorted().joinToString(",").take(100)} " +
-                    "queryChars=${u.query?.length ?: 0}"
-            }
-        } catch (_: Exception) { "invalid" }
-        fun valueId(raw: String?): String = if (raw.isNullOrBlank()) "none" else key(raw)
         fun pathKey(url: String): String = runCatching {
             val parsed = URL(url)
             digest(parsed.host + parsed.path)
         }.getOrDefault("invalid")
-        fun fingerprint(raw: String): String = try {
-            val parsed = URL(raw)
-            "urlId=${key(raw)} pathId=${digest(parsed.host + parsed.path)} " +
-                "host=${parsed.host} queryKeys=${Uri.parse(raw).queryParameterNames.sorted().joinToString(",").take(90)}"
-        } catch (_: Exception) { "invalid_url" }
-        private fun host(raw: String?): String = try {
-            if (raw.isNullOrBlank()) "none" else URL(raw).host
-        } catch (_: Exception) { "unavailable" }
-        fun headerProfile(headers: Map<String, String>): String {
-            fun get(key: String) = headers.entries.firstOrNull { it.key.equals(key, true) }?.value
-            val names = headers.keys.map { it.lowercase() }.sorted().joinToString(",").take(180)
-            return "headerNames=$names originHost=${host(get("Origin"))} refHost=${host(get("Referer"))} " +
-                "cookie=${get("Cookie") != null} auth=${get("Authorization") != null} range=${get("Range") != null}"
-        }
-        fun error(raw: String): String = raw
-            .replace(Regex("""https?://[^\s"'<>()]+""", RegexOption.IGNORE_CASE), "[url]")
-            .replace(Regex("""(?i)\b(token|ticket|secret|password|authorization|cookie|key)\s*[:=]\s*[^\s,;]+"""), "[secret]")
-            .replace(Regex("""\s+"""), " ")
-            .take(170)
-
-        fun bodyReason(text: String): String {
-            val body = text.take(512).lowercase()
-            return when {
-                "turnstile" in body || "captcha" in body -> "challenge_required"
-                "expired" in body -> "expired"
-                "not found" in body || "not_found" in body || "404" in body -> "not_found"
-                "unavailable" in body -> "unavailable"
-                "invalid ticket" in body -> "invalid_ticket"
-                "invalid token" in body -> "invalid_token"
-                "rate limit" in body || "too many" in body -> "rate_limited"
-                "forbidden" in body -> "forbidden_unspecified"
-                "denied" in body || "blocked" in body -> "access_denied_unspecified"
-                "<html" in body -> "html_error_page"
-                body.isBlank() -> "empty_error_body"
-                else -> "unclassified_error_body"
-            }
-        }
     }
 
     override var mainUrl = "https://thedaddy.li"
@@ -179,7 +126,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         currentCoroutineContext().ensureActive()
-        Trace.event("PLAYER_ENTRY", "START", "target=${Trace.target(url)}")
         val selected = try {
             mapper.readValue<ExtractorChannelSelection>(url)
         } catch (_: Exception) {
@@ -192,7 +138,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sourceName = name,
                 parentReferer = referer
             )
-            Trace.event("MEDIA3_LINK", if (direct != null) "EMITTED" else "NO_LINK", "mode=direct_entry")
             if (direct != null) callback(direct)
             return
         }
@@ -207,7 +152,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             entryUrl = entryUrl,
             streamId = selected.streamId
         )
-        Trace.event("PLAYER_DISCOVERY", "READY", "channel=${selected.streamId} candidates=${candidates.size}")
         if (candidates.isEmpty()) return
 
         // Start stream, player and watch in parallel; then try plus, cast and casting.
@@ -216,26 +160,18 @@ class DaddyLiveExtractor : ExtractorApi() {
         val next = AtomicInteger(workers)
         val callbackMutex = Mutex()
         val callbackContext = currentCoroutineContext()
-        val emitted = AtomicInteger(0)
         supervisorScope {
             repeat(workers) { slot ->
-                Trace.event("PLAYER_CANDIDATE", "SCHEDULED",
-                    "slot=${slot + 1} player=${candidates[slot].player}")
                 launch(Dispatchers.IO) {
                     var index = slot
                     while (index < candidates.size) {
                         val candidate = candidates[index]
                         try {
                             val sourceName = "${selected.channelName} - ${candidate.player}"
-                            Trace.event("PLAYER_CANDIDATE", "TRY",
-                                "player=${candidate.player} target=${Trace.target(candidate.url)}")
                             val link = withTimeoutOrNull(35000L) {
                                 extractVideo(candidate.url, sourceName, entryUrl, sharedDembed)
                             }
-                            if (link == null) {
-                                Trace.event("PLAYER_CANDIDATE", "FALLBACK",
-                                    "player=${candidate.player} reason=no_valid_link_or_timeout")
-                            } else {
+                            if (link != null) {
                                 val original = if (candidate.player == "player")
                                     DaddyLiveDembed.wrapDirectHls(link) else link
                                 // One Dembed session can back multiple independent source URLs.
@@ -253,29 +189,18 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 callbackMutex.lock()
                                 try {
                                     withContext(callbackContext) { callback(playing) }
-                                    emitted.incrementAndGet()
-                                    Trace.event("MEDIA3_LINK", "EMITTED",
-                                        "player=${candidate.player} mode=${if (playing.url.startsWith("http://127.0.0.1:")) "proxy" else "direct"} target=${Trace.target(playing.url)}")
                                 } finally {
                                     callbackMutex.unlock()
                                 }
                             }
                         } catch (cancel: CancellationException) {
                             throw cancel
-                        } catch (e: Exception) {
-                            Trace.event("PLAYER_CANDIDATE", "ERROR",
-                                "player=${candidate.player} reason=${e.javaClass.simpleName}")
+                        } catch (_: Exception) {
                         }
                         index = next.getAndIncrement()
                     }
                 }
             }
-        }
-        Trace.event("PLAYER_DIAGNOSTICS", "COMPLETE",
-            "channel=${selected.streamId} candidates=${candidates.size} emitted=${emitted.get()}")
-        if (emitted.get() == 0) {
-            Trace.event("PLAYER_DISCOVERY", "EXHAUSTED",
-                "candidates=${candidates.size} reason=all_failed")
         }
     }
 
@@ -303,8 +228,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
-            Trace.event("PLAYER_DISCOVERY", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
-                "target=${Trace.target(entryUrl)} http=${response.code}")
             if (response.isSuccessful) {
                 val html = response.text
 
@@ -372,7 +295,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Trace.event("PLAYER_DISCOVERY", "ERROR", "reason=${e.javaClass.simpleName}")
         }
 
         /*
@@ -387,7 +309,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
         }
 
-        Trace.event("PLAYER_DISCOVERY", "DONE", "players=${discovered.keys.joinToString(",")} count=${discovered.size}")
         return players.mapNotNull { player ->
             discovered[player]?.let { PlayerCandidate(player, it) }
         }
@@ -416,9 +337,7 @@ class DaddyLiveExtractor : ExtractorApi() {
 
 
             val targetOrigin = originOf(url) ?: mainUrl
-            Trace.event("PLAYER_PAGE", "START", "target=${Trace.target(url)}")
             if (targetOrigin == "https://dembed.st" && URL(url).path.endsWith(".php", true)) {
-                Trace.event("PLAYER_PAGE", "DEMBED_ROUTE", "target=" + Trace.target(url))
                 return DaddyLiveDembed.extract(url, parentReferer.orEmpty(), sourceName, sharedDembed)
             }
             val referer = parentReferer ?: "$targetOrigin/"
@@ -434,8 +353,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
 
-            Trace.event("PLAYER_PAGE", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
-                "target=${Trace.target(url)} http=${response.code}")
             if (!response.isSuccessful) {
                 return null
             }
@@ -449,19 +366,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                 sharedDembed = sharedDembed
             )
 
-            Trace.event("PLAYER_PAGE", if (link != null) "LINK_FOUND" else "NO_LINK",
-                "target=${Trace.target(url)}")
             return link
         } catch (e: CancellationException) {
             throw e
         } catch (e: SocketTimeoutException) {
-            Trace.event("PLAYER_PAGE", "TIMEOUT", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: IOException) {
-            Trace.event("PLAYER_PAGE", "IO_ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         } catch (e: Exception) {
-            Trace.event("PLAYER_PAGE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             return null
         }
     }
@@ -551,18 +463,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
-                Trace.event("HLS_VALIDATE", "HTTP_FAIL", "target=${Trace.target(url)} http=${response.code}")
                 return false
             }
             val body = response.text.trimStart()
             val valid = body.startsWith("#EXTM3U") && probeDirectSegments(url, body, headers)
-            Trace.event("HLS_VALIDATE", if (valid) "VALID" else "INVALID",
-                "target=${Trace.target(url)} http=${response.code} chars=${body.length} reason=${if (valid) "extm3u" else "missing_extm3u"}")
             valid
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Trace.event("HLS_VALIDATE", "ERROR", "target=${Trace.target(url)} reason=${e.javaClass.simpleName}")
             false
         }
     }
@@ -576,10 +484,8 @@ class DaddyLiveExtractor : ExtractorApi() {
         headers: Map<String, String> = hlsHeaders(origin, referer)
     ): ExtractorLink? {
         if (!validateHls(url, headers)) {
-            Trace.event("MEDIA3_LINK", "REJECTED", "target=${Trace.target(url)} reason=playlist_validation_failed")
             return null
         }
-        Trace.event("MEDIA3_LINK", "BUILD", "mode=direct target=${Trace.target(url)} headerNames=${headers.keys.joinToString(",")}")
         return newExtractorLink(
             source = sourceName,
             name = displayName,
@@ -613,8 +519,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val buf = ByteArray(576)
                 val n = try { response?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { readMediaPrefix(it, buf) } ?: 0 } catch (_: Exception) { 0 }
                 val valid = validMediaPrefix(buf, n, playlist)
-                Trace.event("DIRECT_SEGMENT", if (valid) "OK" else "FAILED",
-                    "target=" + Trace.target(target) + " http=" + (response?.code ?: -1) + " bytes=" + n)
                 if (valid) return true
             }
             if (variant == null) return false
@@ -809,13 +713,10 @@ class DaddyLiveExtractor : ExtractorApi() {
         sharedDembed: ConcurrentHashMap<String, CompletableDeferred<ExtractorLink?>>
     ): ExtractorLink? {
         if (childUrl in visited) {
-            Trace.event("PLAYER_NESTED", "SKIP", "reason=already_visited target=${Trace.target(childUrl)}")
             return null
         }
-        Trace.event("PLAYER_NESTED", "TRY", "target=${Trace.target(childUrl)} depth=$depth")
         val parentOrigin = originOf(parentUrl) ?: return null
         if (originOf(childUrl) == "https://dembed.st" && URL(childUrl).path.endsWith(".php", true)) {
-            Trace.event("PLAYER_NESTED", "DEMBED_ROUTE", "target=" + Trace.target(childUrl))
             return DaddyLiveDembed.extract(childUrl, parentUrl, sourceName, sharedDembed)
         }
 
@@ -833,10 +734,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             if (!response.isSuccessful) {
-                Trace.event("PLAYER_NESTED", "HTTP_FAIL", "target=${Trace.target(childUrl)} http=${response.code}")
                 return null
             }
-            Trace.event("PLAYER_NESTED", "HTTP_OK", "target=${Trace.target(childUrl)} http=${response.code}")
             parseAndExtract(
                 pageUrl = childUrl,
                 pageHtml = response.text,
@@ -848,13 +747,16 @@ class DaddyLiveExtractor : ExtractorApi() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Trace.event("PLAYER_NESTED", "ERROR", "target=${Trace.target(childUrl)} reason=${e.javaClass.simpleName}")
             null
         }
     }
 
     private object DaddyLiveDembed {
         private const val EMBED_ORIGIN = "https://dembed.st"
+        private val adDomains = arrayOf("profitableratecpmnetwork.com",
+            "histats.com", "tynt.com", "dtscout.com", "dtscdn.com", "xadsmart.com")
+        private val excludedHeaders = setOf("host", "connection", "content-length",
+            "accept-encoding", "range")
 
         // Document-start injection executes inside dembed.st's iframe, before daddy.min.js.
         // Copy only token/manifest/ticket responses; never consume or replace the originals.
@@ -864,36 +766,6 @@ class DaddyLiveExtractor : ExtractorApi() {
               window.__daddyResponseProbe = true;
               var bridge = window.DaddyResponseTrace;
               function emit(x) { try { if (bridge) { x.origin = location.origin; bridge.postMessage(JSON.stringify(x)); } } catch (_) {} }
-              // Observe resource completion and long main-thread tasks during auth.
-              // No request or player behavior is modified by this observer.
-              var longTasks=[], longTaskAvailable=false;
-              try {
-                if(window.PerformanceObserver &&
-                    (PerformanceObserver.supportedEntryTypes||[]).indexOf("longtask")>=0){
-                  new PerformanceObserver(function(list){
-                    list.getEntries().forEach(function(e){
-                      longTasks.push({at:Math.round(e.startTime),ms:Math.round(e.duration)});
-                      if(longTasks.length>10)longTasks.shift();
-                    });
-                  }).observe({entryTypes:["longtask"]});
-                  longTaskAvailable=true;
-                }
-              }catch(_){}
-              function perfSnapshot(phase){
-                try{
-                  var all=performance.getEntriesByType("resource");
-                  var items=all.map(function(e){
-                    var u;try{u=new URL(e.name,location.href)}catch(_){return null}
-                    return {host:u.hostname.slice(0,65),path:u.pathname.slice(-65),
-                      type:e.initiatorType||"",at:Math.round(e.startTime),
-                      end:Math.round(e.responseEnd),ms:Math.round(e.duration),
-                      blocking:e.renderBlockingStatus||""};
-                  }).filter(Boolean).sort(function(a,b){return b.end-a.end}).slice(0,12);
-                  emit({stage:"perf_snapshot",phase:phase,age:Math.round(performance.now()),
-                    count:all.length,longTaskAvailable:longTaskAvailable,
-                    resources:items,tasks:longTasks.slice()});
-                }catch(_){}
-              }
               function pathOf(raw) { try { return new URL(raw, location.href).pathname; } catch (_) { return ""; } }
               function absoluteOf(raw) { try { return new URL(raw,location.href).href; } catch (_) { return String(raw); } }
               function kindOf(raw, method) {
@@ -939,9 +811,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                   if (kind==="manifest") mediaHost=hostOf(url);
                   if (nativeMedia(url,method,kind)) {
                     nativeStarts++;
-                    if (nativeStarts<=12) emit({stage:"native_start",transport:"fetch",method:method,url:absoluteOf(url)});
+                    if (nativeStarts<=12) emit({stage:"native_start"});
                   }
-                  if (kind) emit({stage:"auth_start",kind:kind});
                   var start = performance.now();
                   var promise = nativeFetch.apply(this, arguments);
                    if (nativeMedia(url,method,kind)) {
@@ -969,7 +840,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                       var actual=r.url||absoluteOf(url), names="";
                       try{names=headerNames(new Headers(init&&init.headers||input&&input.headers));}catch(_){}
                       if(nativeStarts<=12)
-                        emit({stage:"native_start",transport:"fetch_binary_candidate",method:method,url:absoluteOf(url),headers:names});
+                        emit({stage:"native_start"});
                       emit({stage:"native_segment",transport:"fetch_binary_candidate",method:method,
                         requestUrl:absoluteOf(url),url:actual,http:r.status,requestHeaders:names,
                         contentType:mime,contentLength:r.headers.get("content-length")||"",
@@ -1008,7 +879,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         nativeMedia(entry.url,entry.method,entry.kind,
                           self.responseType==="arraybuffer" || self.responseType==="blob")) {
                      nativeStarts++;
-                     if(nativeStarts<=12) emit({stage:"native_start",transport:"xhr",method:entry.method,url:absoluteOf(entry.url),headers:entry.headers.join(",")});
+                     if(nativeStarts<=12) emit({stage:"native_start"});
                      var begun=performance.now();
                      this.addEventListener('loadend',function(){
                        var mime="",len="",bytes=0;
@@ -1022,7 +893,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                      });
                    }
                   if (entry && entry.kind) {
-                    emit({stage:"auth_start",kind:entry.kind});
                     var start=performance.now();
                     this.addEventListener("loadend",function() {
                       var body="",readError="";
@@ -1043,14 +913,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                   return send.apply(this,arguments);
                 };
               } else emit({stage:"install_error",error:"xhr_missing"});
-              window.addEventListener("error",function(e) {
-                emit({stage:"js_error",error:String(e.message || "script_error").slice(0,180),
-                    source:String(e.filename || ""),line:e.lineno || 0});
-              });
-              window.addEventListener("unhandledrejection",function(e) {
-                var r=e.reason;
-                emit({stage:"promise_error",error:String(r && (r.message || r.name) || "rejection").slice(0,180)});
-              });
               // Proxy requests run in the original authenticated iframe, not a new HTTP session.
               window.addEventListener("message", function(ev) {
                 if (ev.source !== window.parent || ev.origin !== "https://thedaddy.li") return;
@@ -1073,9 +935,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                           target.searchParams.set("t", next);
                           target.searchParams.set("_", String(Date.now()));
                         }
-                        emit({stage:"proxy_refresh_info", available:true, token:valid});
-                      } catch (e) { emit({stage:"proxy_refresh_error", error:String(e && e.name || "refresh_failed")}); }
-                    } else emit({stage:"proxy_refresh_info", available:false, token:false});
+                      } catch (_) {}
+                    }
                   }
                   if (cmd.kind === "segment") {
                     // Match LiveLoader's binary XHR path; fetch() may be handled differently.
@@ -1134,7 +995,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 });
               });
               emit({stage:"installed",kind:"fetch_xhr",origin:location.origin});
-              setTimeout(function(){perfSnapshot("probe_installed")},0);
             })();
         """.trimIndent()
         private val responseProbeBytes by lazy { (responseProbe + "\n;\n").toByteArray(Charsets.UTF_8) }
@@ -1151,11 +1011,8 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         // Only static JS is prefetched. Never replay the browser's ticket, token or manifest APIs.
         private fun fetchPlayerScript(
-            url: String, requested: Map<String, String>, session: Session, prefetch: Boolean
+            url: String, requested: Map<String, String>, session: Session
         ): ByteArray? {
-            val started = android.os.SystemClock.elapsedRealtime()
-            if (prefetch) Trace.event("SCRIPT_PREFETCH", "START",
-                "sid=${session.id.take(8)} ${Trace.urlShape(url)} agentId=${Trace.valueId(session.userAgent)}")
             var connection: HttpURLConnection? = null
             return try {
                 val active = URL(url).openConnection() as HttpURLConnection
@@ -1174,12 +1031,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     active.setRequestProperty("User-Agent", session.userAgent)
                 scriptCookie(url)?.let { active.setRequestProperty("Cookie", it) }
                 val code = active.responseCode
-                val headersAt = android.os.SystemClock.elapsedRealtime()
-                if (!prefetch) session.milestone("script_headers",
-                    "http=$code encoding=${active.contentEncoding.orEmpty().take(16)}")
                 if (code != 200 || !active.url.host.equals("dembed.st", true)) {
-                    Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE", "HTTP_FAIL",
-                        "sid=${session.id.take(8)} http=$code fallback=webview_native")
                     return null
                 }
                 val input = if (active.contentEncoding.equals("gzip", true))
@@ -1191,26 +1043,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                         val n = stream.read(buffer)
                         if (n < 0) break
                         if (out.size() + n > 2 * 1024 * 1024) {
-                            Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE",
-                                "TOO_LARGE", "sid=${session.id.take(8)} fallback=webview_native")
                             return null
                         }
                         out.write(buffer, 0, n)
                     }
                 }
                 val bytes = out.toByteArray().takeIf { it.isNotEmpty() } ?: return null
-                val finished = android.os.SystemClock.elapsedRealtime()
-                if (!prefetch) session.milestone("script_body",
-                    "readMs=${finished-headersAt} bytes=${bytes.size}")
-                Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE", "FETCH_OK",
-                    "sid=${session.id.take(8)} bytes=${bytes.size} elapsedMs=${finished-started} " +
-                        "mime=${active.contentType?.substringBefore(';').orEmpty()} " +
-                        "redirected=${active.url.toString() != url} final=${Trace.urlShape(active.url.toString())}")
                 bytes
             } catch (e: Exception) {
-                Trace.event(if (prefetch) "SCRIPT_PREFETCH" else "RESPONSE_BRIDGE", "SCRIPT_ERROR",
-                    "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} fallback=webview_native")
                 null
             } finally {
                 connection?.disconnect()
@@ -1222,7 +1062,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val address = request.url.toString()
             val started = android.os.SystemClock.elapsedRealtime()
             observedPlayerJsUrl = address
-            session.milestone("script_request")
             val cached = session.prefetchedPlayerScript
             val age = cached?.let { started - it.savedAt } ?: -1L
             val browserRef = request.requestHeaders.entries.firstOrNull {
@@ -1240,42 +1079,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                 browserAgent != null && browserAgent != cached.agent -> "agent_changed"
                 else -> "hit"
             }
-            session.scriptReuseResult = result
-            Trace.event("SCRIPT_PREFETCH", if (result == "hit") "HIT" else "MISS",
-                "sid=${session.id.take(8)} reason=$result ageMs=$age")
-            Trace.event("SCRIPT_PREFETCH", "COMPARE",
-                "sid=${session.id.take(8)} saved=${Trace.urlShape(cached?.url)} " +
-                    "requested=${Trace.urlShape(address)} " +
-                    "sameHost=${cached?.let { runCatching { URL(it.url).host == URL(address).host }.getOrDefault(false) }} " +
-                    "samePath=${cached?.let { runCatching { URL(it.url).path == URL(address).path }.getOrDefault(false) }} " +
-                    "sameQuery=${cached?.let { runCatching { URL(it.url).query == URL(address).query }.getOrDefault(false) }} " +
-                    "sameCookie=${cached?.let { it.cookie == scriptCookie(address) }} " +
-                    "sameAgent=${cached?.let { browserAgent == null || browserAgent == it.agent }} " +
-                    "sameReferer=${cached?.let { browserRef == null || browserRef == it.referer }} " +
-                    "headers=${request.requestHeaders.keys.sorted().joinToString(",").take(150)}")
-            Trace.event("RESPONSE_BRIDGE", "SCRIPT_FETCH",
-                "sid=${session.id.take(8)} target=${Trace.target(address)} " +
-                    "mode=${if (result == "hit") "prefetched_js_with_probe" else "original_js_with_probe"}")
             return try {
                 val script = if (result == "hit") {
-                    session.milestone("script_headers", "http=200 prefetch=hit")
-                    session.milestone("script_body", "bytes=${cached!!.body.size} prefetch=hit")
                     cached.body
-                } else fetchPlayerScript(address, request.requestHeaders, session, false) ?: return null
+                } else fetchPlayerScript(address, request.requestHeaders, session) ?: return null
                 val probe = responseProbeBytes
                 val bytes = ByteArray(probe.size + script.size)
                 System.arraycopy(probe, 0, bytes, 0, probe.size)
                 System.arraycopy(script, 0, bytes, probe.size, script.size)
-                Trace.event("RESPONSE_BRIDGE", "SCRIPT_INJECTED",
-                    "sid=${session.id.take(8)} originalBytes=${script.size} probeBytes=${probe.size} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} prefetch=${result == "hit"}")
-                session.milestone("script_injected")
                 WebResourceResponse("application/javascript", "UTF-8", 200, "OK",
                     mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(bytes))
             } catch (e: Exception) {
-                Trace.event("RESPONSE_BRIDGE", "SCRIPT_ERROR",
-                    "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-started} fallback=webview_native")
                 null
             }
         }
@@ -1290,17 +1104,13 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         private class Resource(val url: String, val playlist: Boolean)
         private class DirectResource(
-            val url: String, val playlist: Boolean, val manifest: String, val seenAt: Long
-        )
-        private data class DirectWindow(
-            val sequence: String, val entries: Set<String>, val first: String, val last: String
+            val url: String, val playlist: Boolean, val seenAt: Long
         )
         private class DirectSession(val url: String, val headers: Map<String, String>) {
             val id = UUID.randomUUID().toString().replace("-", "")
             val resources = ConcurrentHashMap<String, DirectResource>()
-            val windows = ConcurrentHashMap<String, DirectWindow>()
             @Volatile var lastUse = android.os.SystemClock.elapsedRealtime()
-            fun reference(address: String, playlist: Boolean, manifest: String): String {
+            fun reference(address: String, playlist: Boolean): String {
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (resources.size > 256) {
                     resources.forEach { (key, resource) ->
@@ -1309,95 +1119,18 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 val key = UUID.nameUUIDFromBytes(address.toByteArray(Charsets.UTF_8))
                     .toString().replace("-", "")
-                resources[key] = DirectResource(address, playlist, manifest, now)
+                resources[key] = DirectResource(address, playlist, now)
                 return "http://127.0.0.1:$port/$id/$key"
             }
         }
         private class BrowserReply(val status: Int, val address: String, val body: String?, val bytes: ByteArray?)
         private class Session(val parent: String, val embedded: String) {
-            private val timingStart = android.os.SystemClock.elapsedRealtime()
-            private val timingLast = AtomicLong(timingStart)
-            private val timingStages = ConcurrentHashMap.newKeySet<String>()
-            private val timingTimes = ConcurrentHashMap<String, Long>()
-            private val reported = AtomicInteger()
-            @Volatile var scriptReuseResult = "not_requested"
-            @Volatile var issuedTokenId = "none"
-            @Volatile var issuedTokenAt = 0L
-            @Volatile var signedManifestHttp = -1
-            @Volatile var unsignedManifestHttp = -1
             @Volatile var rejectedSignedManifest = ""
             fun markRejectedManifest(address: String, code: Int) {
                 if (code != 404 || browserManifestBody != null || address != url ||
                     Uri.parse(address).getQueryParameter("t").isNullOrBlank()) return
                 rejectedSignedManifest = address
-                Trace.event("HLS_BROWSER", "SIGNED_404_TERMINAL",
-                    "sid=${id.take(8)} ${Trace.urlShape(address)}")
                 if (!browserManifestReady.isCompleted) browserManifestReady.complete(false)
-            }
-            fun reportOutcome(status: String) {
-                if (!reported.compareAndSet(0, 1)) return
-                fun gap(a: String, b: String): Long {
-                    val start = timingTimes[a] ?: return -1
-                    val end = timingTimes[b] ?: return -1
-                    return end - start
-                }
-                Trace.event("AUTH_DIAG_SUMMARY", status,
-                    "sid=${id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-timingStart} " +
-                        "pageStartMs=${gap("extract_start","page_started")} " +
-                        "beforeScriptMs=${gap("page_started","script_request")} " +
-                        "scriptLoadMs=${gap("script_request","script_injected")} " +
-                        "toTicketMs=${gap("script_injected","ticket_request")} " +
-                        "ticketToTokenMs=${gap("ticket_request","token_response")} " +
-                        "tokenToManifestMs=${gap("token_response","manifest_response")} " +
-                        "preflightMs=${gap("preflight_start","preflight_ok")} " +
-                        "prefetch=$scriptReuseResult navigations=${mainNavigations.get()} " +
-                        "ticketHttp=$browserTicketHttp tokenHttp=$browserTokenHttp " +
-                        "unsignedHttp=$unsignedManifestHttp signedHttp=$signedManifestHttp " +
-                        "manifestError=${manifestHttpError ?: -1} authRequests=$authRequestCount " +
-                        "sealed=$sealedPlaylist tailHeld=$skipInitialTail")
-            }
-            val mainNavigations = AtomicInteger()
-            private val parentResources = AtomicInteger()
-            private val embedResources = AtomicInteger()
-            private val externalResources = AtomicInteger()
-            private val externalScripts = AtomicInteger()
-            val blockedAdResources = AtomicInteger()
-            private val parentHost = Uri.parse(parent).host.orEmpty()
-
-            fun milestone(step: String, detail: String = "") {
-                if (!timingStages.add(step)) return
-                val now = android.os.SystemClock.elapsedRealtime()
-                val prior = timingLast.getAndSet(now)
-                timingTimes[step] = now
-                Trace.event("AUTH_TIMING", "MARK", "sid=${id.take(8)} step=$step " +
-                    "totalMs=${now-timingStart} gapMs=${now-prior} $detail")
-                if (step == "link_ready") reportOutcome("LINK_READY")
-            }
-
-            // P2 only measures: the original browser requests remain untouched.
-            fun observeResource(request: WebResourceRequest) {
-                val host = request.url.host.orEmpty()
-                if (host.isBlank()) return
-                when {
-                    host.equals(parentHost, true) -> parentResources.incrementAndGet()
-                    host.equals("dembed.st", true) -> embedResources.incrementAndGet()
-                    else -> {
-                        val count = externalResources.incrementAndGet()
-                        val script = request.url.path?.endsWith(".js", true) == true
-                        if (script) externalScripts.incrementAndGet()
-                        if (count <= 5) Trace.event("AUTH_RESOURCE", "EXTERNAL",
-                            "sid=${id.take(8)} host=${host.take(90)} script=$script " +
-                            "totalMs=${android.os.SystemClock.elapsedRealtime()-timingStart}")
-                    }
-                }
-            }
-
-            fun resourceSnapshot(step: String) {
-                Trace.event("AUTH_RESOURCE", "SUMMARY",
-                    "sid=${id.take(8)} step=$step navigations=${mainNavigations.get()} " +
-                    "parent=${parentResources.get()} embed=${embedResources.get()} " +
-                    "external=${externalResources.get()} scripts=${externalScripts.get()} " +
-                        "adsBlocked=${blockedAdResources.get()}")
             }
             val id: String = UUID.randomUUID().toString().replace("-", "")
             @Volatile var prefetchedPlayerScript: PrefetchedPlayerScript? = null
@@ -1405,6 +1138,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             private val pendingResources = ConcurrentHashMap<String, CompletableDeferred<BrowserReply?>>()
             val manifestMutex = Mutex()
             val failedSegments = ConcurrentHashMap<String, Long>()
+            val syntheticSegments = ConcurrentHashMap<String, Boolean>()
             @Volatile var segmentTransport = "client"
             @Volatile var directAllowed = false
             @Volatile var encryptedMedia = false
@@ -1413,7 +1147,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val jsMediaRequests = AtomicInteger()
             @Volatile var segmentTokenMode = false
             @Volatile var tokenProbeDone = false
-            val syntheticSegments = ConcurrentHashMap<String, Boolean>()
             val expectedUrls = ConcurrentHashMap<String, Boolean>()
             private val expectedPathCounts = ConcurrentHashMap<String, Int>()
             private data class ObservedMedia(val effective: String, val at: Long)
@@ -1427,8 +1160,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     .take(50).forEach { part ->
                         runCatching { URL(URL(base), part).toString() }.getOrNull()?.let { address ->
                             if (!URL(address).path.endsWith(".m3u8", true)) {
-                                expectedUrls[Trace.key(address)] = true
-                                val pathId = Trace.pathKey(address)
+                                expectedUrls[UrlKey.key(address)] = true
+                                val pathId = UrlKey.pathKey(address)
                                 expectedPathCounts[pathId] = (expectedPathCounts[pathId] ?: 0) + 1
                             }
                         }
@@ -1450,13 +1183,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                     observedExact.clear()
                 }
                 val entry = ObservedMedia(effective, android.os.SystemClock.elapsedRealtime())
-                observedExact[Trace.key(request)] = entry
-                observedMedia[Trace.pathKey(request)] = entry
+                observedExact[UrlKey.key(request)] = entry
+                observedMedia[UrlKey.pathKey(request)] = entry
             }
 
             private fun verifiedSegment(address: String): String? {
-                val pathId = Trace.pathKey(address)
-                val exactKey = Trace.key(address)
+                val pathId = UrlKey.pathKey(address)
+                val exactKey = UrlKey.key(address)
                 val recorded = observedExact[exactKey]?.takeIf { expectedUrls.containsKey(exactKey) }
                     ?: observedMedia[pathId]?.takeIf { expectedPathCounts[pathId] == 1 }
                     ?: return null
@@ -1466,26 +1199,17 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun hasVerifiedAlternative(address: String): Boolean =
                 verifiedSegment(address)?.let { it != address } == true
 
-            private val scriptErrorCount = AtomicInteger()
-
-            fun errorDetail(source: String, line: Int, raw: String, kind: String) {
-                if (scriptErrorCount.incrementAndGet() > 8) return
-                Trace.event("PLAYER_SCRIPT_ERROR", kind,
-                    "sid=${id.take(8)} source=${Trace.target(source)} line=$line message=${Trace.error(raw)}")
-            }
-
             fun observeNativeRequest(address: String, method: String, original: Map<String, String>) {
                 if (nativeRequestCount.incrementAndGet() > 12) return
-                nativeHeaders[Trace.key(address)] = original.toMap()
+                nativeHeaders[UrlKey.key(address)] = original.toMap()
             }
 
             fun mediaHeaders(address: String): Map<String, String> {
-                val original = nativeHeaders[Trace.key(address)]
+                val original = nativeHeaders[UrlKey.key(address)]
                 val base = original ?: headers
                 val result = linkedMapOf<String, String>()
                 base.forEach { (name, value) ->
-                    if (name.lowercase() !in setOf("host", "connection", "content-length",
-                            "accept-encoding", "range") && value.isNotBlank()) result[name] = value
+                    if (name.lowercase() !in excludedHeaders && value.isNotBlank()) result[name] = value
                 }
                 runCatching { CookieManager.getInstance().getCookie(address) }.getOrNull()?.let { value ->
                     result.keys.firstOrNull { it.equals("Cookie", true) }?.let { result.remove(it) }
@@ -1508,15 +1232,11 @@ class DaddyLiveExtractor : ExtractorApi() {
             @Volatile var userAgent = "Mozilla/5.0"
             @Volatile var browserHeaders: Map<String, String> = emptyMap()
             @Volatile var authHttpError: Int? = null
-            @Volatile var manifestHttpError: Int? = null
-            @Volatile var authRequestCount = 0
             @Volatile var probeAvailable = false
             @Volatile var probeInstalled = false
             @Volatile var browserManifestBody: String? = null
             @Volatile var browserManifestUrl: String = ""
             @Volatile var browserManifestAt = 0L
-            @Volatile var browserTokenHttp = -1
-            @Volatile var browserTicketHttp = -1
             val browserManifestReady = CompletableDeferred<Boolean>()
             val headers: Map<String, String>
                 get() = mutableMapOf(
@@ -1526,8 +1246,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "Accept" to "*/*"
                 ).also { map ->
                     browserHeaders.forEach { (key, value) ->
-                        if (key.lowercase() !in setOf("host", "content-length", "connection",
-                                "accept-encoding", "range") && value.isNotBlank()) {
+                        if (key.lowercase() !in excludedHeaders && value.isNotBlank()) {
                             map.keys.firstOrNull { it.equals(key, true) }?.let { map.remove(it) }
                             map[key] = value
                         }
@@ -1542,42 +1261,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
 
             private fun responseState(kind: String, status: Int, address: String, body: String, truncated: Boolean) {
-                milestone("${kind}_response", "http=$status")
-                if (kind == "ticket") resourceSnapshot("ticket_response")
-                val code = if (status in 200..299) "OK" else if (status == 0) "NETWORK_OR_CORS" else "HTTP_FAIL"
-                val reason = if (status in 200..299) "none" else Trace.bodyReason(body)
-                Trace.event("BROWSER_RESPONSE", code,
-                    "sid=${id.take(8)} kind=$kind http=$status target=${Trace.target(address)} " +
-                        "bodyChars=${body.length} truncated=$truncated reason=$reason")
                 when (kind) {
-                    "ticket" -> {
-                        browserTicketHttp = status
-                        Trace.event("AUTH_TICKET", code, "sid=${id.take(8)} http=$status reason=$reason")
-                    }
                     "token" -> {
-                        browserTokenHttp = status
                         authHttpError = status.takeIf { it !in 200..299 }
-                        Trace.event("AUTH_RESPONSE", if (status in 200..299) "BROWSER_HTTP_OK" else "BROWSER_HTTP_FAIL",
-                            "sid=${id.take(8)} http=$status chars=${body.length} " +
-                                "reason=$reason truncated=$truncated")
-                        if (status in 200..299 && !truncated) onToken(body.toByteArray(Charsets.UTF_8))
+                        if (status in 200..299 && !truncated)
+                            onToken(body.toByteArray(Charsets.UTF_8))
                     }
                     "manifest" -> {
-                        manifestHttpError = status.takeIf { it !in 200..299 }
-                        val decoded = body.trimStart().startsWith("#EXTM3U")
-                        val signature = runCatching { Uri.parse(address).getQueryParameter("t") }.getOrNull()
-                        val signed = !signature.isNullOrBlank()
-                        if (signed) signedManifestHttp = status else unsignedManifestHttp = status
+                        val signed = !Uri.parse(address).getQueryParameter("t").isNullOrBlank()
                         if (signed) markRejectedManifest(address, status)
-                        Trace.event("AUTH_CHAIN", "MANIFEST_RESPONSE",
-                            "sid=${id.take(8)} http=$status ${Trace.urlShape(address)} " +
-                                "signed=$signed tokenId=${Trace.valueId(signature)} issuedId=$issuedTokenId " +
-                                "matchesIssued=${signed && issuedTokenId != "none" && Trace.valueId(signature) == issuedTokenId} " +
-                                "issuedAgeMs=${if (issuedTokenAt > 0) android.os.SystemClock.elapsedRealtime()-issuedTokenAt else -1} " +
-                                "bodyChars=${body.length} truncated=$truncated")
-                        Trace.event("HLS_BROWSER", code,
-                            "sid=${id.take(8)} http=$status signed=$signed extm3u=$decoded " +
-                                "chars=${body.length} truncated=$truncated reason=$reason")
                         if (status in 200..299 && !truncated && body.isNotEmpty()) {
                             if (browserManifestBody == null || signed ||
                                 Uri.parse(browserManifestUrl).getQueryParameter("t").isNullOrBlank()) {
@@ -1596,51 +1288,19 @@ class DaddyLiveExtractor : ExtractorApi() {
 
             fun onBrowserMessage(raw: String) {
                 if (raw.length > 6 * 1024 * 1024) {
-                    Trace.event("RESPONSE_BRIDGE", "REJECT", "sid=${id.take(8)} reason=message_over_limit bytes=${raw.length}")
                     return
                 }
                 val message = runCatching { JSONObject(raw) }.getOrNull()
                 if (message == null) {
-                    Trace.event("RESPONSE_BRIDGE", "ERROR", "sid=${id.take(8)} reason=invalid_json")
                     return
                 }
                 if (message.optString("origin") != EMBED_ORIGIN) {
-                    Trace.event("RESPONSE_BRIDGE", "REJECT",
-                        "sid=${id.take(8)} reason=invalid_frame_origin")
                     return
                 }
                 val stage = message.optString("stage")
                 when (stage) {
                     "installed" -> {
-                        milestone("probe_installed")
                         probeInstalled = true
-                        Trace.event("RESPONSE_BRIDGE", "INSTALLED", "sid=${id.take(8)} type=${message.optString("kind")}")
-                    }
-                    "perf_snapshot" -> {
-                        val phase = message.optString("phase").take(30)
-                        val list = message.optJSONArray("resources")
-                        Trace.event("AUTH_PERF", "SUMMARY",
-                            "sid=${id.take(8)} phase=$phase ageMs=${message.optInt("age")} " +
-                            "resources=${message.optInt("count")} longTaskAvailable=${message.optBoolean("longTaskAvailable")}")
-                        for (i in 0 until minOf(list?.length() ?: 0, 12)) {
-                            val entry = list?.optJSONObject(i) ?: continue
-                            Trace.event("AUTH_PERF", "RESOURCE",
-                                "sid=${id.take(8)} phase=$phase host=${entry.optString("host").take(65)} " +
-                                "path=${entry.optString("path").take(65)} type=${entry.optString("type").take(20)} " +
-                                "startMs=${entry.optInt("at")} endMs=${entry.optInt("end")} " +
-                                "durationMs=${entry.optInt("ms")} blocking=${entry.optString("blocking").take(20)}")
-                        }
-                        val tasks = message.optJSONArray("tasks")
-                        for (i in 0 until minOf(tasks?.length() ?: 0, 10)) {
-                            val item = tasks?.optJSONObject(i) ?: continue
-                            Trace.event("AUTH_PERF", "LONG_TASK",
-                                "sid=${id.take(8)} phase=$phase startMs=${item.optInt("at")} " +
-                                "durationMs=${item.optInt("ms")}")
-                        }
-                    }
-                    "auth_start" -> {
-                        val kind = message.optString("kind")
-                        if (kind in setOf("ticket", "token", "manifest")) milestone("${kind}_request")
                     }
                     "response" -> {
                         val kind = message.optString("kind")
@@ -1650,28 +1310,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                         if (kind == "token" && urlPath != "/api/playlist-token" ||
                             kind == "manifest" && !urlPath.endsWith(".m3u8", true) ||
                             kind == "ticket" && !urlPath.startsWith("/premiumtv/")) {
-                            Trace.event("RESPONSE_BRIDGE", "REJECT",
-                                "sid=${id.take(8)} kind=$kind reason=wrong_endpoint")
                             return
                         }
                         val body = message.optString("body")
                         val status = message.optInt("http", -1)
                         val truncated = message.optBoolean("truncated", false)
-                        val method = message.optString("method")
-                        Trace.event("RESPONSE_BRIDGE", "RECEIVED",
-                            "sid=${id.take(8)} kind=$kind method=$method http=$status " +
-                                "transport=${message.optString("responseType")} elapsedMs=${message.optLong("elapsedMs")} " +
-                                "reportedChars=${message.optInt("length")} truncated=$truncated " +
-                                "headers=${message.optString("headers").take(180)}")
                         responseState(kind, status, target, body, truncated)
-                    }
-                    "proxy_refresh_info" -> {
-                        Trace.event("AUTH_REFRESH", if (message.optBoolean("token")) "BROWSER_OK" else "BROWSER_UNAVAILABLE",
-                            "sid=${id.take(8)} functionAvailable=${message.optBoolean("available")} tokenPresent=${message.optBoolean("token")}")
-                    }
-                    "proxy_refresh_error" -> {
-                        Trace.event("AUTH_REFRESH", "BROWSER_ERROR",
-                            "sid=${id.take(8)} reason=${message.optString("error").take(64)}")
                     }
                     "native_start" -> { jsMediaRequests.incrementAndGet() }
                     "native_segment" -> {
@@ -1690,37 +1334,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 .getOrNull()?.takeIf { it.isNotEmpty() }
                         } else null
                         val result = BrowserReply(status, message.optString("url"), body, bytes)
-                        Trace.event("PROXY_BROWSER", if (status in 200..299 && (body != null || bytes != null)) "OK" else "FAILED",
-                            "sid=${this.id.take(8)} kind=$kind http=$status text=${body?.length ?: 0} " +
-                                "bytes=${bytes?.size ?: 0} reason=${message.optString("error").take(64)}")
-                        if (kind == "segment") {
-                            Trace.event("BROWSER_SEGMENT", "RESPONSE",
-                                "sid=${this.id.take(8)} ${Trace.fingerprint(message.optString("url"))} " +
-                                    "http=$status mime=${message.optString("contentType").take(75)} " +
-                                    "elapsedMs=${message.optLong("elapsedMs")}")
-                        }
+
                         request.complete(result)
-                    }
-                    "network_error", "read_error", "clone_error", "install_error", "js_error", "promise_error" -> {
-                        val error = message.optString("error").lowercase()
-                        val category = when {
-                            "turnstile" in error || "captcha" in error -> "turnstile"
-                            "cors" in error -> "cors"
-                            "security" in error -> "security"
-                            "fetch" in error || "network" in error -> "network"
-                            "timeout" in error -> "timeout"
-                            "invalid" in error -> "invalid"
-                            else -> "other"
-                        }
-                        Trace.event("RESPONSE_BRIDGE", "ERROR",
-                            "sid=${id.take(8)} stage=$stage kind=${message.optString("kind")} " +
-                                "category=$category errorClass=${message.optString("error").substringBefore(':').take(50)} " +
-                                "source=${Trace.target(message.optString("source"))} line=${message.optInt("line")}")
-                        if (stage == "js_error" || stage == "promise_error") {
-                            val origin = message.optString("source")
-                            if (origin.contains("daddy.min.js", true) || origin.contains("daddy.php", true) || stage == "promise_error")
-                                errorDetail(origin, message.optInt("line"), message.optString("error"), stage)
-                        }
                     }
                 }
             }
@@ -1728,60 +1343,37 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun onToken(response: ByteArray) {
                 val data = runCatching { JSONObject(String(response, Charsets.UTF_8)) }.getOrNull()
                 if (data == null) {
-                    Trace.event("AUTH_TOKEN", "PARSE_FAIL", "sid=${id.take(8)} bytes=${response.size} reason=invalid_json")
                     return
                 }
                 val current = data.optString("token").ifBlank { data.optString("t") }
                 if (current.isNotBlank()) {
                     token = current
-                    issuedTokenId = Trace.valueId(current)
-                    issuedTokenAt = android.os.SystemClock.elapsedRealtime()
                 }
-                Trace.event("AUTH_CHAIN", "TOKEN_ISSUED",
-                    "sid=${id.take(8)} tokenId=${Trace.valueId(current)} " +
-                        "fields=${data.keys().asSequence().take(12).toList().sorted().joinToString(",")} " +
-                        "keyPresent=${data.optString("k").isNotBlank()}")
                 val key = data.optString("k")
                 if (current.isNotBlank() && key.isNotBlank()) {
                     val decoded = runCatching { Base64.decode(key, Base64.URL_SAFE or Base64.NO_WRAP) }.getOrNull()
                     if (decoded != null && decoded.size in setOf(16, 24, 32)) {
                         if (playKeys.size >= 4 && !playKeys.containsKey(current)) playKeys.clear()
                         playKeys[current] = decoded
-                        Trace.event("AUTH_KEY", "ACQUIRED", "sid=" + id.take(8) + " bits=" + decoded.size * 8)
-                    } else Trace.event("AUTH_KEY", "INVALID", "sid=" + id.take(8))
+                    }
                 }
-                Trace.event("AUTH_TOKEN", if (current.isNotBlank()) "ACQUIRED" else "MISSING",
-                    "sid=" + id.take(8) + " tokenPresent=" + current.isNotBlank() + " responseBytes=" + response.size)
             }
 
             fun captureManifest(request: WebResourceRequest) {
                 val address = request.url.toString()
                 val t = request.url.getQueryParameter("t")
-                Trace.event("AUTH_CHAIN", "MANIFEST_REQUEST",
-                    "sid=${id.take(8)} ${Trace.urlShape(address)} signed=${!t.isNullOrBlank()} " +
-                        "tokenId=${Trace.valueId(t)} issuedId=$issuedTokenId " +
-                        "matchesIssued=${!t.isNullOrBlank() && issuedTokenId != "none" && Trace.valueId(t) == issuedTokenId} " +
-                        "issuedAgeMs=${if (issuedTokenAt > 0) android.os.SystemClock.elapsedRealtime()-issuedTokenAt else -1} " +
-                        "${Trace.headerProfile(request.requestHeaders)}")
                 if (token.isNotBlank() && t.isNullOrBlank() &&
                     Uri.parse(url).getQueryParameter("t")?.isNotBlank() == true) {
-                    Trace.event("PLAYER_URL", "PRESERVE_SIGNED", "sid=${id.take(8)} reason=ignore_late_unsigned_request")
                     return
                 }
                 url = address
                 browserHeaders = request.requestHeaders.toMap()
                 if (!t.isNullOrBlank()) token = t
-                Trace.event("PLAYER_URL", "CAPTURED",
-                    "sid=${id.take(8)} target=${Trace.target(address)} signed=${!t.isNullOrBlank()} " +
-                        "headerNames=${browserHeaders.keys.sorted().joinToString(",")} " +
-                        "cookieStored=${runCatching { !CookieManager.getInstance().getCookie(address).isNullOrBlank() }.getOrDefault(false)} " +
-                        "authRequests=$authRequestCount authHttpError=${authHttpError ?: -1}")
             }
 
 
             suspend fun browserRequest(kind: String, address: String): BrowserReply? {
                 if (!probeInstalled || browser == null) {
-                    Trace.event("PROXY_BROWSER", "UNAVAILABLE", "sid=${id.take(8)} kind=$kind installed=$probeInstalled")
                     return null
                 }
                 // Only forward a resource from this specific player's origin and channel directory.
@@ -1793,13 +1385,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                         target.path.startsWith(source.path.substringBeforeLast('/') + "/")
                 }.getOrDefault(false)
                 if (!valid) {
-                    Trace.event("PROXY_BROWSER", "REJECT", "sid=${id.take(8)} kind=$kind reason=outside_channel")
                     return null
                 }
                 val requestId = UUID.randomUUID().toString().replace("-", "")
                 val result = CompletableDeferred<BrowserReply?>()
                 pendingResources[requestId] = result
-                if (kind == "segment") syntheticSegments[Trace.key(address)] = true
+                if (kind == "segment") syntheticSegments[UrlKey.key(address)] = true
                 val command = JSONObject().put("daddyProxy", 1).put("id", requestId)
                     .put("kind", kind).put("url", address).toString()
                 val script = """(function(){
@@ -1819,24 +1410,18 @@ class DaddyLiveExtractor : ExtractorApi() {
                     else runCatching {
                         view.evaluateJavascript(script) { response ->
                             if (response?.trim()?.toIntOrNull() == 0) {
-                                Trace.event("PROXY_BROWSER", "NO_FRAME", "sid=${id.take(8)} kind=$kind")
                                 result.complete(null)
                             }
                         }
                     }.onFailure {
-                        Trace.event("PROXY_BROWSER", "DISPATCH_ERROR",
-                            "sid=${id.take(8)} kind=$kind reason=${it.javaClass.simpleName}")
                         result.complete(null)
                     }
                 }
                 return try {
-                    withTimeoutOrNull(if (kind == "segment") 5500L else 7000L) { result.await() }.also {
-                        if (it == null) Trace.event("PROXY_BROWSER", "TIMEOUT",
-                            "sid=${id.take(8)} kind=$kind target=${Trace.target(address)}")
-                    }
+                    withTimeoutOrNull(if (kind == "segment") 5500L else 7000L) { result.await() }
                 } finally {
                     pendingResources.remove(requestId)
-                    if (kind == "segment") syntheticSegments.remove(Trace.key(address))
+                    if (kind == "segment") syntheticSegments.remove(UrlKey.key(address))
                 }
             }
 
@@ -1853,9 +1438,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             fun actualSegment(address: String): String {
                 val observed = verifiedSegment(address)
                 if (observed != null && observed != address) {
-                    Trace.event("SEGMENT_URL", "ORIGINAL_CONFIRMED",
-                        "sid=${id.take(8)} request=${Trace.fingerprint(address)} " +
-                            "effective=${Trace.fingerprint(observed)}")
                     return observed
                 }
                 return if (segmentTokenMode) segmentWithToken(address) ?: address else address
@@ -1880,7 +1462,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             fun close() {
-                reportOutcome("CLOSED_WITHOUT_LINK")
                 pendingResources.values.forEach { it.complete(null) }
                 pendingResources.clear()
                 val player = browser
@@ -1895,13 +1476,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 !link.url.startsWith("https://")) return link
             val openPort = startServer()
             if (openPort == 0) {
-                Trace.event("DIRECT_HLS_DIAG", "SKIPPED", "reason=proxy_bind_failed")
                 return link
             }
             val direct = DirectSession(link.url, link.headers)
             directSessions[direct.id] = direct
-            Trace.event("DIRECT_HLS_DIAG", "ENABLED",
-                "sid=${direct.id.take(8)} transport=local_proxy_okhttp upstream=${Trace.fingerprint(link.url)}")
             return newExtractorLink(link.source, link.name,
                 "http://127.0.0.1:$openPort/${direct.id}/index.m3u8", ExtractorLinkType.M3U8) {
                 referer = link.referer
@@ -1915,7 +1493,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     uri.scheme == "https" && uri.host == "dembed.st" &&
                         uri.path?.matches(Regex("""^/premiumtv/[a-z0-9_-]+\.php$""", RegexOption.IGNORE_CASE)) == true
                 }.getOrDefault(false)) {
-                Trace.event("DEMBED", "SKIP", "target=${Trace.target(embedded)} reason=invalid_player_endpoint")
                 return null
             }
             // Share the in-flight result rather than failing the later candidate.
@@ -1923,8 +1500,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val shared = sharedDembed.putIfAbsent(embedded, pending)
             if (shared != null) {
                 val link = shared.await()
-                Trace.event("DEMBED", if (link != null) "SHARED_OK" else "SHARED_FAILED",
-                    "target=${Trace.target(embedded)}")
                 return link
             }
             var result: ExtractorLink? = null
@@ -1938,14 +1513,10 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         private suspend fun extractDistinct(embedded: String, parent: String, name: String): ExtractorLink? {
             val session = Session(parent, embedded)
-            session.milestone("extract_start")
-            val startMs = android.os.SystemClock.elapsedRealtime()
-            Trace.event("DEMBED", "START", "sid=${session.id.take(8)} target=${Trace.target(embedded)} parent=${Trace.target(parent)}")
             val captured = withTimeoutOrNull(20000L) {
                 suspendCancellableCoroutine<String?> { continuation ->
                     var web: WebView? = null
                     val timeout = Runnable {
-                        Trace.event("PLAYER_URL", "TIMEOUT", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                         if (continuation.isActive) continuation.resume(null)
                     }
                     continuation.invokeOnCancellation {
@@ -1961,11 +1532,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                             val context = (CloudStreamApp.context ?: app) as android.content.Context
                             web = WebView(context)
                             val view = web!!
-                            Trace.event("AUTH_WEBVIEW", "CREATED",
-                                "sid=${session.id.take(8)} attached=${view.isAttachedToWindow} parentPresent=${view.parent != null} " +
-                                    "shown=${view.isShown} size=${view.width}x${view.height}")
                             session.browser = view
-                            session.milestone("webview_created")
                             session.userAgent = view.settings.userAgentString
                             view.settings.javaScriptEnabled = true
                             view.settings.domStorageEnabled = true
@@ -1975,126 +1542,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                             // without depending on AndroidX WebKit classes at runtime.
                             session.probeAvailable = true
                             view.addJavascriptInterface(session, "DaddyResponseTrace")
-                            Trace.event("RESPONSE_BRIDGE", "READY",
-                                "sid=${session.id.take(8)} mode=framework_js_interface " +
-                                    "injection=player_js_prepend")
-                            view.webChromeClient = object : WebChromeClient() {
-                                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
-                                    val raw = message?.message().orEmpty()
-                                    if (message?.message() != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
-                                        val kind = when {
-                                            raw.contains("turnstile", true) || raw.contains("captcha", true) -> "challenge"
-                                            raw.contains("ticket", true) -> "ticket"
-                                            raw.contains("token", true) -> "token"
-                                            raw.contains("cors", true) -> "cors"
-                                            raw.contains("network", true) -> "network"
-                                            else -> "script_error"
-                                        }
-                                        Trace.event("AUTH_JS", "ERROR",
-                                            "sid=${session.id.take(8)} kind=$kind source=${Trace.target(message.sourceId())} line=${message.lineNumber()}")
-                                        if (message.sourceId().contains("daddy.min.js", true) ||
-                                            message.sourceId().contains("daddy.php", true))
-                                            session.errorDetail(message.sourceId(), message.lineNumber(), raw, kind)
-                                    }
-                                    return false
-                                }
-                            }
+                            view.webChromeClient = WebChromeClient()
                             view.webViewClient = object : WebViewClient() {
-                                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                                    val count = session.mainNavigations.incrementAndGet()
-                                    session.milestone("page_started")
-                                    Trace.event("AUTH_PAGE", "NAVIGATE",
-                                        "sid=${session.id.take(8)} count=$count target=${Trace.target(url.orEmpty())}")
-                                }
-
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    session.milestone("page_finished")
-                                    session.resourceSnapshot("page_finished")
-                                    // Main document performance provides the pre-Dembed JS
-                                    // resource waterfall and HTML script async/defer attributes.
-                                    view?.evaluateJavascript("""
-                                        (function(){
-                                          try {
-                                            var items=performance.getEntriesByType('resource')
-                                              .filter(function(e){return e.initiatorType==='script'||/\.js$/i.test(new URL(e.name).pathname)})
-                                              .sort(function(a,b){return b.responseEnd-a.responseEnd}).slice(0,16)
-                                              .map(function(e){
-                                                var u=new URL(e.name);
-                                                return [u.hostname.slice(0,55),u.pathname.slice(-55),
-                                                  Math.round(e.startTime),Math.round(e.responseEnd),
-                                                  Math.round(e.duration),e.renderBlockingStatus||''].join(':');
-                                              });
-                                            var scripts=Array.prototype.slice.call(document.scripts).slice(0,24)
-                                              .filter(function(x){return !!x.src})
-                                              .map(function(x){
-                                                var u=new URL(x.src);
-                                                return [u.hostname.slice(0,50),u.pathname.slice(-45),
-                                                  !!x.async,!!x.defer].join(':');
-                                              });
-                                            return JSON.stringify({age:Math.round(performance.now()),
-                                              total:performance.getEntriesByType('resource').length,
-                                              scripts:document.scripts.length,resources:items,attributes:scripts});
-                                          }catch(e){return JSON.stringify({error:String(e&&e.name||'unavailable')})}
-                                        })();
-                                    """.trimIndent()) { raw ->
-                                        val decoded = runCatching { JSONTokener(raw).nextValue().toString() }
-                                            .getOrDefault("invalid").take(3500)
-                                        Trace.event("AUTH_PARENT_PERF", "SNAPSHOT",
-                                            "sid=${session.id.take(8)} data=$decoded")
-                                    }
-                                    Trace.event("AUTH_WEBVIEW", "PAGE_LOADED",
-                                        "sid=${session.id.take(8)} target=${Trace.target(url.orEmpty())} " +
-                                        "probeAvailable=${session.probeAvailable} installed=${session.probeInstalled}")
-                                }
-
-                                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                                    if (request?.isForMainFrame == true || request?.url?.path?.contains("/premium") == true) {
-                                        Trace.event("AUTH_WEBVIEW", "LOAD_ERROR",
-                                            "sid=${session.id.take(8)} target=${Trace.target(request?.url?.toString().orEmpty())} code=${error?.errorCode} " +
-                                                "description=${error?.description?.toString()?.substringBefore('?')?.take(90)}")
-                                    }
-                                }
-
                                 override fun onReceivedHttpError(
                                     view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?
                                 ) {
                                     val target = request?.url?.toString().orEmpty()
                                     val path = request?.url?.path.orEmpty()
                                     val status = errorResponse?.statusCode ?: -1
-                                    val headers = errorResponse?.responseHeaders.orEmpty()
                                     if (path == "/api/playlist-token") {
                                         session.authHttpError = status
-                                        Trace.event("AUTH_RESPONSE", "BROWSER_HTTP_FAIL",
-                                            "sid=${session.id.take(8)} http=$status reason=${errorResponse?.reasonPhrase?.take(64)} " +
-                                                "target=${Trace.target(target)} method=${request?.method} " +
-                                                "headerNames=${headers.keys.sorted().joinToString(",")} " +
-                                                "cfMitigation=${headers.keys.any { it.equals("cf-mitigated", true) }} " +
-                                                "wwwAuth=${headers.keys.any { it.equals("www-authenticate", true) }} " +
-                                                "retryAfter=${headers.keys.any { it.equals("retry-after", true) }} " +
-                                                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                                     } else if (path.endsWith(".m3u8", true)) {
-                                        session.manifestHttpError = status
                                         session.markRejectedManifest(target, status)
-                                        Trace.event("HLS_BROWSER", "HTTP_FAIL",
-                                            "sid=${session.id.take(8)} http=$status target=${Trace.target(target)} " +
-                                                "signed=${request?.url?.getQueryParameter("t")?.isNotBlank() == true} " +
-                                                "headerNames=${headers.keys.sorted().joinToString(",")}")
-                                    } else if (request?.isForMainFrame == true || path.contains("/premium") ||
-                                        (session.url.isNotBlank() && request?.url?.host.equals(Uri.parse(session.url).host, true))) {
-                                        if (session.syntheticSegments.containsKey(Trace.key(target))) {
-                                            Trace.event("SEGMENT_SYNTHETIC_HTTP", "RESPONSE",
-                                                "sid=${session.id.take(8)} http=$status " +
-                                                    "${Trace.fingerprint(target)} " +
-                                                    "contentType=${headers.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value.orEmpty().take(45)}")
-                                        }
-                                        Trace.event("AUTH_WEBVIEW", "HTTP_ERROR",
-                                            "sid=${session.id.take(8)} target=${Trace.target(target)} http=$status " +
-                                                "reason=${errorResponse?.reasonPhrase?.take(64)}")
                                     }
                                     if (request?.url?.host == "dembed.st" &&
                                         path == Uri.parse(embedded).path && status in 400..599) {
-                                        Trace.event("PLAYER_URL", "REJECTED",
-                                            "sid=${session.id.take(8)} reason=embedded_page_http_$status")
                                         main.post {
                                             if (continuation.isActive) {
                                                 main.removeCallbacks(timeout)
@@ -2109,20 +1571,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 ): WebResourceResponse? {
                                     if (request == null) return null
                                     val uri = request.url
-                                    session.observeResource(request)
                                     val address = uri.toString()
                                     // Suppress documented ad/analytics subresources only, not
                                     // player, challenge, media or navigation requests.
                                     val host = uri.host.orEmpty()
-                                    val adDomains = arrayOf("profitableratecpmnetwork.com",
-                                        "histats.com", "tynt.com", "dtscout.com",
-                                        "dtscdn.com", "xadsmart.com")
                                     if (!request.isForMainFrame && uri.scheme == "https" &&
                                         request.method.equals("GET", true) &&
                                         adDomains.any { host == it || host.endsWith(".$it") }) {
-                                        val blocked = session.blockedAdResources.incrementAndGet()
-                                        if (blocked <= 4) Trace.event("AUTH_RESOURCE", "BLOCK_AD",
-                                            "sid=${session.id.take(8)} host=$host count=$blocked")
                                         return WebResourceResponse("text/plain", "UTF-8",
                                             ByteArrayInputStream(ByteArray(0)))
                                     }
@@ -2137,14 +1592,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                                             uri.getQueryParameter("tk") != null)
                                     ) {
                                         session.authHttpError = null
-                                        session.authRequestCount++
-                                        Trace.event("AUTH_REQUEST", "BROWSER_NATIVE",
-                                            "sid=${session.id.take(8)} method=${request.method} " +
-                                                "target=${Trace.target(address)} hasTk=${uri.getQueryParameter("tk")?.isNotBlank() == true} " +
-                                                "hasTicket=${uri.getQueryParameter("ticket")?.isNotBlank() == true} " +
-                                                "headerNames=${request.requestHeaders.keys.sorted().joinToString(",")} " +
-                                                "cookieStored=${runCatching { !CookieManager.getInstance().getCookie(address).isNullOrBlank() }.getOrDefault(false)} " +
-                                                "note=no_replay_browser_handles_original_request")
                                         return null
                                     }
                                     if (uri.scheme == "https" && uri.path?.endsWith(".m3u8", true) == true &&
@@ -2168,11 +1615,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         !path.endsWith(".m3u8", true) &&
                                         request.method.equals("GET", true)
                                     ) {
-                                        if (session.syntheticSegments.containsKey(Trace.key(address))) {
-                                            Trace.event("SEGMENT_REQUEST", "SYNTHETIC", "sid=${session.id.take(8)} ${Trace.fingerprint(address)}")
-                                        } else {
+                                        if (!session.syntheticSegments.containsKey(UrlKey.key(address)))
                                             session.observeNativeRequest(address, request.method, request.requestHeaders)
-                                        }
                                     }
                                     return null
                                 }
@@ -2189,13 +1633,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         verified.path == expectedJs.path
                                 }.getOrDefault(false)
                             }
-                            Trace.event("SCRIPT_PREFETCH", if (scriptUrl == null) "SKIP" else "SCHEDULED",
-                                "sid=${session.id.take(8)} reason=${if (scriptUrl == null) "no_known_version" else "real_webview_version"} " +
-                                    "url=${Trace.urlShape(scriptUrl)}")
                             if (scriptUrl != null) io.launch {
                                 val cookie = scriptCookie(scriptUrl)
                                 val agent = session.userAgent
-                                val script = fetchPlayerScript(scriptUrl, emptyMap(), session, true)
+                                val script = fetchPlayerScript(scriptUrl, emptyMap(), session)
                                 if (script != null && session.browser != null)
                                     session.prefetchedPlayerScript = PrefetchedPlayerScript(
                                         scriptUrl, cookie, agent, session.embedded, script,
@@ -2205,19 +1646,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                             main.postDelayed(timeout, 19000L)
                             val url = if (parent.startsWith("https://") && !parent.contains("dembed.st")) parent else ""
                             if (url.isNotBlank()) {
-                                Trace.event("AUTH_WEBVIEW", "LOAD_PARENT", "sid=${session.id.take(8)} target=${Trace.target(url)}")
-                                session.milestone("navigate_parent")
                                 view.loadUrl(url)
                             } else {
                                 // The player explicitly requires an iframe (it rejects top-level navigation).
                                 val safeUrl = embedded.replace("&", "&amp;").replace('"', '_')
                                 val html = """<html><body><iframe src="$safeUrl" style="width:100%;height:100%"></iframe></body></html>"""
-                                Trace.event("AUTH_WEBVIEW", "LOAD_EMBED_IFRAME", "sid=${session.id.take(8)} target=${Trace.target(embedded)}")
-                                session.milestone("navigate_iframe")
                                 view.loadDataWithBaseURL("https://thedaddy.li/", html, "text/html", "UTF-8", null)
                             }
                         } catch (e: Exception) {
-                            Trace.event("AUTH_WEBVIEW", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
                             main.removeCallbacks(timeout)
                             if (continuation.isActive) continuation.resume(null)
                         }
@@ -2225,118 +1661,59 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
             if (captured.isNullOrBlank()) {
-                Trace.event("PLAYER_URL", "NOT_FOUND", "sid=${session.id.take(8)} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs} reason=no_manifest_request")
                 session.close()
                 return null
             }
-            session.milestone("playlist_url_captured")
             if (session.probeAvailable) {
                 val waitStarted = android.os.SystemClock.elapsedRealtime()
                 val capturedByBrowser = withTimeoutOrNull(if (session.probeInstalled) 6500L else 3000L) {
                     session.browserManifestReady.await()
                 } == true
-                Trace.event("RESPONSE_BRIDGE",
-                    if (capturedByBrowser) "MANIFEST_CAPTURED" else "MANIFEST_UNAVAILABLE",
-                    "sid=${session.id.take(8)} installed=${session.probeInstalled} " +
-                        "waitMs=${android.os.SystemClock.elapsedRealtime()-waitStarted} " +
-                        "browserTokenHttp=${session.browserTokenHttp} ticketHttp=${session.browserTicketHttp} " +
-                        "browserManifestHttp=${session.manifestHttpError ?: -1} " +
-                        "reason=${if (capturedByBrowser) "browser_response_body_ready" else if (!session.probeInstalled) "probe_not_installed" else "no_successful_readable_manifest"}")
             } else {
-                Trace.event("RESPONSE_BRIDGE", "SKIPPED",
-                    "sid=${session.id.take(8)} reason=document_start_or_web_message_not_available")
             }
-            session.milestone("manifest_bridge_complete")
             val actual = session.browserManifestUrl.ifBlank { session.url.ifBlank { captured } }
             val signed = !Uri.parse(actual).getQueryParameter("t").isNullOrBlank()
             if (signed && session.browserManifestBody == null &&
                 actual == session.rejectedSignedManifest) {
-                Trace.event("HLS_FETCH", "SKIP_SIGNED_404",
-                    "sid=${session.id.take(8)} ${Trace.urlShape(actual)} " +
-                        "reason=browser_404_same_uri_no_replay")
                 session.close()
                 return null
             }
-            Trace.event("PLAYER_URL", "FOUND",
-                "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
-                    "authRequests=${session.authRequestCount} authHttpError=${session.authHttpError ?: -1} " +
-                    "browserHlsError=${session.manifestHttpError ?: -1} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
             if (session.authHttpError == 403 && !signed) {
-                Trace.event("AUTH_DIAG", "BLOCKED",
-                    "sid=${session.id.take(8)} reason=native_browser_token_403_no_signed_playlist " +
-                        "browserManifestHttp=${session.manifestHttpError ?: -1} " +
-                        "note=server_rejected_original_browser_request_not_replay")
                 session.close()
                 return null
             }
             if (!signed) {
-                Trace.event("AUTH_DIAG", "UNCONFIRMED",
-                    "sid=${session.id.take(8)} reason=no_signed_playlist_observed " +
-                        "authRequests=${session.authRequestCount} authHttpError=${session.authHttpError ?: -1} " +
-                        "browserManifestHttp=${session.manifestHttpError ?: -1}")
             }
             return try {
                 val requestHeaders = session.headers
                 val browserBody = session.browserManifestBody
                 val response = if (browserBody == null) {
-                    Trace.event("AUTH_CHAIN", "CLIENT_FALLBACK",
-                        "sid=${session.id.take(8)} ${Trace.urlShape(actual)} " +
-                            "tokenId=${Trace.valueId(Uri.parse(actual).getQueryParameter("t"))} " +
-                            "issuedId=${session.issuedTokenId} signedBrowserHttp=${session.signedManifestHttp} " +
-                            "unsignedBrowserHttp=${session.unsignedManifestHttp} ${Trace.headerProfile(requestHeaders)}")
-                    Trace.event("HLS_FETCH", "CLIENT_REQUEST",
-                        "sid=${session.id.take(8)} target=${Trace.target(actual)} signed=$signed " +
-                            "headerNames=${requestHeaders.keys.sorted().joinToString(",")} " +
-                            "cookiePresent=${requestHeaders.keys.any { it.equals("cookie", true) }}")
                     app.get(actual, headers = requestHeaders, timeout = 5)
                 } else null
                 if (response != null) {
-                    Trace.event("HLS_FETCH", if (response.isSuccessful) "HTTP_OK" else "HTTP_FAIL",
-                        "sid=${session.id.take(8)} target=${Trace.target(actual)} http=${response.code} " +
-                            "reason=${if (response.isSuccessful) "none" else Trace.bodyReason(response.text)} " +
-                            "browserHlsHttpError=${session.manifestHttpError ?: -1} " +
-                            "browserAuthHttpError=${session.authHttpError ?: -1} browserTokenHttp=${session.browserTokenHttp} " +
-                            "headerNames=${response.headers.names().sorted().joinToString(",")} " +
-                            "contentType=${response.headers["Content-Type"].orEmpty().substringBefore(';')}")
                 } else {
-                    Trace.event("HLS_FETCH", "BROWSER_REUSED",
-                        "sid=${session.id.take(8)} target=${Trace.target(actual)} " +
-                            "chars=${browserBody?.length ?: 0} reason=original_webview_http_200_no_replay")
                 }
                 val body = browserBody ?: response?.takeIf { it.isSuccessful }?.text
                 if (body == null) {
-                    Trace.event("HLS_DECODE", "NOT_REACHED",
-                        "sid=${session.id.take(8)} reason=manifest_http_failed " +
-                            "browserStatus=${session.manifestHttpError ?: -1} clientStatus=${response?.code ?: -1}")
                     session.close()
                     null
                 } else {
                     val playlist = decodePlaylist(body, session)
                     if (playlist == null || !playlist.trimStart().startsWith("#EXTM3U")) {
-                        Trace.event("HLS_DECODE", "FAILED", "sid=${session.id.take(8)} reason=invalid_playlist")
                         session.close()
                         null
                     } else {
-                        Trace.event("HLS_DECODE", "OK", "sid=${session.id.take(8)} chars=${playlist.length} encrypted=${!body.trimStart().startsWith("#EXTM3U")}")
-                        session.milestone("playlist_decoded", "sealed=${session.sealedPlaylist}")
                         // Sealed AES playlists already contain decrypted media URLs;
                         // retain the browser-observation wait only for plain playlists.
                         val waitForNative = !session.sealedPlaylist &&
                             session.nativeRequestCount.get() == 0 && session.jsMediaRequests.get() == 0
-                        Trace.event("SEGMENT_PREFLIGHT", if (waitForNative) "WAIT_NATIVE" else "NO_WAIT",
-                            "sid=${session.id.take(8)} sealed=${session.sealedPlaylist} " +
-                            "waitMs=${if (waitForNative) 700 else 0}")
                         if (waitForNative) delay(700)
-                        session.milestone("preflight_start")
                         if (!probePlayable(session, playlist, actual)) {
                             delay(280)
                             session.close()
                             null
                         } else if (session.directAllowed && (!signed || playlist.contains("#EXT-X-ENDLIST"))) {
-                            Trace.event("MEDIA3_LINK", "DIRECT", "sid=${session.id.take(8)} reason=ordinary_hls elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                             // Probe a media segment before bypassing the wrapper decoder.
-                            session.milestone("link_ready")
-                            session.resourceSnapshot("link_ready")
                             session.close()
                             newExtractorLink(name, name, actual, ExtractorLinkType.M3U8) {
                                 referer = "$EMBED_ORIGIN/"
@@ -2344,20 +1721,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 headers = session.headers
                             }
                         } else {
-                            Trace.event("MEDIA3_ROUTE", "PROXY_REQUIRED",
-                                "sid=${session.id.take(8)} reason=${if (signed && !playlist.contains("#EXT-X-ENDLIST")) "signed_live_refresh" else "browser_only_segments"}")
                             val openPort = startServer()
                             if (openPort == 0) {
-                                Trace.event("MEDIA3_LINK", "FAILED", "sid=${session.id.take(8)} reason=proxy_bind_failed")
                                 session.close()
                                 null
                             } else {
-                                Trace.event("MEDIA3_LINK", "PROXY", "sid=${session.id.take(8)} signed=$signed elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                                 session.firstPlaylist = stableInitialPlaylist(playlist, session)
                                 session.url = actual
                                 sessions[session.id] = session
-                                session.milestone("link_ready")
-                                session.resourceSnapshot("link_ready")
                                 val local = "http://127.0.0.1:$openPort/${session.id}/index.m3u8"
                                 newExtractorLink(name, name, local, ExtractorLinkType.M3U8) {
                                     referer = "$EMBED_ORIGIN/"
@@ -2371,14 +1742,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                 session.close()
                 throw cancel
             } catch (e: Exception) {
-                Trace.event("DEMBED", "ERROR", "sid=${session.id.take(8)} reason=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime()-startMs}")
                 session.close()
                 null
             }
         }
 
-        /** Log structure, not signed URLs or segment tokens. */
-        /** A playlist alone is not a playable link: verify newest media segment bytes first. */
+        /** Verify actual media bytes before publishing a playable HLS link. */
         private suspend fun probePlayable(session: Session, playlist: String, manifestUrl: String): Boolean {
             session.encryptedMedia = playlist.contains("#EXT-X-KEY", true)
             session.registerManifestSegments(playlist, manifestUrl)
@@ -2388,21 +1757,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 .filterNot { URL(it).path.endsWith(".m3u8", true) }
                 .toList().asReversed()
             val verified = available.filter { session.hasVerifiedAlternative(it) }
-            val seq = playlist.lineSequence().firstOrNull {
-                it.startsWith("#EXT-X-MEDIA-SEQUENCE:", true)
-            }?.substringAfter(':').orEmpty()
-            val duration = playlist.lineSequence().firstOrNull {
-                it.startsWith("#EXT-X-TARGETDURATION:", true)
-            }?.substringAfter(':').orEmpty()
-            Trace.event("SEGMENT_WINDOW", "PREFLIGHT",
-                "sid=${session.id.take(8)} seq=$seq duration=$duration count=${available.size} " +
-                    "hasPdt=${playlist.contains("#EXT-X-PROGRAM-DATE-TIME", true)} " +
-                    "sealed=${session.sealedPlaylist} encrypted=${session.encryptedMedia} " +
-                    "newestId=${Trace.valueId(available.firstOrNull())} " +
-                    "previousId=${Trace.valueId(available.getOrNull(1))} " +
-                    "oldestId=${Trace.valueId(available.lastOrNull())}")
-            // In a sealed live sliding window, the newest entry can still be incomplete.
-            // Prefer the preceding completed entry; retain the newest as a fallback.
+            // The newest entry of a sealed sliding window may still be incomplete.
             val stableLive = session.sealedPlaylist && available.size >= 3 &&
                 playlist.contains("#EXT-X-MEDIA-SEQUENCE", true) &&
                 playlist.contains("#EXT-X-TARGETDURATION", true) &&
@@ -2412,117 +1767,56 @@ class DaddyLiveExtractor : ExtractorApi() {
             val targets = (verified + if (stableLive)
                 (available.drop(1).take(2) + available.take(1)) else available.take(3))
                 .distinct().take(3)
-            Trace.event("SEGMENT_PREFLIGHT", "SELECTED",
-                "sid=${session.id.take(8)} verifiedCandidates=${verified.size} count=${targets.size} " +
-                    "stableLive=$stableLive penultimateFirst=${stableLive && verified.isEmpty()}")
-            if (targets.isEmpty()) {
-                Trace.event("SEGMENT_PREFLIGHT", "FAILED", "sid=" + session.id.take(8) + " reason=no_media_entries")
-                return false
-            }
+            if (targets.isEmpty()) return false
             for ((index, target) in targets.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 val requestUrl = session.actualSegment(target)
                 val forwarded = session.mediaHeaders(requestUrl)
-                Trace.event("SEGMENT_ATTEMPT", "CLIENT",
-                    "sid=${session.id.take(8)} entry=$index mapping=${requestUrl != target} " +
-                        "${Trace.fingerprint(requestUrl)} ${Trace.headerProfile(forwarded)}")
-                val requestStarted = android.os.SystemClock.elapsedRealtime()
-                var clientFailure = "none"
                 val client = try {
                     app.get(requestUrl, headers = forwarded, timeout = 4)
-                } catch (e: CancellationException) { throw e } catch (e: Exception) {
-                    clientFailure = e.javaClass.simpleName
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
                     null
                 }
-                val responseAt = android.os.SystemClock.elapsedRealtime()
                 val prefix = ByteArray(576)
-                var bodyReadMs = 0L
-                var unwrapMs = 0L
-                var inputBytes = 0
-                var decodedBytes = 0
-                var decodeState = "none"
-                // Separate transfer from PNG/TS restoration without changing validation.
                 val n = if (session.sealedPlaylist) {
                     val raw = runCatching {
                         client?.takeIf { it.isSuccessful }?.body?.byteStream()?.use { input ->
                             readLimited(input, 12 * 1024 * 1024)
                         }
                     }.getOrNull()
-                    val bodyAt = android.os.SystemClock.elapsedRealtime()
-                    bodyReadMs = bodyAt - responseAt
-                    inputBytes = raw?.size ?: 0
                     val media = raw?.let { runCatching { unwrapMedia(it) }.getOrNull() }
-                    unwrapMs = android.os.SystemClock.elapsedRealtime() - bodyAt
-                    decodedBytes = media?.size ?: 0
-                    decodeState = when {
-                        raw == null -> "body_unavailable"
-                        media == null -> "not_ts"
-                        else -> "ok"
-                    }
-                    if (raw != null && media == null) Trace.event("SEGMENT_MEDIA_SHAPE", "UNWRAP_FAILED",
-                        "sid=${session.id.take(8)} entry=$index targetId=${Trace.key(target)} " +
-                            "mime=${client?.headers?.get("Content-Type").orEmpty().substringBefore(';')} " +
-                            describeMediaShape(raw))
-                    val size = minOf(decodedBytes, prefix.size)
+                    val size = minOf(media?.size ?: 0, prefix.size)
                     if (size > 0) media!!.copyInto(prefix, 0, 0, size)
                     size
                 } else try {
-                    val size = client?.takeIf { it.isSuccessful }?.body?.byteStream()
+                    client?.takeIf { it.isSuccessful }?.body?.byteStream()
                         ?.use { readMediaPrefix(it, prefix) } ?: 0
-                    bodyReadMs = android.os.SystemClock.elapsedRealtime() - responseAt
-                    inputBytes = size
-                    decodedBytes = size
-                    size
                 } catch (_: Exception) { 0 }
-                val prefixAt = android.os.SystemClock.elapsedRealtime()
-                Trace.event("SEGMENT_PREFLIGHT_TIME", "BREAKDOWN",
-                    "sid=${session.id.take(8)} entry=$index http=${client?.code ?: -1} " +
-                    "requestMs=${responseAt-requestStarted} bodyReadMs=$bodyReadMs unwrapMs=$unwrapMs " +
-                    "readUnwrapMs=${prefixAt-responseAt} totalMs=${prefixAt-requestStarted} " +
-                    "sealed=${session.sealedPlaylist} inputBytes=$inputBytes decodedBytes=$decodedBytes " +
-                    "decode=$decodeState prefixBytes=$n")
-                val upstream = client?.code ?: -1
-                val reason = if (upstream in 400..599) {
-                    runCatching { Trace.bodyReason(client?.text.orEmpty()) }.getOrDefault("read_error")
-                } else "none"
-                Trace.event("SEGMENT_UPSTREAM", if (upstream in 200..299) "HTTP_OK" else "FAILED",
-                    "sid=${session.id.take(8)} entry=$index status=$upstream cause=$reason " +
-                        "failure=$clientFailure mime=${client?.headers?.get("Content-Type")?.substringBefore(';').orEmpty().take(45)} " +
-                        "server=${client?.headers?.get("Server").orEmpty().take(35)} " +
-                        "viaPresent=${client?.headers?.get("Via") != null} " +
-                        "cfPresent=${client?.headers?.get("CF-Ray") != null} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-requestStarted} " +
-                        "${Trace.fingerprint(target)}")
                 if (client?.isSuccessful == true && validMediaPrefix(prefix, n, playlist)) {
                     if (stableLive && index == 0 && target == available[1])
                         session.skipInitialTail = true
-                    session.segmentTransport = "client"; session.directAllowed = true
-                    Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=client entry=" + index + " http=" + client.code + " bytes=" + n)
-                    session.milestone("preflight_ok", "source=client")
+                    session.segmentTransport = "client"
+                    session.directAllowed = true
                     return true
                 }
-                Trace.event("SEGMENT_PREFLIGHT", "CLIENT_FAIL",
-                    "sid=${session.id.take(8)} entry=$index http=${client?.code ?: -1} bytes=$n " +
-                        "mime=${client?.headers?.get("Content-Type")?.substringBefore(';').orEmpty().take(60)} " +
-                        "contentLength=${client?.headers?.get("Content-Length").orEmpty().take(15)}")
                 if (client?.code == 404 && requestUrl == target && !session.tokenProbeDone) {
                     session.tokenProbeDone = true
                     val signedSegment = session.segmentWithToken(target)
                     if (signedSegment != null) {
                         val trial = try {
                             app.get(signedSegment, headers = forwarded, timeout = 4)
-                        } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) { null }
                         val tokenPrefix = ByteArray(576)
                         val tokenBytes = try {
                             trial?.takeIf { it.isSuccessful }?.body?.byteStream()
                                 ?.use { readMediaPrefix(it, tokenPrefix) } ?: 0
                         } catch (_: Exception) { 0 }
-                        val tokenValid = trial?.isSuccessful == true && validMediaPrefix(tokenPrefix, tokenBytes, playlist)
-                        Trace.event("SEGMENT_TOKEN_PROBE", if (tokenValid) "RECOVERED" else "FAILED",
-                            "sid=${session.id.take(8)} http=${trial?.code ?: -1} " +
-                                "reason=${if (trial?.code in 400..599) runCatching { Trace.bodyReason(trial?.text.orEmpty()) }.getOrDefault("unavailable") else "none"} " +
-                                "bytes=$tokenBytes ${Trace.fingerprint(target)} queryAdded=t")
-                        if (tokenValid) {
+                        if (trial?.isSuccessful == true &&
+                            validMediaPrefix(tokenPrefix, tokenBytes, playlist)) {
                             session.segmentTokenMode = true
                             session.segmentTransport = "client"
                             session.directAllowed = false
@@ -2532,36 +1826,26 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 val browser = session.browserRequest("segment", requestUrl)
                 val chunk = browser?.bytes
-                if (browser?.status in 200..299 && chunk != null && validMediaPrefix(chunk, chunk.size, playlist)) {
+                if (browser?.status in 200..299 && chunk != null &&
+                    validMediaPrefix(chunk, chunk.size, playlist)) {
                     session.segmentTransport = "browser"
-                    Trace.event("SEGMENT_PREFLIGHT", "OK", "sid=" + session.id.take(8) + " source=browser entry=" + index + " bytes=" + chunk.size)
-                    session.milestone("preflight_ok", "source=browser")
                     return true
                 }
-                Trace.event("SEGMENT_PREFLIGHT", "BROWSER_FAIL", "sid=" + session.id.take(8) + " entry=" + index +
-                    " http=" + (browser?.status ?: -1) + " bytes=" + (chunk?.size ?: 0) + " target=" + Trace.target(target))
             }
-            Trace.event("SEGMENT_PREFLIGHT", "FAILED",
-                "sid=" + session.id.take(8) + " reason=all_candidates_failed count=" + targets.size)
             return false
         }
+
         fun releaseAllSessions(reason: String) {
-            var dembedCount = 0
             sessions.forEach { (id, session) ->
                 if (sessions.remove(id, session)) {
                     session.close()
-                    dembedCount++
                 }
             }
-            val directCount = directSessions.size
             directSessions.clear()
-            Trace.event("PLAYER_SESSION_CLEANUP", "CLOSED",
-                "reason=$reason dembed=$dembedCount direct=$directCount")
         }
 
         @Synchronized private fun startServer(): Int {
             if (server?.isClosed == false) {
-                Trace.event("PROXY", "REUSE", "port=$port")
                 return port
             }
             return try {
@@ -2569,7 +1853,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 socket.soTimeout = 15000
                 server = socket
                 port = socket.localPort
-                Trace.event("PROXY", "LISTEN", "binding=127.0.0.1 port=$port")
                 io.launch {
                     while (!socket.isClosed) {
                         try {
@@ -2597,7 +1880,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 port
             } catch (e: Exception) {
-                Trace.event("PROXY", "BIND_FAIL", "reason=${e.javaClass.simpleName}")
                 0
             }
         }
@@ -2635,8 +1917,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (cut > 0 && lines[cut - 1].trim().equals("#EXT-X-DISCONTINUITY", true))
                 cut--
             val stable = lines.take(cut).joinToString("\n").trimEnd() + "\n"
-            Trace.event("SEGMENT_WINDOW", "TAIL_HELD",
-                "sid=${session.id.take(8)} entries=${segments.size} remaining=${segments.size - 1}")
             return stable
         }
 
@@ -2655,67 +1935,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             } + "\n"
 
-        // Instrument direct HTTP HLS only for the player fallback. This shares the
-        // existing loopback server, but never rewrites an unverified CDN URL.
+        // Proxy validated direct HLS through the existing loopback server.
         private fun rewriteDirect(playlist: String, source: String, session: DirectSession): String =
             playlist.lineSequence().joinToString("\n") { line ->
                 if (line.startsWith("#")) {
                     attribute.replace(line) { match ->
                         val target = absolute(source, match.groupValues[1])
                         if (target == null) match.value
-                        else "URI=\"${session.reference(target, target.substringBefore('?').endsWith(".m3u8", true), source)}\""
+                        else "URI=\"${session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))}\""
                     }
                 } else if (line.isBlank()) line else {
                     val target = absolute(source, line.trim())
                     if (target == null) line
-                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true), source)
+                    else session.reference(target, target.substringBefore('?').endsWith(".m3u8", true))
                 }
             } + "\n"
-
-        private fun trackDirectWindow(session: DirectSession, source: String, playlist: String) {
-            val entries = playlist.lineSequence().map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("#") }
-                .mapNotNull { absolute(source, it) }
-                .filterNot { it.substringBefore('?').endsWith(".m3u8", true) }
-                .toList()
-            val sequence = playlist.lineSequence().firstOrNull {
-                it.startsWith("#EXT-X-MEDIA-SEQUENCE:")
-            }?.substringAfter(':').orEmpty()
-            session.windows[source] = DirectWindow(sequence, entries.toSet(),
-                entries.firstOrNull().orEmpty(), entries.lastOrNull().orEmpty())
-            if (entries.isNotEmpty()) {
-                Trace.event("DIRECT_HLS_WINDOW", "UPDATED",
-                    "sid=${session.id.take(8)} manifest=${Trace.fingerprint(source)} " +
-                        "sequence=$sequence count=${entries.size} " +
-                        "first=${Trace.key(entries.first())} last=${Trace.key(entries.last())}")
-            }
-        }
-
-        private suspend fun direct404Evidence(session: DirectSession, target: String,
-            parentManifest: String, http: Int, range: String?
-        ) {
-            val refreshed = runCatching {
-                app.get(parentManifest, headers = session.headers + ("Cache-Control" to "no-cache"), timeout = 5)
-            }.getOrNull()
-            val body = refreshed?.takeIf { it.isSuccessful }?.text
-            if (body?.trimStart()?.startsWith("#EXTM3U") == true)
-                trackDirectWindow(session, parentManifest, body)
-            val current = session.windows[parentManifest]
-            val presence = when {
-                body == null -> "refresh_unavailable"
-                !body.trimStart().startsWith("#EXTM3U") -> "refresh_invalid"
-                current == null -> "no_media_entries"
-                target in current.entries -> "still_in_latest_manifest"
-                else -> "outside_latest_manifest"
-            }
-            Trace.event("DIRECT_HLS_404", "CHECKED",
-                "sid=${session.id.take(8)} upstreamHttp=$http " +
-                    "request=${Trace.fingerprint(target)} path=${Trace.target(target)} " +
-                    "parent=${Trace.fingerprint(parentManifest)} range=${range ?: "none"} " +
-                    "freshManifestHttp=${refreshed?.code ?: -1} " +
-                    "sequence=${current?.sequence.orEmpty()} first=${Trace.key(current?.first.orEmpty())} " +
-                    "last=${Trace.key(current?.last.orEmpty())} presence=$presence")
-        }
 
         private suspend fun serveDirect(
             socket: Socket, session: DirectSession, key: String, range: String?
@@ -2730,32 +1964,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                 output.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
                 return
             }
-            val start = android.os.SystemClock.elapsedRealtime()
             val upstreamHeaders = if (range != null) session.headers + ("Range" to range) else session.headers
             val response = try {
                 app.get(address, headers = upstreamHeaders, timeout = 12)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Trace.event("DIRECT_HLS_UPSTREAM", "EXCEPTION",
-                    "sid=${session.id.take(8)} request=${Trace.fingerprint(address)} " +
-                        "reason=${e.javaClass.simpleName}")
                 null
             }
             val code = response?.code ?: 502
             if (code !in 200..299) {
-                if (!playlist && code == 404 && resource != null) {
-                    try {
-                        io.launch { direct404Evidence(session, address, resource.manifest, code, range) }
-                    } catch (e: Exception) {
-                        Trace.event("DIRECT_HLS_404", "DIAGNOSTIC_ERROR",
-                            "sid=${session.id.take(8)} reason=${e.javaClass.simpleName}")
-                    }
-                }
-                Trace.event("DIRECT_HLS_UPSTREAM", "HTTP_FAIL",
-                    "sid=${session.id.take(8)} manifest=$playlist http=$code " +
-                        "request=${Trace.fingerprint(address)} path=${Trace.target(address)} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                 val localCode = code.takeIf { it in 400..599 } ?: 502
                 val reason = if (localCode == 404) "Not Found" else "Bad Gateway"
                 output.write(("HTTP/1.1 $localCode $reason\r\nConnection: close\r\n" +
@@ -2765,20 +1983,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (playlist) {
                 val raw = response!!.text
                 if (!raw.trimStart().startsWith("#EXTM3U")) {
-                    Trace.event("DIRECT_HLS_PLAYLIST", "INVALID",
-                        "sid=${session.id.take(8)} upstream=${Trace.fingerprint(address)}")
                     output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
                     return
                 }
-                trackDirectWindow(session, address, raw)
                 val data = rewriteDirect(raw, address, session).toByteArray(Charsets.UTF_8)
                 output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n" +
                     "Cache-Control: no-store\r\nConnection: close\r\nContent-Length: ${data.size}\r\n\r\n")
                     .toByteArray(StandardCharsets.US_ASCII))
                 output.write(data)
-                Trace.event("DIRECT_HLS_PLAYLIST", "OK",
-                    "sid=${session.id.take(8)} target=${Trace.fingerprint(address)} " +
-                        "bytes=${data.size} elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                 return
             }
             val reply = response!!
@@ -2799,7 +2011,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 append("\r\n")
             }
             output.write(header.toByteArray(StandardCharsets.US_ASCII))
-            var total = 0L
             try {
                 reply.body.byteStream().use { stream ->
                     val buffer = ByteArray(32 * 1024)
@@ -2813,20 +2024,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                         output.write(buffer, 0, read)
                         if (length == null) output.write("\r\n".toByteArray(StandardCharsets.US_ASCII))
                         if (firstChunk) { output.flush(); firstChunk = false }
-                        total += read
                     }
                 }
                 if (length == null) output.write("0\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
-                Trace.event("DIRECT_HLS_SEGMENT",
-                    if (length != null && length != total) "SHORT_READ" else "HTTP_OK",
-                    "sid=${session.id.take(8)} upstreamHttp=$code " +
-                        "url=${Trace.fingerprint(address)} path=${Trace.target(address)} " +
-                        "range=${range ?: "none"} bytes=$total expectedBytes=${length ?: -1} " +
-                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
             } catch (e: Exception) {
-                Trace.event("DIRECT_HLS_SEGMENT", "TRANSFER_ERROR",
-                    "sid=${session.id.take(8)} url=${Trace.fingerprint(address)} " +
-                        "bytes=$total reason=${e.javaClass.simpleName}")
             }
         }
 
@@ -2838,7 +2039,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 .firstOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: return body
             if (first.length < 100 || !first.all { it.isLetterOrDigit() || it == '-' || it == '_' }) return body
             val key = session?.mediaKey() ?: run {
-                Trace.event("HLS_DECODE", "KEY_MISSING")
                 return null
             }
             return try {
@@ -2872,11 +2072,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 if (count == 0) return null
                 session.sealedPlaylist = true
-                Trace.event("HLS_DECODE", "SEALED_OK",
-                    "sid=" + session.id.take(8) + " entries=" + count)
                 output
             } catch (e: Exception) {
-                Trace.event("HLS_DECODE", "SEALED_FAILED", "reason=" + e.javaClass.simpleName)
                 null
             }
         }
@@ -2909,34 +2106,6 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         /** Original unwrap(): recover TS from WebP EXIF, PNG IEND / pixels,
          * TIKTIKRAW / TIKTIKTSGZ, or raw sync-byte embedded data. */
-        // Failure-only PNG structure probe: no raw bytes or segment URLs in the logs.
-        private fun describeMediaShape(bytes: ByteArray): String {
-            val png = bytes.size >= 8 && bytes[0] == 0x89.toByte() && at(bytes, 1, "PNG")
-            val webp = at(bytes, 0, "RIFF") && at(bytes, 8, "WEBP")
-            if (!png) return "bytes=${bytes.size} png=false webp=$webp ts=${isTs(bytes)}"
-            var offset = 8
-            var chunks = 0
-            var idat = 0L
-            var iend = false
-            var broken = false
-            var width = 0
-            var height = 0
-            var color = -1
-            while (offset + 12 <= bytes.size && chunks++ < 80) {
-                val length = int32(bytes, offset)
-                if (length < 0 || length > bytes.size - offset - 12) { broken = true; break }
-                if (at(bytes, offset + 4, "IHDR") && length >= 13) {
-                    width = int32(bytes, offset + 8)
-                    height = int32(bytes, offset + 12)
-                    color = bytes[offset + 17].toInt() and 255
-                } else if (at(bytes, offset + 4, "IDAT")) idat += length
-                else if (at(bytes, offset + 4, "IEND")) { iend = true; break }
-                offset += 12 + length
-            }
-            return "bytes=${bytes.size} png=true dimensions=${width}x$height " +
-                "colorType=$color chunks=$chunks idatBytes=$idat iend=$iend invalidChunk=$broken"
-        }
-
         private fun unwrapMedia(bytes: ByteArray): ByteArray? {
             if (isTs(bytes)) return bytes
             if (at(bytes, 0, "RIFF") && at(bytes, 8, "WEBP")) {
@@ -3072,8 +2241,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 // Reuse a recent original-browser live playlist instead of requesting it again.
                 if (cached != null && cacheAge in 0..1500L) {
                     decodePlaylist(cached, session)?.let {
-                        Trace.event("HLS_REFRESH", "BROWSER_CACHE",
-                            "sid=${session.id.take(8)} ageMs=$cacheAge chars=${it.length}")
                         return session.browserManifestUrl to it
                     }
                 }
@@ -3085,25 +2252,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                         session.browserManifestUrl = browser.address
                         session.browserManifestAt = android.os.SystemClock.elapsedRealtime()
                         session.url = browser.address
-                        Trace.event("HLS_REFRESH", "BROWSER_OK",
-                            "sid=${session.id.take(8)} chars=${decoded.length}")
                         return browser.address to decoded
                     }
-                    Trace.event("HLS_REFRESH", "BROWSER_INVALID",
-                        "sid=${session.id.take(8)} reason=playlist_decode_failed")
                 }
                 // A failed browser request must not trigger repeated 403s through a different
                 // HTTP client. Use the last good live manifest briefly while the player recovers.
                 if (cached != null && cacheAge in 0..8000L) {
                     decodePlaylist(cached, session)?.let {
-                        Trace.event("HLS_REFRESH", "LAST_GOOD",
-                            "sid=${session.id.take(8)} ageMs=$cacheAge browserHttp=${browser?.status ?: -1}")
                         return session.browserManifestUrl to it
                     }
                 }
                 if (browser != null && browser.status in 400..599) {
-                    Trace.event("HLS_REFRESH", "BROWSER_HTTP_FAIL",
-                        "sid=${session.id.take(8)} http=${browser.status} reason=browser_refused")
                     return null
                 }
                 // Only fallback when the browser bridge is unavailable (e.g. unsupported frame).
@@ -3112,14 +2271,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (response?.isSuccessful == true) {
                     val decoded = decodePlaylist(response.text, session)
                     if (decoded != null) {
-                        Trace.event("HLS_REFRESH", "CLIENT_OK",
-                            "sid=${session.id.take(8)} chars=${decoded.length} fallback=bridge_unavailable")
                         return target to decoded
                     }
                 }
-                Trace.event("HLS_REFRESH", "FAILED",
-                    "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
-                        "clientHttp=${response?.code ?: -1} reason=${if (response == null) "client_exception" else if (!response.isSuccessful) Trace.bodyReason(response.text) else "invalid_manifest"}")
                 return null
             } finally {
                 session.manifestMutex.unlock()
@@ -3161,9 +2315,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                             parts[1] == "index.m3u8" || resource?.playlist == true -> {
                                 val first = if (resource == null) session.firstPlaylist else null
                                 val original = if (resource == null) session.url else resource.url
-                                if (resource == null) Trace.event("PROXY_WINDOW", "REQUEST",
-                                    "sid=${session.id.take(8)} initial=${first != null} " +
-                                        "tailHeld=${session.skipInitialTail} chars=${first?.length ?: 0}")
                                 val recent = session.recentRootPlaylist?.takeIf {
                                     resource == null && first == null &&
                                         android.os.SystemClock.elapsedRealtime() - session.recentRootAt in 0..1000L
@@ -3183,18 +2334,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                                     }
                                     data = rewrite(mediaPlaylist, manifest.first, session).toByteArray()
                                     type = "application/vnd.apple.mpegurl"
-                                    if (recent != null) Trace.event("PROXY_PLAYLIST", "QUICK_REUSE",
-                                        "sid=${session.id.take(8)} ageMs=${android.os.SystemClock.elapsedRealtime()-session.recentRootAt}")
                                 }
-                                Trace.event("PROXY_PLAYLIST", if (data != null) "OK" else "FAILED",
-                                    "sid=${session.id.take(8)} chars=${data?.size ?: 0} reason=${if (data == null) "manifest_unavailable" else "rewritten"}")
 
                             }
                             resource != null -> {
                                 val retryAfter = session.failedSegments[resource.url] ?: 0L
                                 if (start < retryAfter) {
-                                    Trace.event("PROXY_SEGMENT", "SKIP_REPEATED_FAILURE",
-                                        "sid=${session.id.take(8)} remainingMs=${retryAfter-start}")
                                 } else {
                                     val actual = session.actualSegment(resource.url)
                                     var browser = if (session.segmentTransport == "browser")
@@ -3219,11 +2364,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                                         }
                                         type = if (data?.firstOrNull() == 0x47.toByte()) "video/mp2t"
                                             else "application/octet-stream"
-                                        Trace.event("PROXY_SEGMENT", if (data != null) "OK" else "DECODE_FAIL",
-                                            "sid=${session.id.take(8)} source=${if (browser?.bytes != null) "browser" else "client"} " +
-                                                "in=${bytes.size} out=${data?.size ?: 0} type=$type " +
-                                                "urlId=${Trace.key(resource.url)} pathId=${Trace.pathKey(resource.url)} " +
-                                                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                                     } else {
                                         val http = clientHttp.takeIf { it in 400..599 }
                                             ?: browser?.status?.takeIf { it != 0 } ?: clientHttp
@@ -3232,11 +2372,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                                                 if (session.failedSegments.size > 32) session.failedSegments.clear()
                                                 session.failedSegments[resource.url] = start + 10000L
                                             }
-                                            Trace.event("PROXY_SEGMENT", "HTTP_FAIL",
-                                                "sid=${session.id.take(8)} browserHttp=${browser?.status ?: -1} " +
-                                                    "clientHttp=$clientHttp urlId=${Trace.key(resource.url)} " +
-                                                        "pathId=${Trace.pathKey(resource.url)} " +
-                                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime()-start}")
                                         }
                                     }
                                 }
@@ -3244,7 +2379,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                         }
                     }
                     val status = if (data == null) "502 Bad Gateway" else "200 OK"
-                    if (data == null) Trace.event("PROXY", "NO_DATA", "request=${fields.firstOrNull()} sessionPresent=${session != null} parts=${parts.size}")
                     val payload = data ?: ByteArray(0)
                     val header = "HTTP/1.1 $status\r\nContent-Type: $type\r\n" +
                         "Connection: close\r\nCache-Control: no-store\r\nContent-Length: ${payload.size}\r\n\r\n"
@@ -3255,7 +2389,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                Trace.event("PROXY", "ERROR", "reason=${e.javaClass.simpleName}")
                 runCatching { client.close() }
             }
         }
@@ -3279,6 +2412,6 @@ private fun validMediaPrefix(bytes: ByteArray, length: Int, manifest: String): B
     val prefix = String(bytes, 0, minOf(length, 32), Charsets.US_ASCII).trimStart().lowercase()
     if (prefix.startsWith("<") || prefix.startsWith("{") || prefix.startsWith("#extm3u")) return false
     if (length > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte()) return true
-    if (String(bytes, 4, 4, Charsets.US_ASCII) in setOf("ftyp", "styp", "moof", "moov")) return true
+    if (String(bytes, 4, 4, Charsets.US_ASCII).let { it == "ftyp" || it == "styp" || it == "moof" || it == "moov" }) return true
     return manifest.contains("#EXT-X-KEY", true) && length >= 16
 }
