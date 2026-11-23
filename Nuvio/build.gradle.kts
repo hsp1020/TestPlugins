@@ -23,7 +23,7 @@ dependencies {
 // CloudStream make packages DEX and resources, not dependencies' JNI binaries.
 // Stage QuickJS Kotlin classes and Android .so files into this module's .cs3.
 val quickJsProbeAar = configurations.detachedConfiguration(
-    dependencies.create("io.github.dokar3:quickjs-kt-android:1.0.5@aar"
+    dependencies.create("io.github.dokar3:quickjs-kt-android:1.0.5@aar")
 ).apply { isTransitive = false }
 
 val stageQuickJsProbe by tasks.registering(Copy::class) {
