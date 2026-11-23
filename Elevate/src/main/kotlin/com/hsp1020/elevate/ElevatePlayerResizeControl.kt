@@ -91,7 +91,7 @@ internal class ElevatePlayerResizeControl(
                     5 -> "21:9"
                     else -> "Original" // CloudStream has no native original-size string.
                 }
-                Toast.makeText(target.context, label, Toast.LENGTH_SHORT).show()
+                com.lagradost.cloudstream3.CommonActivity.showToast(label, Toast.LENGTH_SHORT)
             }
         }
         return true
