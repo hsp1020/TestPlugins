@@ -1,5 +1,6 @@
 package com.hsp1020.elevate
 
+import android.graphics.Matrix
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -10,6 +11,8 @@ import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
+import com.lagradost.cloudstream3.CommonActivity.screenHeightWithOrientation
+import com.lagradost.cloudstream3.CommonActivity.screenWidthWithOrientation
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerView
@@ -143,14 +146,30 @@ internal class ElevatePlayerResizeControl(
         }
         val surface = view.videoSurfaceView ?: return
         val params = surface.layoutParams as? FrameLayout.LayoutParams ?: return
-        if (params.width != targetW || params.height != targetH || params.gravity != Gravity.CENTER) {
+        val boundsChanged = params.width != targetW || params.height != targetH ||
+            params.gravity != Gravity.CENTER
+        val gesture = host()?.gestureHelper
+        if (boundsChanged) {
+            gesture?.clearZoomState()
             surface.layoutParams = FrameLayout.LayoutParams(targetW, targetH, Gravity.CENTER)
         }
         view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+        // Native pinch multiplies its matrix scale by the surface-to-screen aspect correction.
+        // Start at the inverse correction so the first pinch does not shrink this surface.
+        if (gesture != null && (boundsChanged || gesture.zoomMatrix == null)) {
+            val screenW = screenWidthWithOrientation.toFloat()
+            val screenH = screenHeightWithOrientation.toFloat()
+            if (screenW > 0f && screenH > 0f) {
+                val aspect = screenH * targetW / (screenW * targetH)
+                val initialScale = maxOf(aspect, 1f / aspect)
+                gesture.zoomMatrix = Matrix().apply { setScale(initialScale, initialScale) }
+            }
+        }
     }
 
     private fun restoreNative() {
         val view = videoView ?: return
+        host()?.gestureHelper?.clearZoomState()
         val content = view.findViewById<AspectRatioFrameLayout>(
             androidx.media3.ui.R.id.exo_content_frame
         ) ?: return

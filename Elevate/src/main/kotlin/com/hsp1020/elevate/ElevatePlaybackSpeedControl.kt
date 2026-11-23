@@ -118,13 +118,20 @@ internal class ElevatePlaybackSpeedControl(
             this.text = "0.75x"
             setTextColor(first.textColors)
             setTextSize(TypedValue.COMPLEX_UNIT_PX, first.textSize)
+            typeface = first.typeface
             backgroundTintList = first.backgroundTintList
             cornerRadius = first.cornerRadius
+            strokeColor = first.strokeColor
+            strokeWidth = first.strokeWidth
+            rippleColor = first.rippleColor
+            insetTop = first.insetTop
+            insetBottom = first.insetBottom
+            setPaddingRelative(first.paddingStart, first.paddingTop, first.paddingEnd, first.paddingBottom)
             minimumWidth = 0
             minWidth = 0
             setAllCaps(false)
         }
-        row.addView(extra, 1, LinearLayout.LayoutParams(0, first.layoutParams.height, 1f))
+        row.addView(extra, 1, LinearLayout.LayoutParams(first.layoutParams as LinearLayout.LayoutParams))
         first.text = "0.5x"
         val presets = nativePresets.toMutableList().apply { add(1, extra) }
         presets.forEachIndexed { index, button ->
