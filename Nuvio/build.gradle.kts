@@ -2,13 +2,6 @@ import com.lagradost.cloudstream3.gradle.tasks.CompileDexTask
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.bundling.Zip
 import java.util.zip.ZipFile
-import org.objectweb.asm.AnnotationVisitor
-import org.objectweb.asm.ClassReader
-import org.objectweb.asm.ClassVisitor
-import org.objectweb.asm.ClassWriter
-import org.objectweb.asm.Opcodes
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 // use an integer for version numbers
 version = 1
@@ -44,44 +37,11 @@ tasks.matching { it.name == "compileDebugKotlin" }.configureEach {
     dependsOn(stageQuickJsProbe)
 }
 
-// Gradle's D8 (AGP 8.8.2) cannot rewrite all Kotlin 2.3.x library metadata.
-// Keep the original AAR for Kotlin compilation; strip only the optional
-// kotlin.Metadata annotations from the copy consumed by D8.
-val quickJsDexJar = layout.buildDirectory.file("quickjs-probe/classes-dex.jar")
-val prepareQuickJsDex by tasks.registering {
-    dependsOn(stageQuickJsProbe)
-    val inputJar = layout.buildDirectory.file("quickjs-probe/classes.jar")
-    inputs.file(inputJar)
-    outputs.file(quickJsDexJar)
-    doLast {
-        ZipFile(inputJar.get().asFile).use { source ->
-            ZipOutputStream(quickJsDexJar.get().asFile.outputStream()).use { output ->
-                val entries = source.entries()
-                var classCount = 0
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    if (!entry.name.endsWith(".class")) continue
-                    val reader = ClassReader(source.getInputStream(entry).use { it.readBytes() })
-                    val writer = ClassWriter(0)
-                    reader.accept(object : ClassVisitor(Opcodes.ASM9, writer) {
-                        override fun visitAnnotation(descriptor: String?, visible: Boolean): AnnotationVisitor? =
-                            if (descriptor == "Lkotlin/Metadata;") null
-                            else super.visitAnnotation(descriptor, visible)
-                    }, 0)
-                    output.putNextEntry(ZipEntry(entry.name))
-                    output.write(writer.toByteArray())
-                    output.closeEntry()
-                    classCount++
-                }
-                check(classCount > 0) { "QuickJS AAR contains no classes" }
-            }
-        }
-    }
-}
-
+// The settings.gradle.kts R8 override supports Kotlin 2.3 metadata.
+// Feed the original QuickJS classes to D8; rewriting the library is unnecessary.
 tasks.named<CompileDexTask>("compileDex") {
-    dependsOn(prepareQuickJsDex)
-    input.from(quickJsDexJar)
+    dependsOn(stageQuickJsProbe)
+    input.from(layout.buildDirectory.file("quickjs-probe/classes.jar"))
 }
 
 tasks.named<Zip>("make") {
