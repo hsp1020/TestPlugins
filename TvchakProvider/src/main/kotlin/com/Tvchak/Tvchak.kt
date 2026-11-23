@@ -359,240 +359,70 @@ class TvchakProvider : MainAPI() {
 
 
     // Temporary one-session diagnostic snapshot. Chunks can be reconstructed from logcat.
-    private fun traceSource(id: String, source: String, content: String) {
-        try {
-            val bytes = content.toByteArray(Charsets.UTF_8)
-            val captured = bytes.copyOfRange(0, minOf(bytes.size, 262144))
-            val stream = java.io.ByteArrayOutputStream()
-            java.util.zip.GZIPOutputStream(stream).use { it.write(captured) }
-            val encoded = android.util.Base64.encodeToString(
-                stream.toByteArray(), android.util.Base64.NO_WRAP
-            )
-            val parts = encoded.chunked(1200)
-            tracePlayback(id, "SOURCE_BEGIN", "source=$source bytes=${bytes.size}" +
-                " captured=${captured.size} parts=${parts.size} format=gzip-base64")
-            parts.forEachIndexed { index, part ->
-                android.util.Log.i("TvchakHttpCapture",
-                    "id=$id source=$source part=${index + 1}/${parts.size} data=$part")
-            }
-            tracePlayback(id, "SOURCE_END", "source=$source")
-        } catch (e: Exception) {
-            tracePlayback(id, "SOURCE_ERROR", "source=$source error=${e.javaClass.simpleName}")
-        }
-    }
-
-    private suspend fun traceHttpSnapshot(
-        traceId: String,
-        sequence: Int,
-        requestUrl: String,
-        requestHeaders: Map<String, String>
-    ) {
+    // Resolve newly uploaded titles over HTTP when their B-CDN MP4 returns 404.
+    private suspend fun findWiselifeHls(
+        pageUrl: String,
+        videoUrl: String,
+        playerType: String,
+        traceId: String
+    ): Pair<String, Map<String, String>>? {
         val started = android.os.SystemClock.elapsedRealtime()
-        val label = "resource_$sequence"
-        try {
-            val headers = mutableMapOf<String, String>()
-            for (key in listOf("Referer", "Origin", "User-Agent", "Accept-Language", "Accept")) {
-                val value = requestHeaders.entries.firstOrNull {
-                    it.key.equals(key, true)
-                }?.value
-                if (!value.isNullOrBlank()) headers[key] = value
+        return try {
+            val config = app.get(
+                "$mainUrl/static/js/playerconfig2.js",
+                headers = getHeaders(pageUrl),
+                timeout = 6L
+            ).text
+            val playerConfig = Regex("\"${Regex.escape(playerType)}\"\\s*:\\s*\\{([^}]*)\\}")
+                .find(config)?.groupValues?.get(1) ?: return null
+            val parseUrl = Regex(""""parse"\s*:\s*"([^"]+)"""")
+                .find(playerConfig)?.groupValues?.get(1)?.replace("\\/", "/") ?: return null
+            if (!parseUrl.startsWith("https://") && !parseUrl.startsWith("http://")) return null
+
+            val handshakeUrl = parseUrl + URLEncoder.encode(videoUrl, "UTF-8")
+            tracePlayback(traceId, "HTTP_HLS_REQUEST", traceUrl(handshakeUrl))
+            val response = app.get(
+                handshakeUrl,
+                headers = getHeaders(pageUrl),
+                timeout = 6L,
+                cacheTime = 0
+            )
+            tracePlayback(traceId, "HTTP_HLS_RESPONSE", "code=${response.code}")
+            if (!response.isSuccessful) return null
+            val encrypted = Regex("""phpsiteEc\s*=\s*["']([^"']+)["']""")
+                .find(response.text)?.groupValues?.get(1) ?: return null
+            val key = Regex("""phpsitekey\s*=\s*["']([^"']+)["']""")
+                .find(response.text)?.groupValues?.get(1)?.toByteArray(Charsets.UTF_8) ?: return null
+            if (key.isEmpty()) return null
+
+            val encoded = android.util.Base64.decode(encrypted, android.util.Base64.DEFAULT)
+            val inner = ByteArray(encoded.size) { index ->
+                (encoded[index].toInt() xor key[index % key.size].toInt()).toByte()
             }
-            if (!headers.containsKey("User-Agent")) headers["User-Agent"] = cfUserAgent ?: userAgent
-            if (!headers.containsKey("Referer")) headers["Referer"] = mainUrl
-            val cookie = try {
-                android.webkit.CookieManager.getInstance().getCookie(requestUrl)
-            } catch (_: Exception) { null }
-            if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
-            tracePlayback(traceId, "SNAPSHOT_REQUEST",
-                "source=$label ${traceUrl(requestUrl)} headerKeys=${headers.keys.sorted()}" +
-                " cookiePresent=${!cookie.isNullOrEmpty()}")
-            val response = withTimeout(7000L) {
-                app.get(requestUrl, headers = headers, timeout = 6L, cacheTime = 0)
-            }
-            val body = response.text
-            tracePlayback(traceId, "SNAPSHOT_RESPONSE",
-                "source=$label code=${response.code} elapsedMs=" +
-                (android.os.SystemClock.elapsedRealtime() - started) +
-                " final=${traceUrl(response.url)} chars=${body.length}" +
-                " containsHls=${body.contains(".m3u8", true)}" +
-                " containsWiselife=${body.contains("wiselife", true)}")
-            traceSource(traceId, label, body)
+            val hlsUrl = String(
+                android.util.Base64.decode(inner, android.util.Base64.DEFAULT),
+                Charsets.UTF_8
+            )
+            val hlsUri = android.net.Uri.parse(hlsUrl)
+            if (hlsUri.scheme !in listOf("http", "https") ||
+                !hlsUri.path.orEmpty().endsWith(".m3u8", ignoreCase = true)) return null
+
+            val parseUri = android.net.Uri.parse(parseUrl)
+            val origin = "${parseUri.scheme}://${parseUri.authority}"
+            tracePlayback(traceId, "HTTP_HLS_DECODED", traceUrl(hlsUrl) +
+                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started))
+            hlsUrl to mapOf(
+                "User-Agent" to (cfUserAgent ?: userAgent),
+                "Referer" to "$origin/",
+                "Origin" to origin
+            )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            tracePlayback(traceId, "SNAPSHOT_ERROR",
-                "source=$label elapsedMs=" +
-                (android.os.SystemClock.elapsedRealtime() - started) +
-                " error=${e.javaClass.simpleName} message=${e.message?.take(100)}")
+            tracePlayback(traceId, "HTTP_HLS_ERROR", e.javaClass.simpleName)
+            null
         }
     }
-
-    // Only used when the direct CDN MP4 has not become available yet.
-    private suspend fun findWiselifeHls(pageUrl: String, traceId: String): Pair<String, Map<String, String>>? =
-        withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { continuation ->
-                val started = android.os.SystemClock.elapsedRealtime()
-                val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
-                val snapshotCount = java.util.concurrent.atomic.AtomicInteger(0)
-                val snapshotJob = SupervisorJob()
-                val snapshotScope = CoroutineScope(Dispatchers.IO + snapshotJob)
-                tracePlayback(traceId, "WEB_START", traceUrl(pageUrl))
-                val context = CloudStreamApp.context
-                if (context == null) {
-                    tracePlayback(traceId, "WEB_NO_CONTEXT")
-                    continuation.resume(null)
-                    return@suspendCancellableCoroutine
-                }
-
-                val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                val finished = java.util.concurrent.atomic.AtomicBoolean(false)
-                val webView = try {
-                    android.webkit.WebView(context)
-                } catch (e: Exception) {
-                    tracePlayback(traceId, "WEB_CREATE_ERROR", e.javaClass.simpleName)
-                    continuation.resume(null)
-                    return@suspendCancellableCoroutine
-                }
-
-                fun complete(result: Pair<String, Map<String, String>>?, reason: String) {
-                    if (!finished.compareAndSet(false, true)) return
-                    snapshotJob.complete()
-                    tracePlayback(traceId, "WEB_FINISH", "reason=" + reason +
-                        " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started) +
-                        " requests=" + requestCount.get())
-                    handler.post {
-                        handler.removeCallbacksAndMessages(null)
-                        try {
-                            webView.stopLoading()
-                            webView.destroy()
-                        } catch (_: Exception) {}
-                        if (continuation.isActive) continuation.resume(result)
-                    }
-                }
-
-                continuation.invokeOnCancellation {
-                    snapshotJob.cancel()
-                    complete(null, "cancelled")
-                }
-
-                try {
-                    tracePlayback(traceId, "WEB_CREATED")
-                    webView.settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
-                        userAgentString = cfUserAgent ?: userAgent
-                    }
-                    android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-                    webView.webChromeClient = object : android.webkit.WebChromeClient() {
-                        override fun onConsoleMessage(message: android.webkit.ConsoleMessage?): Boolean {
-                            val value = message?.message().orEmpty()
-                            if (value.contains("error", true) || value.contains("hls", true) ||
-                                value.contains("player", true) || value.contains("wiselife", true)) {
-                                val filtered = value.replace(Regex("""https?://[^\s'"]+"""), "[url]")
-                                tracePlayback(traceId, "WEB_CONSOLE", "level=" + message?.messageLevel() +
-                                    " text=" + filtered.take(160))
-                            }
-                            return false
-                        }
-                    }
-                    webView.webViewClient = object : android.webkit.WebViewClient() {
-                        override fun onPageStarted(view: android.webkit.WebView?, url: String?,
-                                                   favicon: android.graphics.Bitmap?) {
-                            tracePlayback(traceId, "WEB_PAGE_START", traceUrl(url.orEmpty()))
-                        }
-
-                        override fun shouldInterceptRequest(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?
-                        ): android.webkit.WebResourceResponse? {
-                            val uri = request?.url ?: return null
-                            val host = uri.host.orEmpty()
-                            val number = requestCount.incrementAndGet()
-                            val isHls = uri.path?.endsWith(".m3u8", ignoreCase = true) == true
-                            val isWiselife = host == "wiselife.blog" || host.endsWith(".wiselife.blog")
-                            if (number <= 120 || isWiselife || isHls) {
-                                tracePlayback(traceId, "WEB_REQUEST", "seq=" + number +
-                                    " method=" + request.method + " mainFrame=" + request.isForMainFrame +
-                                    " " + traceUrl(uri.toString()))
-                            }
-                            val path = uri.path.orEmpty()
-                            val captureTarget =
-                                (isWiselife &&
-                                    (path.endsWith("/chak/chaktt.php") ||
-                                     path.endsWith("/chak/common.js") ||
-                                     path.endsWith(".json", true) ||
-                                     path.contains("/api/") ||
-                                     path.contains("/ajax/") ||
-                                     path.endsWith(".php", true))) ||
-                                (host == android.net.Uri.parse(mainUrl).host &&
-                                    (path.endsWith("/static/player/parse.js") ||
-                                     path.endsWith("/static/js/player.js") ||
-                                     path.endsWith("/static/js/playerconfig2.js")))
-                            if (captureTarget && snapshotCount.incrementAndGet() <= 12) {
-                                val requestUrl = uri.toString()
-                                val requestHeaders = request.requestHeaders.toMap()
-                                snapshotScope.launch {
-                                    traceHttpSnapshot(traceId, number, requestUrl, requestHeaders)
-                                }
-                            }
-                            if (isWiselife && isHls) {
-                                val headers = request.requestHeaders.filterKeys {
-                                    it.equals("Referer", true) ||
-                                        it.equals("User-Agent", true) ||
-                                        it.equals("Origin", true)
-                                }.toMutableMap()
-                                if (headers.keys.none { it.equals("User-Agent", true) }) {
-                                    headers["User-Agent"] = cfUserAgent ?: userAgent
-                                }
-                                tracePlayback(traceId, "WEB_HLS_CAPTURED", "seq=" + number +
-                                    " " + traceUrl(uri.toString()) +
-                                    " headerKeys=" + headers.keys.sorted().joinToString(","))
-                                complete(uri.toString() to headers, "hls_captured")
-                            }
-                            return null
-                        }
-
-                        override fun onReceivedHttpError(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?,
-                            errorResponse: android.webkit.WebResourceResponse?
-                        ) {
-                            tracePlayback(traceId, "WEB_HTTP_ERROR", "status=" + errorResponse?.statusCode +
-                                " " + traceUrl(request?.url?.toString().orEmpty()))
-                        }
-
-                        override fun onReceivedError(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?,
-                            error: android.webkit.WebResourceError?
-                        ) {
-                            tracePlayback(traceId, "WEB_NET_ERROR", "code=" + error?.errorCode +
-                                " " + traceUrl(request?.url?.toString().orEmpty()))
-                        }
-
-                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                            tracePlayback(traceId, "WEB_PAGE_DONE", traceUrl(url.orEmpty()))
-                            view?.evaluateJavascript(
-                                """(function(){var v=document.querySelector('video');
-                                var summary='videos='+document.querySelectorAll('video').length+
-                                ',iframes='+document.querySelectorAll('iframe').length+
-                                ',scripts='+document.querySelectorAll('script').length+
-                                ',videoPresent='+(!!v);
-                                if(v){try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}}
-                                return summary;})()"""
-                            ) { result ->
-                                tracePlayback(traceId, "WEB_DOM_PLAY", result.take(160))
-                            }
-                        }
-                    }
-                    handler.postDelayed({ complete(null, "timeout") }, 10000L)
-                    tracePlayback(traceId, "WEB_LOAD_URL", traceUrl(pageUrl))
-                    webView.loadUrl(pageUrl, getHeaders(mainUrl))
-                } catch (e: Exception) {
-                    tracePlayback(traceId, "WEB_EXCEPTION", e.javaClass.simpleName)
-                    complete(null, "exception")
-                }
-            }
-        }
 
     override suspend fun loadLinks(
         data: String,
@@ -618,18 +448,6 @@ class TvchakProvider : MainAPI() {
             return false
         }
         tracePlayback(traceId, "PLAYER_SCRIPT", "bytes=" + scriptContent.length)
-        traceSource(traceId, "player_aaaa", scriptContent)
-        document.select("script").forEachIndexed { index, element ->
-            val inline = element.data()
-            if (inline.isNotBlank() && inline != scriptContent &&
-                (inline.contains("player_aaaa") || inline.contains("parse.js") ||
-                 inline.contains("wiselife", true) || inline.contains("iframe", true))) {
-                traceSource(traceId, "inline_$index", inline)
-            }
-        }
-        tracePlayback(traceId, "PAGE_SCRIPT_URLS",
-            document.select("script[src]").map { traceUrl(it.absUrl("src")) }
-                .take(25).joinToString(" | ").take(1400))
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
         val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
@@ -724,7 +542,10 @@ class TvchakProvider : MainAPI() {
             }
             if (isMissing) {
                 tracePlayback(traceId, "FALLBACK_START")
-                val hls = findWiselifeHls(data, traceId)
+                val playerType = Regex(""""from"\s*:\s*"([^"]+)"""")
+                    .find(jsonString)?.groupValues?.get(1) ?: "mp4"
+                val sourceUrl = subMatch?.let { videoUrl.substring(0, it.range.first) } ?: videoUrl
+                val hls = findWiselifeHls(data, sourceUrl, playerType, traceId)
                 if (hls != null) {
                     val (hlsUrl, hlsHeaders) = hls
                     tracePlayback(traceId, "HLS_PUBLISH", traceUrl(hlsUrl))
