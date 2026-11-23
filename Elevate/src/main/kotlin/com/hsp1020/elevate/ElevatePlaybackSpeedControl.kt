@@ -42,7 +42,8 @@ internal class ElevatePlaybackSpeedControl(
     }
 
     private val touchListener = View.OnTouchListener { button, event ->
-        if (event.actionMasked == MotionEvent.ACTION_UP && button.isPressed &&
+        if (event.actionMasked == MotionEvent.ACTION_UP &&
+            button.isEnabled && button.isClickable &&
             event.x >= 0 && event.x < button.width &&
             event.y >= 0 && event.y < button.height) {
             openNativeDialog(button)
