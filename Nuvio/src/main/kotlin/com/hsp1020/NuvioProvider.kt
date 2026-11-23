@@ -38,7 +38,10 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -230,40 +233,54 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         val slots = Semaphore(10)
         val found = AtomicInteger(0)
 
-        targets.amap { (repo, scraper) ->
-            slots.withPermit {
-                val code = manager.readScript(repo, scraper)
-                if (code == null) {
-                    Log.d(TAG, "${scraper.name}: engine=QUICKJS status=ERROR reason=SCRIPT_MISSING")
-                } else {
-                    val settings = manager.settingsFor(repo, scraper)
-                    val result = withContext(Dispatchers.IO) {
-                        NuvioQuickJsEvaluator.run(
-                            scraper.name, code, settings, tmdbId, mediaType,
-                            load.season, load.episode, timeoutMs
-                        )
-                    }
-                    var emitted = 0
-                    var error = result.error
-                    if (error == null && result.json != null) {
-                        try {
-                            emitted = emitStreams(result.json, scraper, subtitleCallback, callback)
-                            found.addAndGet(emitted)
-                        } catch (e: Exception) {
-                            error = "RESULT_PARSE: " + (e.message ?: e.javaClass.simpleName)
+        try {
+            targets.amap { (repo, scraper) ->
+                slots.withPermit {
+                    currentCoroutineContext().ensureActive()
+                    val code = manager.readScript(repo, scraper)
+                    if (code == null) {
+                        Log.d(TAG, "${scraper.name}: engine=QUICKJS status=ERROR reason=SCRIPT_MISSING")
+                    } else {
+                        val settings = manager.settingsFor(repo, scraper)
+                        val result = withContext(Dispatchers.IO) {
+                            NuvioQuickJsEvaluator.run(
+                                scraper.name, code, settings, tmdbId, mediaType,
+                                load.season, load.episode, timeoutMs
+                            )
                         }
+                        var emitted = 0
+                        var error = result.error
+                        if (error == null && result.json != null) {
+                            try {
+                                currentCoroutineContext().ensureActive()
+                                emitted = emitStreams(result.json, scraper, subtitleCallback) { link ->
+                                    callback(link)
+                                    found.incrementAndGet()
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                error = "RESULT_PARSE: " + (e.message ?: e.javaClass.simpleName)
+                            }
+                        }
+                        val status = when {
+                            error != null -> "ERROR"
+                            emitted > 0 -> "PASS"
+                            else -> "EMPTY"
+                        }
+                        Log.d(TAG, "${scraper.name}: engine=QUICKJS status=$status " +
+                            "streams=${result.streams} emitted=$emitted elapsedMs=${result.elapsedMs}" +
+                            (if (error != null) " error=" + error.take(200) else ""))
                     }
-                    val status = when {
-                        error != null -> "ERROR"
-                        emitted > 0 -> "PASS"
-                        else -> "EMPTY"
-                    }
-                    Log.d(TAG, "${scraper.name}: engine=QUICKJS status=$status " +
-                        "streams=${result.streams} emitted=$emitted elapsedMs=${result.elapsedMs}" +
-                        (if (error != null) " error=" + error.take(200) else ""))
                 }
             }
+        } catch (e: CancellationException) {
+            Log.d(TAG, "loadLinks engine=QUICKJS status=CANCELLED emitted=${found.get()}")
+            throw e
         }
+        // MainAPI owns only link handoff. The player does not expose a playback-state hook.
+        Log.d(TAG, "loadLinks engine=QUICKJS status=LINKS_READY emitted=${found.get()} " +
+            "playback=UNVERIFIED")
         return found.get() > 0
     }
 
@@ -276,6 +293,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         val arr = JSONArray(json)
         var count = 0
         for (i in 0 until arr.length()) {
+            currentCoroutineContext().ensureActive()
             val o = arr.optJSONObject(i) ?: continue
 
             var url = o.str("url")
@@ -316,6 +334,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
             val subs = o.optJSONArray("subtitles")
             if (subs != null) {
                 for (j in 0 until subs.length()) {
+                    currentCoroutineContext().ensureActive()
                     val s = subs.optJSONObject(j) ?: continue
                     val subUrl = s.str("url") ?: s.str("uri") ?: continue
                     val code = s.str("language") ?: s.str("lang")
