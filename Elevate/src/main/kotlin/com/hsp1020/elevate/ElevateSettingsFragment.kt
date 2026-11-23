@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.app.Dialog
 import android.os.Handler
 import android.os.Looper
-import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import java.io.File
@@ -110,6 +109,7 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
+    const val JAVA_ALLOCATION_DIAGNOSTICS = "JAVA_ALLOCATION_DIAGNOSTICS"
     const val WATCH_PROGRESS_SYNC_URL = "WATCH_PROGRESS_SYNC_URL"
     const val METADATA_SWAP_PROVIDER = "METADATA_SWAP_PROVIDER"
     const val METADATA_SWAP_ADDON_URL = "METADATA_SWAP_ADDON_URL"
@@ -530,30 +530,74 @@ class ElevateSettingsFragment : DialogFragment() {
                 }
             }
         }
-        content.addView(TextView(ctx).apply {
-            text = "Java Allocation & Memory Diagnostics (manual)"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            applyElevateNativeFont(bold = true)
-            setPadding(0, dp(16), 0, dp(6))
+        // Manual diagnostics are a UI-only preference; changing it must not restart playback hooks.
+        val allocationControls = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, 0, dp(12))
+            visibility = if (preferences.getBoolean(ElevateFeaturePrefs.JAVA_ALLOCATION_DIAGNOSTICS, false))
+                View.VISIBLE else View.GONE
+        }
+        val allocationStatus = TextView(ctx).apply {
+            text = if (allocationControls.visibility == View.VISIBLE)
+                ElevateJavaAllocationProfile.statusText() else ""
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            applyElevateNativeFont()
+        }
+        val allocationRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(9), 0, dp(9))
+        }
+        val allocationLabels = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        allocationLabels.addView(TextView(ctx).apply {
+            text = "Java Allocation & Memory Diagnostics"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            applyElevateNativeFont()
         })
-        content.addView(TextView(ctx).apply {
-            text = "Android 15+. Start the 10-minute allocation sampling (two 5-minute Perfetto segments), reproduce the issue, " +
+        allocationLabels.addView(TextView(ctx).apply {
+            text = "Manually capture Perfetto and HPROF diagnostics on Android 15+."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            applyElevateNativeFont()
+            alpha = 0.73f
+            setPadding(0, dp(3), 0, 0)
+        })
+        allocationRow.addView(allocationLabels,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        allocationRow.addView(SwitchCompat(ctx).apply {
+            contentDescription = "Java Allocation & Memory Diagnostics"
+            isChecked = allocationControls.visibility == View.VISIBLE
+            setOnCheckedChangeListener { _, checked ->
+                preferences.edit().putBoolean(ElevateFeaturePrefs.JAVA_ALLOCATION_DIAGNOSTICS, checked).apply()
+                allocationControls.visibility = if (checked) View.VISIBLE else View.GONE
+                if (checked) allocationStatus.text = ElevateJavaAllocationProfile.statusText()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+        content.addView(allocationRow)
+        content.addView(allocationControls)
+        allocationControls.addView(TextView(ctx).apply {
+            text = "Start the 10-minute allocation sampling (two 5-minute Perfetto segments), reproduce the issue, " +
                 "then press Stop once (or let 10 minutes finish automatically). HPROF starts without waiting for the Perfetto file; a Java heap " +
                 "dump may pause the app. Export both files and timing notes together as one ZIP."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            applyElevateNativeFont()
+            alpha = 0.73f
             setPadding(0, 0, 0, dp(6))
         })
-        val allocationStatus = TextView(ctx).apply {
-            text = ElevateJavaAllocationProfile.statusText()
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        content.addView(allocationStatus)
+        allocationControls.addView(allocationStatus)
         fun allocationButton(title: String, action: () -> Unit) {
-            content.addView(Button(ctx).apply {
+            allocationControls.addView(com.google.android.material.button.MaterialButton(
+                android.view.ContextThemeWrapper(ctx, R.style.Theme_AlertDialog),
+                null, androidx.appcompat.R.attr.buttonBarPositiveButtonStyle
+            ).apply {
                 text = title
                 isAllCaps = false
-                applyElevateNativeFont()
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                applyElevateNativeFont(bold = true)
+                gravity = Gravity.CENTER
                 setOnClickListener { action() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)).apply {
+                topMargin = dp(6)
             })
         }
         allocationButton("Start Java allocation profile (600s)") {
