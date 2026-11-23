@@ -33,7 +33,7 @@ val stageQuickJsProbe by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("quickjs-probe"))
 }
 
-tasks.named("compileDebugKotlin") {
+tasks.matching { it.name == "compileDebugKotlin" }.configureEach {
     dependsOn(stageQuickJsProbe)
 }
 
