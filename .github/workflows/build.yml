@@ -49,7 +49,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/src"
           chmod +x gradlew
-          ./gradlew make makePluginsJson --no-daemon
+          ./gradlew make makePluginsJson --no-daemon --stacktrace --info --console=plain
           python3 .github/scripts/publish_plugins.py publish "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/builds"
           cp **/build/*.jar "$GITHUB_WORKSPACE/builds/" || true
           cp repo.json "$GITHUB_WORKSPACE/builds/"
