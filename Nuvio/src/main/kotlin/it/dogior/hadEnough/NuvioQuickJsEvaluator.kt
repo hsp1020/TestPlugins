@@ -208,7 +208,6 @@ internal object NuvioQuickJsEvaluator {
         try {
             val json = withTimeout(test.timeoutMs) {
                 quickJs(Dispatchers.Default) {
-                    evaluationTimeoutMillis = test.timeoutMs
                     host.register(this, test.settingsJson)
                     function("__p03Log") { args ->
                         val level = args.getOrNull(0)?.toString().orEmpty()
