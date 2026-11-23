@@ -104,12 +104,12 @@ internal class ElevatePlaybackSpeedControl(
         val minus = decor.findViewById<View>(R.id.speed_minus) ?: return
         val plus = decor.findViewById<View>(R.id.speed_plus) ?: return
         val first = decor.findViewById<MaterialButton>(R.id.speed_25) ?: return
-        val regular = listOf(
-            first to 0.5f,
-            (decor.findViewById<MaterialButton>(R.id.speed_100) ?: return) to 1.0f,
-            (decor.findViewById<MaterialButton>(R.id.speed_125) ?: return) to 1.25f,
-            (decor.findViewById<MaterialButton>(R.id.speed_150) ?: return) to 1.5f,
-            (decor.findViewById<MaterialButton>(R.id.speed_200) ?: return) to 2.0f
+        val nativePresets = listOf(
+            first,
+            decor.findViewById<MaterialButton>(R.id.speed_100) ?: return,
+            decor.findViewById<MaterialButton>(R.id.speed_125) ?: return,
+            decor.findViewById<MaterialButton>(R.id.speed_150) ?: return,
+            decor.findViewById<MaterialButton>(R.id.speed_200) ?: return
         )
         val row = first.parent as? LinearLayout ?: return
         val extra = MaterialButton(ContextThemeWrapper(first.context, R.style.BlackButton)).apply {
@@ -125,12 +125,12 @@ internal class ElevatePlaybackSpeedControl(
         }
         row.addView(extra, 1, LinearLayout.LayoutParams(0, first.layoutParams.height, 1f))
         first.text = "0.5x"
-        val presets = listOf(regular.first(), extra to 0.75f) + regular.drop(1)
-        presets.forEachIndexed { index, (button, _) ->
+        val presets = nativePresets.toMutableList().apply { add(1, extra) }
+        presets.forEachIndexed { index, button ->
             button.minimumWidth = 0
             button.minWidth = 0
-            button.nextFocusLeftId = presets[(index + presets.size - 1) % presets.size].first.id
-            button.nextFocusRightId = presets[(index + 1) % presets.size].first.id
+            button.nextFocusLeftId = presets[(index + presets.size - 1) % presets.size].id
+            button.nextFocusRightId = presets[(index + 1) % presets.size].id
         }
         extra.nextFocusUpId = slider.id
         extra.nextFocusDownId = extra.id
@@ -154,7 +154,9 @@ internal class ElevatePlaybackSpeedControl(
             updatePlayerLabel(bounded)
             refresh()
         }
-        presets.forEach { (button, speed) -> button.setOnClickListener { change(speed) } }
+        // Leave the four unchanged native presets wired to CloudStream.
+        first.setOnClickListener { change(0.5f) }
+        extra.setOnClickListener { change(0.75f) }
         minus.setOnClickListener { change(fragment.player.getPlaybackSpeed() - 0.1f) }
         plus.setOnClickListener { change(fragment.player.getPlaybackSpeed() + 0.1f) }
         slider.addOnChangeListener { _, value, fromUser -> if (fromUser) change(value) }
