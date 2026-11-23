@@ -37,11 +37,19 @@ tasks.matching { it.name == "compileDebugKotlin" }.configureEach {
     dependsOn(stageQuickJsProbe)
 }
 
-// The settings.gradle.kts R8 override supports Kotlin 2.3 metadata.
-// Feed the original QuickJS classes to D8; rewriting the library is unnecessary.
-tasks.named<CompileDexTask>("compileDex") {
+// CloudStream's DEX task closes JAR inputs before D8 reads their classes.
+// Unpack only the .class files so D8 reads regular files instead of a closed ZIP.
+val unpackQuickJsProbeClasses by tasks.registering(Copy::class) {
     dependsOn(stageQuickJsProbe)
-    input.from(layout.buildDirectory.file("quickjs-probe/classes.jar"))
+    from({ zipTree(layout.buildDirectory.file("quickjs-probe/classes.jar").get().asFile) }) {
+        include("**/*.class")
+    }
+    into(layout.buildDirectory.dir("quickjs-probe-dex"))
+}
+
+tasks.named<CompileDexTask>("compileDex") {
+    dependsOn(unpackQuickJsProbeClasses)
+    input.from(layout.buildDirectory.dir("quickjs-probe-dex"))
 }
 
 tasks.named<Zip>("make") {
