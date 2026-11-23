@@ -37,6 +37,7 @@ class NuvioSettings(
     private val activityCtx: Context,
     private val manager: NuvioRepoManager,
     private val pluginResources: android.content.res.Resources? = null,
+    private val pluginFilePath: String? = null,
 ) {
     private var uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -178,6 +179,37 @@ class NuvioSettings(
         repos.forEach { container.addView(repoCard(it)) }
 
         container.addView(label("General settings", 17f, bold = true, topDp = 22))
+
+        container.addView(label("QuickJS compatibility test", 13f, bold = true, topDp = 12))
+        container.addView(label(
+            "Tests QuickJS loading and modern JavaScript in this plugin. Rhino stays active.",
+            12f, alpha = 0.65f
+        ))
+        container.addView(button("RUN QUICKJS TEST", GREEN) {
+            if (busy) return@button
+            busy = true
+            uiScope.launch {
+                try {
+                    val report = withContext(Dispatchers.IO) {
+                        NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath)
+                    }
+                    AlertDialog.Builder(ctx)
+                        .setTitle("QuickJS test results")
+                        .setMessage(report)
+                        .setPositiveButton("OK", null)
+                        .setNeutralButton("COPY") { _, _ ->
+                            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            clipboard.setPrimaryClip(
+                                android.content.ClipData.newPlainText("QuickJS test", report)
+                            )
+                        }
+                        .show()
+                } finally {
+                    busy = false
+                }
+            }
+        })
 
         container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 8))
         container.addView(

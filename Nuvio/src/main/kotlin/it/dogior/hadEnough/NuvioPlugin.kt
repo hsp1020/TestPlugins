@@ -11,7 +11,7 @@ class NuvioPlugin : Plugin() {
         registerMainAPI(NuvioProvider(manager))
 
         openSettings = { ctx ->
-            NuvioSettings(ctx, manager, resources).show()
+            NuvioSettings(ctx, manager, resources, filename).show()
         }
     }
 }
