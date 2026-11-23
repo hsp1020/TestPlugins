@@ -341,6 +341,83 @@ class TvchakProvider : MainAPI() {
         }
     }
 
+    // Only used when the direct CDN MP4 has not become available yet.
+    private suspend fun findWiselifeHls(pageUrl: String): Pair<String, Map<String, String>>? =
+        withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { continuation ->
+                val context = CloudStreamApp.context
+                if (context == null) {
+                    continuation.resume(null)
+                    return@suspendCancellableCoroutine
+                }
+
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+                val webView = try {
+                    android.webkit.WebView(context)
+                } catch (_: Exception) {
+                    continuation.resume(null)
+                    return@suspendCancellableCoroutine
+                }
+
+                fun complete(result: Pair<String, Map<String, String>>?) {
+                    if (!finished.compareAndSet(false, true)) return
+                    handler.post {
+                        handler.removeCallbacksAndMessages(null)
+                        try {
+                            webView.stopLoading()
+                            webView.destroy()
+                        } catch (_: Exception) {}
+                        if (continuation.isActive) continuation.resume(result)
+                    }
+                }
+
+                continuation.invokeOnCancellation { complete(null) }
+
+                try {
+                    webView.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        mediaPlaybackRequiresUserGesture = false
+                        userAgentString = cfUserAgent ?: userAgent
+                    }
+                    android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+                    webView.webViewClient = object : android.webkit.WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?
+                        ): android.webkit.WebResourceResponse? {
+                            val uri = request?.url ?: return null
+                            val host = uri.host.orEmpty()
+                            if ((host == "wiselife.blog" || host.endsWith(".wiselife.blog")) &&
+                                uri.path?.endsWith(".m3u8", ignoreCase = true) == true) {
+                                val headers = request.requestHeaders.filterKeys {
+                                    it.equals("Referer", true) ||
+                                        it.equals("User-Agent", true) ||
+                                        it.equals("Origin", true)
+                                }.toMutableMap()
+                                if (headers.keys.none { it.equals("User-Agent", true) }) {
+                                    headers["User-Agent"] = cfUserAgent ?: userAgent
+                                }
+                                complete(uri.toString() to headers)
+                            }
+                            return null
+                        }
+
+                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                            view?.evaluateJavascript(
+                                "document.querySelector('video')?.play()?.catch(()=>{});", null
+                            )
+                        }
+                    }
+                    handler.postDelayed({ complete(null) }, 10000L)
+                    webView.loadUrl(pageUrl, getHeaders(mainUrl))
+                } catch (_: Exception) {
+                    complete(null)
+                }
+            }
+        }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -406,6 +483,40 @@ class TvchakProvider : MainAPI() {
             try {
                 safeGet(handshakeUrl, referer = mainUrl)
             } catch (_: Exception) {
+            }
+        }
+
+        // New uploads can still point to a CDN MP4 that returns 404.
+        // Probe only direct B-CDN links; leave all working and other sources unchanged.
+        if (!isChakttWrapper && videoUrl.contains("b-cdn.net") &&
+            videoUrl.substringBefore('?').endsWith(".mp4", ignoreCase = true)) {
+            val isMissing = try {
+                app.head(
+                    videoUrl,
+                    headers = mapOf(
+                        "User-Agent" to (cfUserAgent ?: userAgent),
+                        "Referer" to refererUrl
+                    ),
+                    timeout = 5L,
+                    cacheTime = 0
+                ).code == 404
+            } catch (_: Exception) {
+                false
+            }
+            if (isMissing) {
+                val hls = findWiselifeHls(data)
+                if (hls != null) {
+                    val (hlsUrl, hlsHeaders) = hls
+                    callback.invoke(newExtractorLink(name, name, hlsUrl, ExtractorLinkType.M3U8) {
+                        referer = hlsHeaders.entries.firstOrNull {
+                            it.key.equals("Referer", true)
+                        }?.value ?: data
+                        headers = hlsHeaders
+                        quality = Qualities.P1080.value
+                    })
+                    return true
+                }
+                return false
             }
         }
 
