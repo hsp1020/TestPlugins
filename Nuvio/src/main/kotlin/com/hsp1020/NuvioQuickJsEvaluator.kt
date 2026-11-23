@@ -10,8 +10,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -29,9 +27,6 @@ internal object NuvioQuickJsEvaluator {
     @Volatile private var nativeLoaded = false
     @Volatile private var nativeFailure: String? = null
     private val nativeLock = Any()
-    // QuickJS-KT 1.0.5 JNI caches global class refs across its native contexts.
-    // Creation, use and release must not overlap until the native library is fixed.
-    private val runtimeMutex = Mutex()
     private val nextRuntime = AtomicLong()
     private val nativeScope = UUID.randomUUID().toString()
     private const val LIB = "libquickjs.so"
@@ -150,11 +145,9 @@ internal object NuvioQuickJsEvaluator {
             var captured: String? = null
             var authMissing = false
             val runtimeId = nextRuntime.incrementAndGet()
-            runtimeMutex.withLock {
-                nativeEntered = true
-                val queuedMs = SystemClock.elapsedRealtime() - started
-                withTimeout(timeoutMs) {
-                    Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CREATE queuedMs=$queuedMs")
+            nativeEntered = true
+            withTimeout(timeoutMs) {
+                    Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CREATE")
                     val qjs = QuickJs.create(Dispatchers.Default)
                     Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CREATED")
                     try {
@@ -204,7 +197,6 @@ internal object NuvioQuickJsEvaluator {
                         qjs.close()
                         Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CLOSED")
                     }
-                }
             }
             // Check after the async QuickJS evaluation scope has completed.
             val response = JSONObject(captured ?: error("QuickJS result was not captured"))

@@ -1,5 +1,6 @@
 import com.lagradost.cloudstream3.gradle.tasks.CompileDexTask
 import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.bundling.Zip
 import java.util.zip.ZipFile
 
@@ -8,6 +9,7 @@ version = 1
 
 android {
     namespace = "com.hsp1020"
+    ndkVersion = "27.2.12479018"
 
     buildFeatures {
         buildConfig = true
@@ -20,15 +22,15 @@ dependencies {
     compileOnly(files(layout.buildDirectory.file("quickjs-runtime/classes.jar")))
 }
 
-// CloudStream make packages DEX and resources, not dependencies' JNI binaries.
-// Package QuickJS Kotlin classes and Android .so files into this module's .cs3.
+// Keep the original 1.0.5 Kotlin classes, but build the fixed JNI library from
+// the pinned QuickJS-KT source. Do not ship the broken native .so from the AAR.
 val quickJsRuntimeAar = configurations.detachedConfiguration(
     dependencies.create("io.github.dokar3:quickjs-kt-android:1.0.5@aar")
 ).apply { isTransitive = false }
 
 val stageQuickJsRuntime by tasks.registering(Copy::class) {
     from({ zipTree(quickJsRuntimeAar.singleFile) }) {
-        include("classes.jar", "jni/**/*.so")
+        include("classes.jar")
     }
     into(layout.buildDirectory.dir("quickjs-runtime"))
 }
@@ -52,15 +54,27 @@ tasks.named<CompileDexTask>("compileDex") {
     input.from(layout.buildDirectory.dir("quickjs-runtime-dex"))
 }
 
+// Only Nuvio's make task rebuilds the patched native code (all original ABIs).
+val nativeJniDir = layout.buildDirectory.dir("quickjs-patched/jni")
+val buildPatchedQuickJs by tasks.registering(Exec::class) {
+    val script = file("native/build_quickjs.py")
+    inputs.file(script)
+    outputs.dir(nativeJniDir)
+    commandLine("python3", script.absolutePath,
+        layout.buildDirectory.dir("quickjs-patched").get().asFile.absolutePath)
+}
+
 tasks.named<Zip>("make") {
-    dependsOn(stageQuickJsRuntime)
-    from(layout.buildDirectory.dir("quickjs-runtime/jni")) {
+    dependsOn(stageQuickJsRuntime, buildPatchedQuickJs)
+    from(nativeJniDir) {
         into("lib")
     }
     doLast {
         ZipFile(archiveFile.get().asFile).use { zip ->
-            check(zip.getEntry("lib/arm64-v8a/libquickjs.so") != null) {
-                "QuickJS native library is missing from Nuvio.cs3"
+            for (abi in listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")) {
+                check(zip.getEntry("lib/$abi/libquickjs.so") != null) {
+                    "Patched QuickJS native library missing for $abi"
+                }
             }
         }
     }
