@@ -341,12 +341,32 @@ class TvchakProvider : MainAPI() {
         }
     }
 
+    // Temporary playback diagnostics: URLs are reduced to host, path shape and query keys.
+    private fun tracePlayback(id: String, stage: String, info: String = "") {
+        android.util.Log.i("TvchakPlaybackTrace", "id=$id stage=$stage $info")
+    }
+
+    private fun traceUrl(url: String): String = try {
+        val uri = android.net.Uri.parse(url)
+        val path = uri.path.orEmpty()
+            .replace(Regex("[A-Za-z0-9_-]{24,}"), "{token}")
+            .take(100)
+        "host=" + uri.host + " path=" + path +
+            " queryKeys=" + uri.queryParameterNames.sorted().joinToString(",")
+    } catch (_: Exception) {
+        "unparseable"
+    }
+
     // Only used when the direct CDN MP4 has not become available yet.
-    private suspend fun findWiselifeHls(pageUrl: String): Pair<String, Map<String, String>>? =
+    private suspend fun findWiselifeHls(pageUrl: String, traceId: String): Pair<String, Map<String, String>>? =
         withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { continuation ->
+                val started = android.os.SystemClock.elapsedRealtime()
+                val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
+                tracePlayback(traceId, "WEB_START", traceUrl(pageUrl))
                 val context = CloudStreamApp.context
                 if (context == null) {
+                    tracePlayback(traceId, "WEB_NO_CONTEXT")
                     continuation.resume(null)
                     return@suspendCancellableCoroutine
                 }
@@ -355,13 +375,17 @@ class TvchakProvider : MainAPI() {
                 val finished = java.util.concurrent.atomic.AtomicBoolean(false)
                 val webView = try {
                     android.webkit.WebView(context)
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    tracePlayback(traceId, "WEB_CREATE_ERROR", e.javaClass.simpleName)
                     continuation.resume(null)
                     return@suspendCancellableCoroutine
                 }
 
-                fun complete(result: Pair<String, Map<String, String>>?) {
+                fun complete(result: Pair<String, Map<String, String>>?, reason: String) {
                     if (!finished.compareAndSet(false, true)) return
+                    tracePlayback(traceId, "WEB_FINISH", "reason=" + reason +
+                        " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started) +
+                        " requests=" + requestCount.get())
                     handler.post {
                         handler.removeCallbacksAndMessages(null)
                         try {
@@ -372,9 +396,10 @@ class TvchakProvider : MainAPI() {
                     }
                 }
 
-                continuation.invokeOnCancellation { complete(null) }
+                continuation.invokeOnCancellation { complete(null, "cancelled") }
 
                 try {
+                    tracePlayback(traceId, "WEB_CREATED")
                     webView.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
@@ -382,15 +407,39 @@ class TvchakProvider : MainAPI() {
                         userAgentString = cfUserAgent ?: userAgent
                     }
                     android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+                    webView.webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(message: android.webkit.ConsoleMessage?): Boolean {
+                            val value = message?.message().orEmpty()
+                            if (value.contains("error", true) || value.contains("hls", true) ||
+                                value.contains("player", true) || value.contains("wiselife", true)) {
+                                val filtered = value.replace(Regex("""https?://[^\s'"]+"""), "[url]")
+                                tracePlayback(traceId, "WEB_CONSOLE", "level=" + message?.messageLevel() +
+                                    " text=" + filtered.take(160))
+                            }
+                            return false
+                        }
+                    }
                     webView.webViewClient = object : android.webkit.WebViewClient() {
+                        override fun onPageStarted(view: android.webkit.WebView?, url: String?,
+                                                   favicon: android.graphics.Bitmap?) {
+                            tracePlayback(traceId, "WEB_PAGE_START", traceUrl(url.orEmpty()))
+                        }
+
                         override fun shouldInterceptRequest(
                             view: android.webkit.WebView?,
                             request: android.webkit.WebResourceRequest?
                         ): android.webkit.WebResourceResponse? {
                             val uri = request?.url ?: return null
                             val host = uri.host.orEmpty()
-                            if ((host == "wiselife.blog" || host.endsWith(".wiselife.blog")) &&
-                                uri.path?.endsWith(".m3u8", ignoreCase = true) == true) {
+                            val number = requestCount.incrementAndGet()
+                            val isHls = uri.path?.endsWith(".m3u8", ignoreCase = true) == true
+                            val isWiselife = host == "wiselife.blog" || host.endsWith(".wiselife.blog")
+                            if (number <= 120 || isWiselife || isHls) {
+                                tracePlayback(traceId, "WEB_REQUEST", "seq=" + number +
+                                    " method=" + request.method + " mainFrame=" + request.isForMainFrame +
+                                    " " + traceUrl(uri.toString()))
+                            }
+                            if (isWiselife && isHls) {
                                 val headers = request.requestHeaders.filterKeys {
                                     it.equals("Referer", true) ||
                                         it.equals("User-Agent", true) ||
@@ -399,21 +448,53 @@ class TvchakProvider : MainAPI() {
                                 if (headers.keys.none { it.equals("User-Agent", true) }) {
                                     headers["User-Agent"] = cfUserAgent ?: userAgent
                                 }
-                                complete(uri.toString() to headers)
+                                tracePlayback(traceId, "WEB_HLS_CAPTURED", "seq=" + number +
+                                    " " + traceUrl(uri.toString()) +
+                                    " headerKeys=" + headers.keys.sorted().joinToString(","))
+                                complete(uri.toString() to headers, "hls_captured")
                             }
                             return null
                         }
 
+                        override fun onReceivedHttpError(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?,
+                            errorResponse: android.webkit.WebResourceResponse?
+                        ) {
+                            tracePlayback(traceId, "WEB_HTTP_ERROR", "status=" + errorResponse?.statusCode +
+                                " " + traceUrl(request?.url?.toString().orEmpty()))
+                        }
+
+                        override fun onReceivedError(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?,
+                            error: android.webkit.WebResourceError?
+                        ) {
+                            tracePlayback(traceId, "WEB_NET_ERROR", "code=" + error?.errorCode +
+                                " " + traceUrl(request?.url?.toString().orEmpty()))
+                        }
+
                         override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                            tracePlayback(traceId, "WEB_PAGE_DONE", traceUrl(url.orEmpty()))
                             view?.evaluateJavascript(
-                                "document.querySelector('video')?.play()?.catch(()=>{});", null
-                            )
+                                """(function(){var v=document.querySelector('video');
+                                var summary='videos='+document.querySelectorAll('video').length+
+                                ',iframes='+document.querySelectorAll('iframe').length+
+                                ',scripts='+document.querySelectorAll('script').length+
+                                ',videoPresent='+(!!v);
+                                if(v){try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}}
+                                return summary;})()"""
+                            ) { result ->
+                                tracePlayback(traceId, "WEB_DOM_PLAY", result.take(160))
+                            }
                         }
                     }
-                    handler.postDelayed({ complete(null) }, 10000L)
+                    handler.postDelayed({ complete(null, "timeout") }, 10000L)
+                    tracePlayback(traceId, "WEB_LOAD_URL", traceUrl(pageUrl))
                     webView.loadUrl(pageUrl, getHeaders(mainUrl))
-                } catch (_: Exception) {
-                    complete(null)
+                } catch (e: Exception) {
+                    tracePlayback(traceId, "WEB_EXCEPTION", e.javaClass.simpleName)
+                    complete(null, "exception")
                 }
             }
         }
@@ -424,24 +505,40 @@ class TvchakProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val traceId = android.os.SystemClock.elapsedRealtime().toString(36)
+        val started = android.os.SystemClock.elapsedRealtime()
+        tracePlayback(traceId, "LINK_START", "casting=" + isCasting + " " + traceUrl(data))
         checkAndUpdateDomain()
+        tracePlayback(traceId, "DOMAIN_READY", "mainHost=" + mainUrl)
 
-        val document = safeGet(data).document
+        val response = safeGet(data)
+        val document = response.document
+        tracePlayback(traceId, "PAGE_RECEIVED", "status=" + response.code +
+            " scripts=" + document.select("script").size +
+            " iframes=" + document.select("iframe").size +
+            " wiselifeReferenced=" + response.text.contains("wiselife", true) +
+            " chakttReferenced=" + response.text.contains("chaktt", true))
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: run {
+            tracePlayback(traceId, "NO_PLAYER_SCRIPT")
             return false
         }
+        tracePlayback(traceId, "PLAYER_SCRIPT", "bytes=" + scriptContent.length)
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
         val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
         val matchUrl = urlRegex.find(jsonString)
         val rawUrl = matchUrl?.groupValues?.get(1)?.replace("\\/", "/") ?: run {
+            tracePlayback(traceId, "NO_PLAYER_URL")
             return false
         }
+        tracePlayback(traceId, "PLAYER_URL", traceUrl(rawUrl))
 
         var videoUrl = rawUrl
         var refererUrl = mainUrl
 
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
+        tracePlayback(traceId, "LINK_KIND", "wrapper=" + isChakttWrapper +
+            " directCdn=" + rawUrl.contains("b-cdn.net"))
 
         if (isChakttWrapper) {
             var detectDomain = "https://ckp.wiselife.blog" 
@@ -480,9 +577,15 @@ class TvchakProvider : MainAPI() {
             }
 
             refererUrl = "$detectDomain/"
+            tracePlayback(traceId, "HANDSHAKE_START", traceUrl(handshakeUrl))
+            val handshakeStarted = android.os.SystemClock.elapsedRealtime()
             try {
-                safeGet(handshakeUrl, referer = mainUrl)
-            } catch (_: Exception) {
+                val handshake = safeGet(handshakeUrl, referer = mainUrl)
+                tracePlayback(traceId, "HANDSHAKE_RESPONSE", "status=" + handshake.code +
+                    " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - handshakeStarted) +
+                    " bytes=" + handshake.text.length)
+            } catch (e: Exception) {
+                tracePlayback(traceId, "HANDSHAKE_FAILED", "error=" + e.javaClass.simpleName)
             }
         }
 
@@ -490,8 +593,10 @@ class TvchakProvider : MainAPI() {
         // Probe only direct B-CDN links; leave all working and other sources unchanged.
         if (!isChakttWrapper && videoUrl.contains("b-cdn.net") &&
             videoUrl.substringBefore('?').endsWith(".mp4", ignoreCase = true)) {
+            tracePlayback(traceId, "MP4_HEAD_START", traceUrl(videoUrl))
+            val headStarted = android.os.SystemClock.elapsedRealtime()
             val isMissing = try {
-                app.head(
+                val head = app.head(
                     videoUrl,
                     headers = mapOf(
                         "User-Agent" to (cfUserAgent ?: userAgent),
@@ -499,14 +604,20 @@ class TvchakProvider : MainAPI() {
                     ),
                     timeout = 5L,
                     cacheTime = 0
-                ).code == 404
-            } catch (_: Exception) {
+                )
+                tracePlayback(traceId, "MP4_HEAD_RESULT", "status=" + head.code +
+                    " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - headStarted))
+                head.code == 404
+            } catch (e: Exception) {
+                tracePlayback(traceId, "MP4_HEAD_ERROR", "error=" + e.javaClass.simpleName)
                 false
             }
             if (isMissing) {
-                val hls = findWiselifeHls(data)
+                tracePlayback(traceId, "FALLBACK_START")
+                val hls = findWiselifeHls(data, traceId)
                 if (hls != null) {
                     val (hlsUrl, hlsHeaders) = hls
+                    tracePlayback(traceId, "HLS_PUBLISH", traceUrl(hlsUrl))
                     callback.invoke(newExtractorLink(name, name, hlsUrl, ExtractorLinkType.M3U8) {
                         referer = hlsHeaders.entries.firstOrNull {
                             it.key.equals("Referer", true)
@@ -514,8 +625,11 @@ class TvchakProvider : MainAPI() {
                         headers = hlsHeaders
                         quality = Qualities.P1080.value
                     })
+                    tracePlayback(traceId, "LINK_SUCCESS", "route=hls elapsedMs=" +
+                        (android.os.SystemClock.elapsedRealtime() - started))
                     return true
                 }
+                tracePlayback(traceId, "LINK_FAILURE", "reason=cdn404_no_hls")
                 return false
             }
         }
@@ -529,6 +643,8 @@ class TvchakProvider : MainAPI() {
         }
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        tracePlayback(traceId, "DIRECT_PUBLISH", "type=" + type + " " + traceUrl(videoUrl) +
+            " subtitle=" + (subUrl != null))
 
         callback.invoke(
             newExtractorLink(
@@ -552,6 +668,8 @@ class TvchakProvider : MainAPI() {
             )
         }
 
+        tracePlayback(traceId, "LINK_SUCCESS", "route=direct elapsedMs=" +
+            (android.os.SystemClock.elapsedRealtime() - started))
         return true
     }
 
