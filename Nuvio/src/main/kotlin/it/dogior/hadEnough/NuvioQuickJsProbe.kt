@@ -9,14 +9,14 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.zip.ZipFile
 
-/** P0-0 only: explicitly invoked from settings; never used by Rhino scrapers. */
+/** P0-0/P0-1 diagnostics, isolated from the Rhino scraper execution path. */
 internal object NuvioQuickJsProbe {
     private const val TAG = "NuvioQuickJsProbe"
     private const val LIB = "libquickjs.so"
     private const val PATH_KEY = "com.dokar.quickjs.library.path"
     private const val NAME_KEY = "com.dokar.quickjs.library.name"
 
-    suspend fun run(context: Context, pluginFilePath: String?): String =
+    suspend fun run(context: Context, pluginFilePath: String?, adapterTest: Boolean = false): String =
         withContext(Dispatchers.IO) {
             val report = ArrayList<String>(5)
             report.add("QuickJS 1.0.5 / Android ${Build.VERSION.SDK_INT}")
@@ -61,8 +61,9 @@ internal object NuvioQuickJsProbe {
                     // quickjs-kt's Android loader honors these properties (v1.0.5).
                     System.setProperty(PATH_KEY, nativeFile.parentFile!!.absolutePath)
                     System.setProperty(NAME_KEY, LIB)
-                    val outcome = NuvioQuickJsEvaluator.evaluate()
-                    report.add("EXECUTION: PASS ($outcome)")
+                    val outcome = if (adapterTest) NuvioQuickJsEvaluator.evaluateAdapter()
+                        else NuvioQuickJsEvaluator.evaluate()
+                    report.add("${if (adapterTest) "ADAPTER" else "EXECUTION"}: PASS ($outcome)")
                 } finally {
                     if (previousPath == null) System.clearProperty(PATH_KEY)
                     else System.setProperty(PATH_KEY, previousPath)

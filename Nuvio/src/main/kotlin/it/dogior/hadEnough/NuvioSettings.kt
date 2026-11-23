@@ -185,31 +185,13 @@ class NuvioSettings(
             "Tests QuickJS loading and modern JavaScript in this plugin. Rhino stays active.",
             12f, alpha = 0.65f
         ))
-        container.addView(button("RUN QUICKJS TEST", GREEN) {
-            if (busy) return@button
-            busy = true
-            uiScope.launch {
-                try {
-                    val report = withContext(Dispatchers.IO) {
-                        NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath)
-                    }
-                    AlertDialog.Builder(ctx)
-                        .setTitle("QuickJS test results")
-                        .setMessage(report)
-                        .setPositiveButton("OK", null)
-                        .setNeutralButton("COPY") { _, _ ->
-                            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-                                as android.content.ClipboardManager
-                            clipboard.setPrimaryClip(
-                                android.content.ClipData.newPlainText("QuickJS test", report)
-                            )
-                        }
-                        .show()
-                } finally {
-                    busy = false
-                }
-            }
-        })
+        container.addView(button("RUN QUICKJS TEST", GREEN) { runQuickJsTest(false) })
+        container.addView(label("P0-1 getStreams adapter test", 13f, bold = true, topDp = 12))
+        container.addView(label(
+            "Tests module.exports, movie/TV inputs and async JSON without HTTP. Rhino stays active.",
+            12f, alpha = 0.65f
+        ))
+        container.addView(button("RUN P0-1 TEST", GREEN) { runQuickJsTest(true) })
 
         container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 8))
         container.addView(
@@ -257,6 +239,32 @@ class NuvioSettings(
             manager.scraperSettingsJson = raw
             toast("Settings saved")
         })
+    }
+
+    private fun runQuickJsTest(adapterTest: Boolean) {
+        if (busy) return
+        busy = true
+        uiScope.launch {
+            try {
+                val report = withContext(Dispatchers.IO) {
+                    NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath, adapterTest)
+                }
+                AlertDialog.Builder(ctx)
+                    .setTitle(if (adapterTest) "QuickJS P0-1 results" else "QuickJS test results")
+                    .setMessage(report)
+                    .setPositiveButton("OK", null)
+                    .setNeutralButton("COPY") { _, _ ->
+                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(
+                            android.content.ClipData.newPlainText("QuickJS test", report)
+                        )
+                    }
+                    .show()
+            } finally {
+                busy = false
+            }
+        }
     }
 
     private fun repoCard(repo: NuvioRepo): View {
