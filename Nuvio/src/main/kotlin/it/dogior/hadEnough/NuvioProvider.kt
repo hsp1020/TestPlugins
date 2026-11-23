@@ -53,9 +53,9 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     override val mainPage = mainPageOf(
-        "$TMDB_API/trending/all/day?api_key=$API_KEY&region=IT&language=en-US" to "Trending",
-        "$TMDB_API/movie/popular?api_key=$API_KEY&region=IT&language=en-US" to "Popular movies",
-        "$TMDB_API/tv/popular?api_key=$API_KEY&region=IT&language=en-US" to "Popular TV series",
+        "$TMDB_API/trending/all/day?api_key=$API_KEY&region=US&language=en-US" to "Trending",
+        "$TMDB_API/movie/popular?api_key=$API_KEY&region=US&language=en-US" to "Popular movies",
+        "$TMDB_API/tv/popular?api_key=$API_KEY&region=US&language=en-US" to "Popular TV series",
     )
 
     companion object {
