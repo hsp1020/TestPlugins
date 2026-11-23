@@ -20,6 +20,9 @@ buildscript {
         // R8 버그 방지를 위해 8.8.2로 상향한 상태 유지
         classpath("com.android.tools.build:gradle:8.8.2")
 
+        // CloudStream compileDex uses this legacy buildscript classloader, not pluginManagement.
+        classpath("com.android.tools:r8:8.13.19")
+
         classpath("com.github.recloudstream:gradle:81b1d424d2")
 
         // 메타데이터 컴파일 에러 해결을 위해 맞춘 Kotlin 2.3.0 유지
