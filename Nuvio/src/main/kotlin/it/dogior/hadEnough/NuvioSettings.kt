@@ -403,6 +403,11 @@ class NuvioSettings(
         bulk.addView(small("ENABLE ALL", GREEN) { manager.setAllEnabled(repo, true); fill() })
         bulk.addView(small("DISABLE ALL", RED) { manager.setAllEnabled(repo, false); fill() })
         container.addView(bulk)
+        container.addView(button("RUN ALL QUICKJS TESTS", GREEN) { runAllQuickJsTests(repo) })
+        container.addView(label(
+            "Tests each installed scraper automatically. Up to 3 tests run at once; no playback.",
+            12f, alpha = 0.65f, topDp = 5
+        ))
         container.addView(counter)
         container.addView(holder)
         fill()
@@ -478,8 +483,6 @@ class NuvioSettings(
             card.addView(label(s.notes, 11f, alpha = 0.55f, topDp = 4))
         }
 
-        card.addView(small("TEST QUICKJS", GREEN) { openQuickJsScraperTest(repo, s) })
-
         card.setOnClickListener {
             val now = !manager.isEnabled(repo, s)
             manager.setEnabled(repo, s, now)
@@ -490,93 +493,83 @@ class NuvioSettings(
         return card
     }
 
-    /** One scraper at a time. Testing does not change its enabled state or publish links. */
-    private fun openQuickJsScraperTest(repo: NuvioRepo, scraper: NuvioScraper) {
-        val modes = listOfNotNull(
-            "movie".takeIf { scraper.supports("movie") },
-            "tv".takeIf { scraper.supports("tv") }
-        )
-        if (modes.isEmpty()) { toast("Unsupported media type"); return }
-        AlertDialog.Builder(ctx)
-            .setTitle("QuickJS test · ${scraper.name}")
-            .setItems(modes.map { if (it == "movie") "Movie" else "TV Series" }.toTypedArray()) { _, index ->
-                showQuickJsTestInputs(repo, scraper, modes[index])
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showQuickJsTestInputs(repo: NuvioRepo, scraper: NuvioScraper, type: String) {
-        val form = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(8))
-        }
-        fun field(caption: String, value: String): EditText {
-            form.addView(label(caption, 13f, bold = true, topDp = 6))
-            return EditText(ctx).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER
-                setSingleLine(true)
-                setText(value)
-                form.addView(this)
-            }
-        }
-        val id = field("TMDB ID", if (type == "movie") "550" else "1399")
-        val season = if (type == "tv") field("Season", "1") else null
-        val episode = if (type == "tv") field("Episode", "1") else null
-        AlertDialog.Builder(ctx)
-            .setTitle("${scraper.name} · $type")
-            .setView(form)
-            .setMessage("Runs the downloaded scraper with live HTTP. Does not start playback.")
-            .setPositiveButton("RUN") { _, _ ->
-                val idValue = id.text.toString().trim()
-                val s = season?.text?.toString()?.toIntOrNull()
-                val e = episode?.text?.toString()?.toIntOrNull()
-                if (idValue.isEmpty() || idValue.any { !it.isDigit() } ||
-                    (type == "tv" && (s == null || s < 0 || e == null || e < 1))) {
-                    toast("Invalid TMDB ID or episode")
-                } else {
-                    runQuickJsScraperTest(repo, scraper, idValue, type, s, e)
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun runQuickJsScraperTest(
-        repo: NuvioRepo, scraper: NuvioScraper, id: String, type: String, season: Int?, episode: Int?
-    ) {
-        if (busy) { toast("A test is already running"); return }
+    /** Diagnostic only: one automatic sample per manifest scraper, regardless of ON/OFF. */
+    private fun runAllQuickJsTests(repo: NuvioRepo) {
+        if (busy) { toast("Another operation is running"); return }
         busy = true
-        toast("QuickJS scraper test running…")
-        uiScope.launch {
+        val progress = AlertDialog.Builder(ctx)
+            .setTitle("QuickJS P0-3 · ${repo.name}")
+            .setMessage("Preparing scraper tests…")
+            .setNegativeButton("CANCEL", null)
+            .create()
+        progress.show()
+
+        var job: kotlinx.coroutines.Job? = null
+        progress.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+            job?.cancel()
+            progress.dismiss()
+        }
+        progress.setOnCancelListener { job?.cancel() }
+        job = uiScope.launch {
             try {
-                val report = try {
-                    withContext(Dispatchers.IO) {
-                        val script = manager.readScript(repo, scraper)
-                        if (script == null) "REAL: FAIL: scraper file missing (REFRESH repository)"
-                        else NuvioQuickJsProbe.run(
-                            ctx.applicationContext, pluginFilePath, realTest = NuvioQuickJsEvaluator.RealScraper(
-                                scraper.name, script, manager.settingsFor(repo, scraper),
-                                id, type, season, episode, manager.timeoutSeconds * 1000L
-                            )
+                val tests = withContext(Dispatchers.IO) {
+                    repo.scrapers.mapNotNull { scraper ->
+                        val type = when {
+                            scraper.supports("movie") -> "movie"
+                            scraper.supports("tv") -> "tv"
+                            else -> null
+                        } ?: return@mapNotNull null
+                        NuvioQuickJsEvaluator.RealScraper(
+                            name = scraper.name,
+                            code = manager.readScript(repo, scraper).orEmpty(),
+                            settingsJson = manager.settingsFor(repo, scraper),
+                            tmdbId = if (type == "movie") "550" else "1399",
+                            mediaType = type,
+                            season = if (type == "tv") 1 else null,
+                            episode = if (type == "tv") 1 else null,
+                            timeoutMs = minOf(manager.timeoutSeconds, 15) * 1000L,
                         )
                     }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (t: Exception) {
-                    "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty()
                 }
+                if (tests.isEmpty()) {
+                    progress.dismiss()
+                    toast("No supported scrapers to test")
+                    return@launch
+                }
+                progress.setMessage("0 / ${tests.size}")
+                val report = withContext(Dispatchers.IO) {
+                    NuvioQuickJsProbe.run(
+                        ctx.applicationContext, pluginFilePath,
+                        batchTest = tests,
+                        onBatchProgress = { done, total, name ->
+                            withContext(Dispatchers.Main) {
+                                if (progress.isShowing) progress.setMessage("$done / $total · $name")
+                            }
+                        }
+                    )
+                }
+                progress.dismiss()
                 AlertDialog.Builder(ctx)
-                    .setTitle("${scraper.name} · QuickJS P0-3")
+                    .setTitle("QuickJS P0-3 · all scrapers")
                     .setMessage(report)
                     .setPositiveButton("OK", null)
-                    .setNeutralButton("COPY") { _, _ ->
+                    .setNeutralButton("COPY ALL") { _, _ ->
                         val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
                             as android.content.ClipboardManager
                         clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText("QuickJS P0-3", report)
+                            android.content.ClipData.newPlainText("QuickJS P0-3 batch", report)
                         )
                     }
+                    .show()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                progress.dismiss()
+                throw e
+            } catch (t: Exception) {
+                progress.dismiss()
+                AlertDialog.Builder(ctx)
+                    .setTitle("QuickJS P0-3 failed")
+                    .setMessage(t.javaClass.simpleName + ": " + t.message.orEmpty())
+                    .setPositiveButton("OK", null)
                     .show()
             } finally {
                 busy = false

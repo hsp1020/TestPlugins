@@ -17,7 +17,9 @@ internal object NuvioQuickJsProbe {
     private const val NAME_KEY = "com.dokar.quickjs.library.name"
 
     suspend fun run(context: Context, pluginFilePath: String?, adapterTest: Boolean = false,
-        hostTest: Boolean = false, realTest: NuvioQuickJsEvaluator.RealScraper? = null): String =
+        hostTest: Boolean = false, realTest: NuvioQuickJsEvaluator.RealScraper? = null,
+        batchTest: List<NuvioQuickJsEvaluator.RealScraper>? = null,
+        onBatchProgress: (suspend (Int, Int, String) -> Unit)? = null): String =
         withContext(Dispatchers.IO) {
             val report = ArrayList<String>(5)
             report.add("QuickJS 1.0.5 / Android ${Build.VERSION.SDK_INT}")
@@ -68,12 +70,15 @@ internal object NuvioQuickJsProbe {
                     System.setProperty(PATH_KEY, nativeFile.parentFile!!.absolutePath)
                     System.setProperty(NAME_KEY, LIB)
                     val outcome = when {
+                        batchTest != null -> NuvioQuickJsEvaluator.evaluateBatch(batchTest) { done, total, name ->
+                            onBatchProgress?.invoke(done, total, name)
+                        }
                         realTest != null -> NuvioQuickJsEvaluator.evaluateReal(realTest)
                         hostTest -> NuvioQuickJsEvaluator.evaluateHost()
                         adapterTest -> NuvioQuickJsEvaluator.evaluateAdapter()
                         else -> NuvioQuickJsEvaluator.evaluate()
                     }
-                    if (realTest != null) report.add(outcome)
+                    if (realTest != null || batchTest != null) report.add(outcome)
                     else {
                         val label = if (hostTest) "HOST" else if (adapterTest) "ADAPTER" else "EXECUTION"
                         report.add("$label: PASS ($outcome)")
@@ -87,7 +92,7 @@ internal object NuvioQuickJsProbe {
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
-                report.add("${if (realTest != null) "REAL" else "TEST"}: FAIL: ${t.javaClass.simpleName}: ${t.message.orEmpty()}")
+                report.add("${if (batchTest != null) "BATCH" else if (realTest != null) "REAL" else "TEST"}: FAIL: ${t.javaClass.simpleName}: ${t.message.orEmpty()}")
             }
             report.joinToString("\n").also { Log.i(TAG, it) }
         }

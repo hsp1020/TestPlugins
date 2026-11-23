@@ -4,6 +4,10 @@ import com.dokar.quickjs.quickJs
 import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.function
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -297,6 +301,47 @@ internal object NuvioQuickJsEvaluator {
                 if (recent.isNotEmpty()) append(" | HTTP: ").append(recent)
                 if (warnings.isNotEmpty()) append(" | JS: ").append(warnings)
             }, t)
+        }
+    }
+
+    /** One smoke test per installed scraper; only three native runtimes run concurrently. */
+    suspend fun evaluateBatch(
+        tests: List<RealScraper>,
+        onProgress: suspend (Int, Int, String) -> Unit,
+    ): String {
+        val slots = kotlinx.coroutines.sync.Semaphore(3)
+        val finished = AtomicInteger()
+        val reports = Array(tests.size) { "" }
+        coroutineScope {
+            tests.mapIndexed { index, test ->
+                async(Dispatchers.Default) {
+                    slots.withPermit {
+                        reports[index] = try {
+                            evaluateReal(test)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (t: Exception) {
+                            "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty().take(280)
+                        }
+                        onProgress(finished.incrementAndGet(), tests.size, test.name)
+                    }
+                }
+            }.awaitAll()
+        }
+        val passed = reports.count { it.startsWith("REAL: PASS") }
+        val empty = reports.count { it.startsWith("REAL: EMPTY") }
+        val invalid = reports.count { it.startsWith("REAL: INVALID") }
+        val failed = reports.size - passed - empty - invalid
+        val redactUrls = Regex("""https?://\S+""")
+        return buildString {
+            append("BATCH: COMPLETE (").append(tests.size).append(" scrapers)")
+            append("\nPASS=").append(passed).append(" EMPTY=").append(empty)
+            append(" INVALID=").append(invalid).append(" FAIL=").append(failed)
+            tests.forEachIndexed { index, test ->
+                append("\n\n").append(index + 1).append(". ").append(test.name)
+                append(" [").append(test.mediaType).append("] ")
+                append(redactUrls.replace(reports[index], "[URL]"))
+            }
         }
     }
 

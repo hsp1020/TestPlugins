@@ -43,32 +43,39 @@ but real network behavior and cancellation of in-flight native HTTP calls are NO
 Neither full Nuvio API parity nor actual scraper compatibility is established until P0-3.
 The original P0-0 and P0-1 tests remain available, and Rhino scraper execution is unchanged.
 
-## P0-3 real scraper testbed
+## P0-3 automated full-repository testbed
 
-1. Update **Nuvio** from the existing TestPlugins-build repository.
+1. Update **Nuvio** from the usual TestPlugins-build plugin repository.
 2. Open **Nuvio → Settings → repository → SCRAPERS**.
-3. Choose an installed scraper and tap **TEST QUICKJS** on its card.
-4. Select **Movie** or **TV Series** (only types supported by the scraper appear).
-5. Enter a valid **TMDB ID** and, for series, **Season/Episode**.
-   The initial examples are movie **550** and TV **1399**, Season 1 Episode 1; change them if
-   the selected scraper requires a specific work.
-6. Tap **RUN**, then **COPY** in the results dialog.
+3. Tap **RUN ALL QUICKJS TESTS** once, below ENABLE ALL / DISABLE ALL.
+4. A progress dialog displays the number completed and the last scraper. **CANCEL** stops the batch.
+5. When finished, tap **COPY ALL** for the full per-scraper report.
 
-This invokes the **real, locally downloaded scraper JavaScript**, with its saved per-scraper
-settings and actual HTTP requests, in an isolated QuickJS instance. It does **not** modify
-Rhino execution, source selection, installed scraper enablement, or CloudStream playback.
+The batch automatically tests **every scraper in the selected repository** that supports
+movies or TV, regardless of its ON/OFF switch. It reads the already downloaded JS,
+including the existing per-scraper settings, and uses actual HTTP. No manual selection,
+ID typing, or individual test buttons are required.
 
-Results: `REAL: PASS` means at least one URL/infoHash was returned; `REAL: EMPTY` means the
-script returned no entries; `REAL: INVALID` means entries lacked usable URLs/info hashes;
-`REAL: FAIL` indicates a runtime/HTTP/parse/timeout error. `HTTP` shows the request count,
-and `HOSTS` shows domain names and HTTP statuses without full tokenized URLs.
-`SAMPLES` shows at most 3 stream names/qualities. A returned link does **not** prove
-that the link can actually be played.
+One representative input is used per scraper to avoid duplicate work: movie-capable
+scrapers receive movie TMDB **550**; TV-only scrapers receive TV TMDB **1399**,
+season **1**, episode **1**. This is a compatibility smoke test, **not** an exhaustive
+movie/TV content coverage test. Some sources may return EMPTY due to missing tokens
+or unsupported titles even when their JS runtime works.
 
-The test is manual, one scraper per run, and bounded by the existing **Scraper timeout**
-setting (5–180 seconds). Some scripts require tokens, authentication or special works.
-HTTP calls use the existing Nuvio HTTP transport; cancellation of already-running blocking
-OkHttp calls is not yet guaranteed. Avoid repeating tests rapidly while requests are active.
+At most **3 QuickJS test runtimes** operate concurrently, each using a diagnostic
+timeout of at most **15 seconds** (or the existing shorter timeout setting). This
+limits simultaneous work but cannot guarantee interruption of a synchronous
+infinite JavaScript loop or an already-blocking native HTTP call.
+The batch runs **only when pressed**; no polling or scheduled tests are added.
+
+Result categories: `REAL: PASS` (at least one URL/infoHash),
+`REAL: EMPTY` (no streams), `REAL: INVALID` (items without valid links),
+and `REAL: FAIL` (script/HTTP/timeout/parse errors). Summary totals and
+per-scraper diagnostics are copied together; any tokenized full URLs are omitted.
+PASS does not prove actual video playback.
+
+The original Rhino playback path, enabled/disabled settings, P0-0, P0-1,
+and P0-2 tests are unchanged.
 
 ## How to collect failure details
 
