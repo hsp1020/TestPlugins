@@ -1,6 +1,7 @@
 package com.hsp1020.elevate
 
 import android.app.Dialog
+import android.graphics.Typeface
 import android.view.ContextThemeWrapper
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -118,7 +119,7 @@ internal class ElevatePlaybackSpeedControl(
             this.text = "0.75x"
             setTextColor(first.textColors)
             setTextSize(TypedValue.COMPLEX_UNIT_PX, first.textSize)
-            typeface = first.typeface
+            setTypeface(first.typeface, Typeface.BOLD)
             backgroundTintList = first.backgroundTintList
             cornerRadius = first.cornerRadius
             strokeColor = first.strokeColor
