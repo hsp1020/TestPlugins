@@ -341,32 +341,12 @@ class TvchakProvider : MainAPI() {
         }
     }
 
-    // Temporary playback diagnostics: URLs are reduced to host, path shape and query keys.
-    private fun tracePlayback(id: String, stage: String, info: String = "") {
-        android.util.Log.i("TvchakPlaybackTrace", "id=$id stage=$stage $info")
-    }
-
-    private fun traceUrl(url: String): String = try {
-        val uri = android.net.Uri.parse(url)
-        val path = uri.path.orEmpty()
-            .replace(Regex("[A-Za-z0-9_-]{24,}"), "{token}")
-            .take(100)
-        "host=" + uri.host + " path=" + path +
-            " queryKeys=" + uri.queryParameterNames.sorted().joinToString(",")
-    } catch (_: Exception) {
-        "unparseable"
-    }
-
-
-    // Temporary one-session diagnostic snapshot. Chunks can be reconstructed from logcat.
     // Resolve newly uploaded titles over HTTP when their B-CDN MP4 returns 404.
     private suspend fun findWiselifeHls(
         pageUrl: String,
         videoUrl: String,
-        playerType: String,
-        traceId: String
+        playerType: String
     ): Pair<String, Map<String, String>>? {
-        val started = android.os.SystemClock.elapsedRealtime()
         return try {
             val config = app.get(
                 "$mainUrl/static/js/playerconfig2.js",
@@ -380,14 +360,12 @@ class TvchakProvider : MainAPI() {
             if (!parseUrl.startsWith("https://") && !parseUrl.startsWith("http://")) return null
 
             val handshakeUrl = parseUrl + URLEncoder.encode(videoUrl, "UTF-8")
-            tracePlayback(traceId, "HTTP_HLS_REQUEST", traceUrl(handshakeUrl))
             val response = app.get(
                 handshakeUrl,
                 headers = getHeaders(pageUrl),
                 timeout = 6L,
                 cacheTime = 0
             )
-            tracePlayback(traceId, "HTTP_HLS_RESPONSE", "code=${response.code}")
             if (!response.isSuccessful) return null
             val encrypted = Regex("""phpsiteEc\s*=\s*["']([^"']+)["']""")
                 .find(response.text)?.groupValues?.get(1) ?: return null
@@ -409,8 +387,6 @@ class TvchakProvider : MainAPI() {
 
             val parseUri = android.net.Uri.parse(parseUrl)
             val origin = "${parseUri.scheme}://${parseUri.authority}"
-            tracePlayback(traceId, "HTTP_HLS_DECODED", traceUrl(hlsUrl) +
-                " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started))
             hlsUrl to mapOf(
                 "User-Agent" to (cfUserAgent ?: userAgent),
                 "Referer" to "$origin/",
@@ -418,8 +394,7 @@ class TvchakProvider : MainAPI() {
             )
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            tracePlayback(traceId, "HTTP_HLS_ERROR", e.javaClass.simpleName)
+        } catch (_: Exception) {
             null
         }
     }
@@ -430,40 +405,24 @@ class TvchakProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val traceId = android.os.SystemClock.elapsedRealtime().toString(36)
-        val started = android.os.SystemClock.elapsedRealtime()
-        tracePlayback(traceId, "LINK_START", "casting=" + isCasting + " " + traceUrl(data))
         checkAndUpdateDomain()
-        tracePlayback(traceId, "DOMAIN_READY", "mainHost=" + mainUrl)
 
-        val response = safeGet(data)
-        val document = response.document
-        tracePlayback(traceId, "PAGE_RECEIVED", "status=" + response.code +
-            " scripts=" + document.select("script").size +
-            " iframes=" + document.select("iframe").size +
-            " wiselifeReferenced=" + response.text.contains("wiselife", true) +
-            " chakttReferenced=" + response.text.contains("chaktt", true))
+        val document = safeGet(data).document
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: run {
-            tracePlayback(traceId, "NO_PLAYER_SCRIPT")
             return false
         }
-        tracePlayback(traceId, "PLAYER_SCRIPT", "bytes=" + scriptContent.length)
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
         val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
         val matchUrl = urlRegex.find(jsonString)
         val rawUrl = matchUrl?.groupValues?.get(1)?.replace("\\/", "/") ?: run {
-            tracePlayback(traceId, "NO_PLAYER_URL")
             return false
         }
-        tracePlayback(traceId, "PLAYER_URL", traceUrl(rawUrl))
 
         var videoUrl = rawUrl
         var refererUrl = mainUrl
 
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
-        tracePlayback(traceId, "LINK_KIND", "wrapper=" + isChakttWrapper +
-            " directCdn=" + rawUrl.contains("b-cdn.net"))
 
         if (isChakttWrapper) {
             var detectDomain = "https://ckp.wiselife.blog" 
@@ -502,15 +461,9 @@ class TvchakProvider : MainAPI() {
             }
 
             refererUrl = "$detectDomain/"
-            tracePlayback(traceId, "HANDSHAKE_START", traceUrl(handshakeUrl))
-            val handshakeStarted = android.os.SystemClock.elapsedRealtime()
             try {
-                val handshake = safeGet(handshakeUrl, referer = mainUrl)
-                tracePlayback(traceId, "HANDSHAKE_RESPONSE", "status=" + handshake.code +
-                    " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - handshakeStarted) +
-                    " bytes=" + handshake.text.length)
-            } catch (e: Exception) {
-                tracePlayback(traceId, "HANDSHAKE_FAILED", "error=" + e.javaClass.simpleName)
+                safeGet(handshakeUrl, referer = mainUrl)
+            } catch (_: Exception) {
             }
         }
 
@@ -521,10 +474,8 @@ class TvchakProvider : MainAPI() {
         // Probe only direct B-CDN links; leave all working and other sources unchanged.
         if (!isChakttWrapper && videoUrl.contains("b-cdn.net") &&
             videoUrl.substringBefore('?').endsWith(".mp4", ignoreCase = true)) {
-            tracePlayback(traceId, "MP4_HEAD_START", traceUrl(videoUrl))
-            val headStarted = android.os.SystemClock.elapsedRealtime()
             val isMissing = try {
-                val head = app.head(
+                app.head(
                     videoUrl,
                     headers = mapOf(
                         "User-Agent" to (cfUserAgent ?: userAgent),
@@ -532,23 +483,17 @@ class TvchakProvider : MainAPI() {
                     ),
                     timeout = 5L,
                     cacheTime = 0
-                )
-                tracePlayback(traceId, "MP4_HEAD_RESULT", "status=" + head.code +
-                    " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - headStarted))
-                head.code == 404
-            } catch (e: Exception) {
-                tracePlayback(traceId, "MP4_HEAD_ERROR", "error=" + e.javaClass.simpleName)
+                ).code == 404
+            } catch (_: Exception) {
                 false
             }
             if (isMissing) {
-                tracePlayback(traceId, "FALLBACK_START")
                 val playerType = Regex(""""from"\s*:\s*"([^"]+)"""")
                     .find(jsonString)?.groupValues?.get(1) ?: "mp4"
                 val sourceUrl = subMatch?.let { videoUrl.substring(0, it.range.first) } ?: videoUrl
-                val hls = findWiselifeHls(data, sourceUrl, playerType, traceId)
+                val hls = findWiselifeHls(data, sourceUrl, playerType)
                 if (hls != null) {
                     val (hlsUrl, hlsHeaders) = hls
-                    tracePlayback(traceId, "HLS_PUBLISH", traceUrl(hlsUrl))
                     callback.invoke(newExtractorLink(name, name, hlsUrl, ExtractorLinkType.M3U8) {
                         referer = hlsHeaders.entries.firstOrNull {
                             it.key.equals("Referer", true)
@@ -559,11 +504,8 @@ class TvchakProvider : MainAPI() {
                     if (!subUrl.isNullOrBlank()) {
                         subtitleCallback.invoke(newSubtitleFile("Korean", subUrl))
                     }
-                    tracePlayback(traceId, "LINK_SUCCESS", "route=hls elapsedMs=" +
-                        (android.os.SystemClock.elapsedRealtime() - started))
                     return true
                 }
-                tracePlayback(traceId, "LINK_FAILURE", "reason=cdn404_no_hls")
                 return false
             }
         }
@@ -573,8 +515,6 @@ class TvchakProvider : MainAPI() {
         }
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-        tracePlayback(traceId, "DIRECT_PUBLISH", "type=" + type + " " + traceUrl(videoUrl) +
-            " subtitle=" + (subUrl != null))
 
         callback.invoke(
             newExtractorLink(
@@ -598,8 +538,6 @@ class TvchakProvider : MainAPI() {
             )
         }
 
-        tracePlayback(traceId, "LINK_SUCCESS", "route=direct elapsedMs=" +
-            (android.os.SystemClock.elapsedRealtime() - started))
         return true
     }
 
