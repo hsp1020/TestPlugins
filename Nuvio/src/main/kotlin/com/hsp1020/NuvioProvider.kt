@@ -232,6 +232,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         }
         val slots = Semaphore(10)
         val found = AtomicInteger(0)
+        val linkProbe = NuvioLinkProbe(kotlinx.coroutines.CoroutineScope(currentCoroutineContext()))
 
         try {
             targets.amap { (repo, scraper) ->
@@ -253,10 +254,10 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
                         if (error == null && result.json != null) {
                             try {
                                 currentCoroutineContext().ensureActive()
-                                emitted = emitStreams(result.json, scraper, subtitleCallback) { link ->
+                                emitted = emitStreams(result.json, scraper, subtitleCallback, { link ->
                                     callback(link)
                                     found.incrementAndGet()
-                                }
+                                }, linkProbe)
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
@@ -288,7 +289,8 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         json: String,
         scraper: NuvioScraper,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        linkProbe: NuvioLinkProbe,
     ): Int {
         val arr = JSONArray(json)
         var count = 0
@@ -330,6 +332,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
                 }
             )
             count++
+            linkProbe.inspect(scraper.name, url, headerMap)
 
             val subs = o.optJSONArray("subtitles")
             if (subs != null) {
