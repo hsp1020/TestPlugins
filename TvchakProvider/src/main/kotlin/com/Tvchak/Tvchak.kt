@@ -486,6 +486,9 @@ class TvchakProvider : MainAPI() {
             }
         }
 
+        val subMatch = Regex("""\?(srt|vtt)(https?://.*)""").find(videoUrl)
+        val subUrl = subMatch?.groupValues?.get(2)
+
         // New uploads can still point to a CDN MP4 that returns 404.
         // Probe only direct B-CDN links; leave all working and other sources unchanged.
         if (!isChakttWrapper && videoUrl.contains("b-cdn.net") &&
@@ -514,18 +517,17 @@ class TvchakProvider : MainAPI() {
                         headers = hlsHeaders
                         quality = Qualities.P1080.value
                     })
+                    if (!subUrl.isNullOrBlank()) {
+                        subtitleCallback.invoke(newSubtitleFile("Korean", subUrl))
+                    }
                     return true
                 }
                 return false
             }
         }
 
-        var subUrl: String? = null
-        val subRegex = Regex("""\?(srt|vtt)(https?://.*)""")
-        val subMatch = subRegex.find(videoUrl)
         if (subMatch != null) {
             videoUrl = videoUrl.substring(0, subMatch.range.first)
-            subUrl = subMatch.groupValues[2]
         }
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
