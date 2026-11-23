@@ -2,6 +2,7 @@ package it.dogior.hadEnough
 
 import com.dokar.quickjs.quickJs
 import com.dokar.quickjs.binding.asyncFunction
+import com.dokar.quickjs.binding.function
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -10,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.net.URI
 
 /** Separate class keeps QuickJS linkage out of the normal Nuvio plugin load path. */
 internal object NuvioQuickJsEvaluator {
@@ -177,6 +179,126 @@ internal object NuvioQuickJsEvaluator {
             throw IllegalStateException("P0-2 " + stage + ": " + t.message, t)
         }
         return "fetch, axios, DOM, crypto-js, require, settings, errors, cancellation; offline"
+    }
+
+    /** Test a single installed scraper using actual HTTP without publishing its links. */
+    data class RealScraper(
+        val name: String,
+        val code: String,
+        val settingsJson: String,
+        val tmdbId: String,
+        val mediaType: String,
+        val season: Int?,
+        val episode: Int?,
+        val timeoutMs: Long,
+    )
+
+    suspend fun evaluateReal(test: RealScraper): String {
+        require(test.code.isNotBlank()) { "SCRIPT_MISSING" }
+        require(test.code.length <= 2_000_000) { "SCRIPT_TOO_LARGE" }
+        require(test.tmdbId.isNotBlank() && test.tmdbId.all { it.isDigit() }) { "INVALID_TMDB_ID" }
+        require(test.mediaType == "movie" || test.mediaType == "tv") { "INVALID_MEDIA_TYPE" }
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val jsErrors = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val host = NuvioQuickJsHost(onResponse = { url, status, error ->
+            val domain = runCatching { URI(url).host }.getOrNull() ?: "unknown"
+            requests.add("$domain: ${status ?: error ?: "error"}")
+        })
+        var stage = "BOOTSTRAP"
+        try {
+            val json = withTimeout(test.timeoutMs) {
+                quickJs(Dispatchers.Default) {
+                    evaluationTimeoutMillis = test.timeoutMs
+                    host.register(this, test.settingsJson)
+                    function("__p03Log") { args ->
+                        val level = args.getOrNull(0)?.toString().orEmpty()
+                        if (level == "error" || level == "warn") {
+                            if (jsErrors.size < 5) {
+                                jsErrors.add("$level: " + args.getOrNull(1)?.toString().orEmpty().take(160))
+                            }
+                        }
+                        null
+                    }
+                    val bootstrap = evaluate<String>(
+                        NUVIO_QUICKJS_FETCH_JS + "\n" + NUVIO_QUICKJS_HOST_PRELUDE + "\n" +
+                            """
+                            globalThis.console = {
+                              log: function(){}, info: function(){}, debug: function(){},
+                              warn: function(){ __p03Log('warn', Array.from(arguments).join(' ')); },
+                              error: function(){ __p03Log('error', Array.from(arguments).join(' ')); }
+                            };
+                            globalThis.atob = function(s) { return __latin1Decode(__b64ToBytes(s)); };
+                            globalThis.btoa = function(s) { return __bytesToB64(__latin1Bytes(s)); };
+                            String(typeof fetch)
+                            """.trimIndent()
+                    )
+                    check(bootstrap == "function") { "FETCH_BRIDGE_MISSING" }
+
+                    stage = "SCRIPT_COMPILE"
+                    val exported = evaluate<String>(
+                        "var module = { exports: {} }; var exports = module.exports;\n" +
+                            "(function() {\n" + test.code + "\n" +
+                            "if (typeof module.exports.getStreams !== 'function' && " +
+                            "typeof getStreams === 'function') module.exports.getStreams = getStreams;\n" +
+                            "})();\nString(typeof module.exports.getStreams)"
+                    )
+                    check(exported == "function") { "GETSTREAMS_MISSING: $exported" }
+
+                    stage = "GETSTREAMS"
+                    evaluate<String>(
+                        """JSON.stringify(await (async function() {
+                          var fn = module.exports.getStreams;
+                          var result = await fn.call(module.exports, """ +
+                            JSONObject.quote(test.tmdbId) + ", " + JSONObject.quote(test.mediaType) + ", " +
+                            (test.season?.toString() ?: "null") + ", " +
+                            (test.episode?.toString() ?: "null") +
+                            """);
+                          return Array.isArray(result) ? result :
+                            (result && Array.isArray(result.streams) ? result.streams : []);
+                        })())"""
+                    )
+                }
+            }
+            stage = "RESULT_PARSE"
+            check(json.length <= 5_000_000) { "RESULT_TOO_LARGE" }
+            val array = JSONArray(json)
+            var links = 0
+            val samples = ArrayList<String>(3)
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                if (item.optString("url").isNotBlank() || item.optString("infoHash").isNotBlank()) {
+                    links++
+                    if (samples.size < 3) {
+                        samples.add(item.optString("name", "Stream").take(64) + " / " +
+                            item.optString("quality", "Auto").take(20))
+                    }
+                }
+            }
+            val hosts = synchronized(requests) { requests.take(8).joinToString("; ") }
+            val warnings = synchronized(jsErrors) { jsErrors.take(5).joinToString("; ") }
+            return buildString {
+                append("REAL: ").append(
+                    if (links > 0) "PASS" else if (array.length() == 0) "EMPTY" else "INVALID"
+                )
+                append(" (links=").append(links).append(", items=").append(array.length()).append(")")
+                append("\nHTTP: ").append(requests.size).append(" requests")
+                if (hosts.isNotEmpty()) append("\nHOSTS: ").append(hosts)
+                if (samples.isNotEmpty()) append("\nSAMPLES: ").append(samples.joinToString("; "))
+                if (warnings.isNotEmpty()) append("\nJS WARN/ERROR: ").append(warnings)
+            }
+        } catch (e: TimeoutCancellationException) {
+            throw IllegalStateException("TIMEOUT: ${test.timeoutMs} ms; HTTP requests=${requests.size}", e)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            val recent = synchronized(requests) { requests.takeLast(3).joinToString("; ") }
+            val warnings = synchronized(jsErrors) { jsErrors.takeLast(3).joinToString("; ") }
+            throw IllegalStateException(buildString {
+                append(stage).append(": ").append(t.message)
+                if (recent.isNotEmpty()) append(" | HTTP: ").append(recent)
+                if (warnings.isNotEmpty()) append(" | JS: ").append(warnings)
+            }, t)
+        }
     }
 
     private fun verifyResult(json: String, id: String, type: String, season: Int?, episode: Int?) {

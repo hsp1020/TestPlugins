@@ -9,14 +9,15 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.zip.ZipFile
 
-/** P0-0/P0-1/P0-2 diagnostics, isolated from Rhino scraper execution. */
+/** QuickJS P0-0 through P0-3 diagnostics, isolated from Rhino scraper execution. */
 internal object NuvioQuickJsProbe {
     private const val TAG = "NuvioQuickJsProbe"
     private const val LIB = "libquickjs.so"
     private const val PATH_KEY = "com.dokar.quickjs.library.path"
     private const val NAME_KEY = "com.dokar.quickjs.library.name"
 
-    suspend fun run(context: Context, pluginFilePath: String?, adapterTest: Boolean = false, hostTest: Boolean = false): String =
+    suspend fun run(context: Context, pluginFilePath: String?, adapterTest: Boolean = false,
+        hostTest: Boolean = false, realTest: NuvioQuickJsEvaluator.RealScraper? = null): String =
         withContext(Dispatchers.IO) {
             val report = ArrayList<String>(5)
             report.add("QuickJS 1.0.5 / Android ${Build.VERSION.SDK_INT}")
@@ -54,6 +55,11 @@ internal object NuvioQuickJsProbe {
                     "QuickJs class was loaded by the host instead of the plugin DEX"
                 }
                 report.add("DEX: PASS (QuickJs class bundled with plugin)")
+                if (realTest != null) {
+                    report.add("SCRAPER: ${realTest.name}")
+                    report.add("INPUT: ${realTest.mediaType} TMDB ${realTest.tmdbId}" +
+                        if (realTest.season != null) " S${realTest.season}E${realTest.episode}" else "")
+                }
 
                 val previousPath = System.getProperty(PATH_KEY)
                 val previousName = System.getProperty(NAME_KEY)
@@ -62,12 +68,16 @@ internal object NuvioQuickJsProbe {
                     System.setProperty(PATH_KEY, nativeFile.parentFile!!.absolutePath)
                     System.setProperty(NAME_KEY, LIB)
                     val outcome = when {
+                        realTest != null -> NuvioQuickJsEvaluator.evaluateReal(realTest)
                         hostTest -> NuvioQuickJsEvaluator.evaluateHost()
                         adapterTest -> NuvioQuickJsEvaluator.evaluateAdapter()
                         else -> NuvioQuickJsEvaluator.evaluate()
                     }
-                    val label = if (hostTest) "HOST" else if (adapterTest) "ADAPTER" else "EXECUTION"
-                    report.add("$label: PASS ($outcome)")
+                    if (realTest != null) report.add(outcome)
+                    else {
+                        val label = if (hostTest) "HOST" else if (adapterTest) "ADAPTER" else "EXECUTION"
+                        report.add("$label: PASS ($outcome)")
+                    }
                 } finally {
                     if (previousPath == null) System.clearProperty(PATH_KEY)
                     else System.setProperty(PATH_KEY, previousPath)
@@ -77,7 +87,7 @@ internal object NuvioQuickJsProbe {
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
-                report.add("FAIL: ${t.javaClass.simpleName}: ${t.message.orEmpty()}")
+                report.add("${if (realTest != null) "REAL" else "TEST"}: FAIL: ${t.javaClass.simpleName}: ${t.message.orEmpty()}")
             }
             report.joinToString("\n").also { Log.i(TAG, it) }
         }

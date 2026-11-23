@@ -1,4 +1,4 @@
-# QuickJS P0-0 / P0-1 / P0-2 testbed (Nuvio only)
+# QuickJS P0-0 / P0-1 / P0-2 / P0-3 testbed (Nuvio only)
 
 This diagnostic does **not** replace Rhino or modify scraper execution.
 
@@ -42,6 +42,33 @@ The bridge has a transport backed by the existing NuvioHttp for later integratio
 but real network behavior and cancellation of in-flight native HTTP calls are NOT yet verified.
 Neither full Nuvio API parity nor actual scraper compatibility is established until P0-3.
 The original P0-0 and P0-1 tests remain available, and Rhino scraper execution is unchanged.
+
+## P0-3 real scraper testbed
+
+1. Update **Nuvio** from the existing TestPlugins-build repository.
+2. Open **Nuvio → Settings → repository → SCRAPERS**.
+3. Choose an installed scraper and tap **TEST QUICKJS** on its card.
+4. Select **Movie** or **TV Series** (only types supported by the scraper appear).
+5. Enter a valid **TMDB ID** and, for series, **Season/Episode**.
+   The initial examples are movie **550** and TV **1399**, Season 1 Episode 1; change them if
+   the selected scraper requires a specific work.
+6. Tap **RUN**, then **COPY** in the results dialog.
+
+This invokes the **real, locally downloaded scraper JavaScript**, with its saved per-scraper
+settings and actual HTTP requests, in an isolated QuickJS instance. It does **not** modify
+Rhino execution, source selection, installed scraper enablement, or CloudStream playback.
+
+Results: `REAL: PASS` means at least one URL/infoHash was returned; `REAL: EMPTY` means the
+script returned no entries; `REAL: INVALID` means entries lacked usable URLs/info hashes;
+`REAL: FAIL` indicates a runtime/HTTP/parse/timeout error. `HTTP` shows the request count,
+and `HOSTS` shows domain names and HTTP statuses without full tokenized URLs.
+`SAMPLES` shows at most 3 stream names/qualities. A returned link does **not** prove
+that the link can actually be played.
+
+The test is manual, one scraper per run, and bounded by the existing **Scraper timeout**
+setting (5–180 seconds). Some scripts require tokens, authentication or special works.
+HTTP calls use the existing Nuvio HTTP transport; cancellation of already-running blocking
+OkHttp calls is not yet guaranteed. Avoid repeating tests rapidly while requests are active.
 
 ## How to collect failure details
 

@@ -12,6 +12,7 @@ import org.json.JSONObject
 
 /** P0-2 QuickJS host bindings. Tests inject a deterministic transport. */
 internal class NuvioQuickJsHost(
+    private val onResponse: ((String, Int?, String?) -> Unit)? = null,
     private val request: suspend (String, String, Map<String, String>, String?, Boolean) -> NuvioHttpResult =
         { url, method, headers, body, redirects ->
             withContext(Dispatchers.IO) {
@@ -49,8 +50,16 @@ internal class NuvioQuickJsHost(
             val rawHeaders = JSONObject(a.getOrNull(2)?.toString() ?: "{}")
             val headers = LinkedHashMap<String, String>()
             for (key in rawHeaders.keys()) headers[key] = rawHeaders.optString(key)
-            val result = request(url, method, headers, a.getOrNull(3)?.toString(),
-                a.getOrNull(4)?.toString() != "manual")
+            val result = try {
+                request(url, method, headers, a.getOrNull(3)?.toString(),
+                    a.getOrNull(4)?.toString() != "manual")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                onResponse?.invoke(url, null, t.javaClass.simpleName)
+                throw t
+            }
+            onResponse?.invoke(url, result.status, null)
             JSONObject().apply {
                 put("status", result.status)
                 put("statusText", result.statusText)

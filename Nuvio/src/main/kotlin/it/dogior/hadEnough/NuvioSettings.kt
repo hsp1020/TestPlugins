@@ -478,6 +478,8 @@ class NuvioSettings(
             card.addView(label(s.notes, 11f, alpha = 0.55f, topDp = 4))
         }
 
+        card.addView(small("TEST QUICKJS", GREEN) { openQuickJsScraperTest(repo, s) })
+
         card.setOnClickListener {
             val now = !manager.isEnabled(repo, s)
             manager.setEnabled(repo, s, now)
@@ -486,6 +488,100 @@ class NuvioSettings(
         }
 
         return card
+    }
+
+    /** One scraper at a time. Testing does not change its enabled state or publish links. */
+    private fun openQuickJsScraperTest(repo: NuvioRepo, scraper: NuvioScraper) {
+        val modes = listOfNotNull(
+            "movie".takeIf { scraper.supports("movie") },
+            "tv".takeIf { scraper.supports("tv") }
+        )
+        if (modes.isEmpty()) { toast("Unsupported media type"); return }
+        AlertDialog.Builder(ctx)
+            .setTitle("QuickJS test · ${scraper.name}")
+            .setItems(modes.map { if (it == "movie") "Movie" else "TV Series" }.toTypedArray()) { _, index ->
+                showQuickJsTestInputs(repo, scraper, modes[index])
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showQuickJsTestInputs(repo: NuvioRepo, scraper: NuvioScraper, type: String) {
+        val form = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        fun field(caption: String, value: String): EditText {
+            form.addView(label(caption, 13f, bold = true, topDp = 6))
+            return EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setSingleLine(true)
+                setText(value)
+                form.addView(this)
+            }
+        }
+        val id = field("TMDB ID", if (type == "movie") "550" else "1399")
+        val season = if (type == "tv") field("Season", "1") else null
+        val episode = if (type == "tv") field("Episode", "1") else null
+        AlertDialog.Builder(ctx)
+            .setTitle("${scraper.name} · $type")
+            .setView(form)
+            .setMessage("Runs the downloaded scraper with live HTTP. Does not start playback.")
+            .setPositiveButton("RUN") { _, _ ->
+                val idValue = id.text.toString().trim()
+                val s = season?.text?.toString()?.toIntOrNull()
+                val e = episode?.text?.toString()?.toIntOrNull()
+                if (idValue.isEmpty() || idValue.any { !it.isDigit() } ||
+                    (type == "tv" && (s == null || s < 0 || e == null || e < 1))) {
+                    toast("Invalid TMDB ID or episode")
+                } else {
+                    runQuickJsScraperTest(repo, scraper, idValue, type, s, e)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runQuickJsScraperTest(
+        repo: NuvioRepo, scraper: NuvioScraper, id: String, type: String, season: Int?, episode: Int?
+    ) {
+        if (busy) { toast("A test is already running"); return }
+        busy = true
+        toast("QuickJS scraper test running…")
+        uiScope.launch {
+            try {
+                val report = try {
+                    withContext(Dispatchers.IO) {
+                        val script = manager.readScript(repo, scraper)
+                        if (script == null) "REAL: FAIL: scraper file missing (REFRESH repository)"
+                        else NuvioQuickJsProbe.run(
+                            ctx.applicationContext, pluginFilePath, realTest = NuvioQuickJsEvaluator.RealScraper(
+                                scraper.name, script, manager.settingsFor(repo, scraper),
+                                id, type, season, episode, manager.timeoutSeconds * 1000L
+                            )
+                        )
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (t: Exception) {
+                    "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty()
+                }
+                AlertDialog.Builder(ctx)
+                    .setTitle("${scraper.name} · QuickJS P0-3")
+                    .setMessage(report)
+                    .setPositiveButton("OK", null)
+                    .setNeutralButton("COPY") { _, _ ->
+                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(
+                            android.content.ClipData.newPlainText("QuickJS P0-3", report)
+                        )
+                    }
+                    .show()
+            } finally {
+                busy = false
+            }
+        }
     }
 
     // ── logo ──
