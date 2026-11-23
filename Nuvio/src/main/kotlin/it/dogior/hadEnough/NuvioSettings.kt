@@ -124,7 +124,7 @@ class NuvioSettings(
         val dialog = AlertDialog.Builder(ctx)
             .setTitle("Nuvio")
             .setView(scroll)
-            .setPositiveButton("Chiudi", null)
+            .setPositiveButton("Close", null)
             .create()
         dialog.setOnDismissListener { uiScope.cancel() }
         dialog.setOnKeyListener { _, keyCode, event ->
@@ -144,17 +144,17 @@ class NuvioSettings(
         } else {
             renderRepo(repo)
         }
-        closeAction?.let { close -> container.addView(button("CHIUDI", GRAY) { close() }) }
+        closeAction?.let { close -> container.addView(button("CLOSE", GRAY) { close() }) }
         scrollTop()
     }
 
     // ── main screen ──
 
     private fun renderMain() {
-        container.addView(label("Repository di scraper Nuvio", 17f, bold = true))
+        container.addView(label("Nuvio scraper repositories", 17f, bold = true))
         container.addView(
             label(
-                "Incolla il link di un repository Nuvio (GitHub o raw).",
+                "Paste a Nuvio repository link (GitHub or raw URL).",
                 12f, alpha = 0.65f
             )
         )
@@ -165,24 +165,24 @@ class NuvioSettings(
             setSingleLine(true)
         }
         container.addView(urlInput)
-        container.addView(button("AGGIUNGI REPOSITORY", GREEN) {
+        container.addView(button("ADD REPOSITORY", GREEN) {
             val text = urlInput.text.toString().trim()
-            if (text.isEmpty()) toast("Inserisci un link")
-            else runSync("Download degli scraper in corso…") { manager.addRepo(text) }
+            if (text.isEmpty()) toast("Enter a repository link")
+            else runSync("Downloading scrapers…") { manager.addRepo(text) }
         })
 
         val repos = manager.repos()
         if (repos.isEmpty()) {
-            container.addView(label("Nessun repository aggiunto.", 13f, alpha = 0.65f, topDp = 12))
+            container.addView(label("No repositories added.", 13f, alpha = 0.65f, topDp = 12))
         }
         repos.forEach { container.addView(repoCard(it)) }
 
-        container.addView(label("Impostazioni generali", 17f, bold = true, topDp = 22))
+        container.addView(label("General settings", 17f, bold = true, topDp = 22))
 
-        container.addView(label("Timeout per scraper (secondi)", 13f, bold = true, topDp = 8))
+        container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 8))
         container.addView(
             label(
-                "Dopo questo tempo lo scraper viene interrotto. Consigliato: 45",
+                "The scraper stops after this time. Recommended: 45.",
                 12f, alpha = 0.65f
             )
         )
@@ -193,10 +193,10 @@ class NuvioSettings(
         }
         container.addView(timeoutInput)
 
-        container.addView(label("Valori globali (JSON)", 13f, bold = true, topDp = 12))
+        container.addView(label("Global values (JSON)", 13f, bold = true, topDp = 12))
         container.addView(
             label(
-                "Passati a tutti gli scraper come SCRAPER_SETTINGS. Di solito lascia {}.",
+                "Passed to all scrapers as SCRAPER_SETTINGS. Usually leave as {}.",
                 12f, alpha = 0.65f
             )
         )
@@ -208,22 +208,22 @@ class NuvioSettings(
         }
         container.addView(settingsInput)
 
-        container.addView(button("SALVA IMPOSTAZIONI", GREEN) {
+        container.addView(button("SAVE SETTINGS", GREEN) {
             val seconds = timeoutInput.text.toString().toIntOrNull()
             if (seconds == null) {
-                toast("Timeout non valido")
+                toast("Invalid timeout")
                 return@button
             }
             val raw = settingsInput.text.toString().trim().ifEmpty { "{}" }
             try {
                 JSONObject(raw)
             } catch (_: Exception) {
-                toast("Il JSON non e' valido")
+                toast("Invalid JSON")
                 return@button
             }
             manager.timeoutSeconds = seconds
             manager.scraperSettingsJson = raw
-            toast("Impostazioni salvate")
+            toast("Settings saved")
         })
     }
 
@@ -255,7 +255,7 @@ class NuvioSettings(
         texts.addView(label(repo.url, 11f, alpha = 0.5f, topDp = 2))
         texts.addView(
             label(
-                if (enabled) "$active/${repo.scrapers.size} scraper attivi" else "Repository disattivato",
+                if (enabled) "$active/${repo.scrapers.size} active scrapers" else "Repository disabled",
                 12f, alpha = 0.8f, topDp = 2
             )
         )
@@ -279,23 +279,23 @@ class NuvioSettings(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(8) }
         }
-        row.addView(small("SCRAPER", GREEN) {
+        row.addView(small("SCRAPERS", GREEN) {
             query = ""
             openRepoId = repo.id
             render()
         })
-        row.addView(small("AGGIORNA", GREEN) {
+        row.addView(small("REFRESH", GREEN) {
             runSync("Aggiornamento in corso…") { manager.refreshRepo(repo.id) }
         })
-        row.addView(small("RIMUOVI", RED) {
+        row.addView(small("REMOVE", RED) {
             AlertDialog.Builder(ctx)
-                .setTitle("Rimuovi repository")
-                .setMessage("Rimuovere \"${repo.name}\" e i suoi scraper?")
-                .setPositiveButton("Rimuovi") { _, _ ->
+                .setTitle("Remove repository")
+                .setMessage("Remove \"${repo.name}\" and its scrapers?")
+                .setPositiveButton("Remove") { _, _ ->
                     manager.removeRepo(repo.id)
                     render()
                 }
-                .setNegativeButton("Annulla", null)
+                .setNegativeButton("Cancel", null)
                 .show()
         })
         card.addView(row)
@@ -311,7 +311,7 @@ class NuvioSettings(
         if (!repoOn) {
             container.addView(
                 label(
-                    "Repository disattivato: i suoi scraper non vengono usati.",
+                    "Repository disabled: its scrapers will not run.",
                     12f, alpha = 0.9f, topDp = 6
                 ).apply { setTextColor(ORANGE) }
             )
@@ -326,14 +326,14 @@ class NuvioSettings(
             val list = repo.scrapers.filter {
                 q.isEmpty() || it.name.lowercase().contains(q) || it.description.lowercase().contains(q)
             }
-            counter.text = "${repo.scrapers.count { manager.isEnabled(repo, it) }}/${repo.scrapers.size} scraper attivi" +
-                    if (q.isNotEmpty()) " · ${list.size} trovati" else ""
-            if (list.isEmpty()) holder.addView(label("Nessuno scraper trovato.", 13f, alpha = 0.65f, topDp = 10))
+            counter.text = "${repo.scrapers.count { manager.isEnabled(repo, it) }}/${repo.scrapers.size} active scrapers" +
+                    if (q.isNotEmpty()) " · ${list.size} found" else ""
+            if (list.isEmpty()) holder.addView(label("No scrapers found.", 13f, alpha = 0.65f, topDp = 10))
             list.forEach { s -> holder.addView(scraperCard(repo, s) { fill() }) }
         }
 
         val search = EditText(ctx).apply {
-            hint = "Cerca scraper…"
+            hint = "Search scrapers…"
             inputType = InputType.TYPE_CLASS_TEXT
             setSingleLine(true)
             setText(query)
@@ -354,8 +354,8 @@ class NuvioSettings(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(8) }
         }
-        bulk.addView(small("ATTIVA TUTTI", GREEN) { manager.setAllEnabled(repo, true); fill() })
-        bulk.addView(small("DISATTIVA TUTTI", RED) { manager.setAllEnabled(repo, false); fill() })
+        bulk.addView(small("ENABLE ALL", GREEN) { manager.setAllEnabled(repo, true); fill() })
+        bulk.addView(small("DISABLE ALL", RED) { manager.setAllEnabled(repo, false); fill() })
         container.addView(bulk)
         container.addView(counter)
         container.addView(holder)
@@ -390,7 +390,7 @@ class NuvioSettings(
             if (s.version.isNotEmpty()) append("  v").append(s.version)
         }
         texts.addView(label(title, 15f, bold = true, topDp = 0))
-        if (s.author.isNotEmpty()) texts.addView(label("di ${s.author}", 11f, alpha = 0.5f, topDp = 1))
+        if (s.author.isNotEmpty()) texts.addView(label("by ${s.author}", 11f, alpha = 0.5f, topDp = 1))
         top.addView(texts)
 
         if (manager.hasSettings(repo, s)) {
@@ -401,7 +401,7 @@ class NuvioSettings(
                 background = roundBg()
                 isFocusable = true
                 isClickable = true
-                contentDescription = "Impostazioni di ${s.name}"
+                contentDescription = "Settings for ${s.name}"
                 layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(8) }
                 setOnClickListener { openScraperSettings(repo, s) }
             })
@@ -418,14 +418,14 @@ class NuvioSettings(
             })
         }
         val meta = buildList {
-            s.types.forEach { add(if (it.equals("movie", true)) "FILM" else if (it.equals("tv", true)) "SERIE" else it.uppercase()) }
+            s.types.forEach { add(if (it.equals("movie", true)) "MOVIE" else if (it.equals("tv", true)) "SERIES" else it.uppercase()) }
             s.languages.forEach { add(it.uppercase()) }
             s.formats.forEach { add(it.uppercase()) }
         }
         if (meta.isNotEmpty()) card.addView(label(meta.joinToString("  ·  "), 11f, alpha = 0.55f, topDp = 4))
         if (s.limited) {
             card.addView(
-                label("LIMITATO" + if (s.notes.isNotEmpty()) ": ${s.notes}" else "", 11f, topDp = 4)
+                label("LIMITED" + if (s.notes.isNotEmpty()) ": ${s.notes}" else "", 11f, topDp = 4)
                     .apply { setTextColor(ORANGE) }
             )
         } else if (s.notes.isNotEmpty()) {
@@ -487,14 +487,14 @@ class NuvioSettings(
             showSettingsForm(repo, s, cached)
             return
         }
-        toast("Lettura delle impostazioni…")
+        toast("Loading settings…")
         uiScope.launch {
             val res = withContext(Dispatchers.IO) { manager.loadBlueprint(repo, s) }
             val bp = res.items
             if (bp == null) {
                 AlertDialog.Builder(ctx)
-                    .setTitle("${s.name} · impostazioni")
-                    .setMessage("Impossibile leggere le impostazioni di questo scraper.\n\nMotivo: ${res.error ?: "sconosciuto"}")
+                    .setTitle("${s.name} · settings")
+                    .setMessage("Unable to load this scraper's settings.\n\nReason: ${res.error ?: "unknown"}")
                     .setPositiveButton("OK", null)
                     .show()
             } else showSettingsForm(repo, s, bp)
@@ -590,7 +590,7 @@ class NuvioSettings(
                                 btn.text = caption()
                                 d.dismiss()
                             }
-                            .setNegativeButton("Annulla", null)
+                            .setNegativeButton("Cancel", null)
                             .show()
                     }
                     form.addView(btn)
@@ -600,18 +600,18 @@ class NuvioSettings(
         }
 
         AlertDialog.Builder(ctx)
-            .setTitle("${s.name} · impostazioni")
+            .setTitle("${s.name} · settings")
             .setView(sc)
-            .setPositiveButton("Salva") { _, _ ->
+            .setPositiveButton("Save") { _, _ ->
                 readers.forEach { it() }
                 manager.setScraperValues(repo, s, values)
-                toast("Impostazioni salvate")
+                toast("Settings saved")
             }
-            .setNeutralButton("Ripristina") { _, _ ->
+            .setNeutralButton("Reset to defaults") { _, _ ->
                 manager.setScraperValues(repo, s, JSONObject())
-                toast("Valori predefiniti ripristinati")
+                toast("Default values restored")
             }
-            .setNegativeButton("Annulla", null)
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -642,14 +642,14 @@ class NuvioSettings(
             try {
                 val report = withContext(Dispatchers.IO) { action() }
                 val msg = buildString {
-                    append("${report.repo.name}: ${report.downloaded} scraper scaricati")
+                    append("${report.repo.name}: ${report.downloaded} scrapers downloaded")
                     if (report.failed.isNotEmpty()) {
-                        append(", non riusciti: ").append(report.failed.joinToString(", "))
+                        append(", failed: ").append(report.failed.joinToString(", "))
                     }
                 }
                 toast(msg, long = true)
             } catch (e: Exception) {
-                toast("Errore: ${e.message ?: e.javaClass.simpleName}", long = true)
+                toast("Error: ${e.message ?: e.javaClass.simpleName}", long = true)
             } finally {
                 busy = false
                 render()

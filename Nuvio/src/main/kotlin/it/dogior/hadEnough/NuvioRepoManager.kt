@@ -43,7 +43,7 @@ class NuvioRepoManager(context: Context) {
      */
     suspend fun addRepo(input: String): NuvioSyncReport {
         val candidates = candidateBases(input)
-        if (candidates.isEmpty()) throw IllegalArgumentException("URL non valido")
+        if (candidates.isEmpty()) throw IllegalArgumentException("Invalid URL")
         var lastError: Exception? = null
         for (base in candidates) {
             try {
@@ -52,12 +52,12 @@ class NuvioRepoManager(context: Context) {
                 lastError = e
             }
         }
-        throw lastError ?: IllegalStateException("manifest.json non trovato")
+        throw lastError ?: IllegalStateException("manifest.json not found")
     }
 
     suspend fun refreshRepo(id: String): NuvioSyncReport {
         val repo = repos().firstOrNull { it.id == id }
-            ?: throw IllegalArgumentException("Repository non trovato")
+            ?: throw IllegalArgumentException("Repository not found")
         return sync(repo.url)
     }
 
@@ -82,15 +82,15 @@ class NuvioRepoManager(context: Context) {
     private suspend fun sync(base: String): NuvioSyncReport {
         val resp = app.get("$base/manifest.json", timeout = 60L)
         if (!resp.isSuccessful) {
-            throw IllegalStateException("manifest.json non raggiungibile (HTTP ${resp.code})")
+            throw IllegalStateException("manifest.json unavailable (HTTP ${resp.code})")
         }
         val manifest = try {
             JSONObject(resp.text)
         } catch (_: Exception) {
-            throw IllegalStateException("manifest.json non e' un JSON valido")
+            throw IllegalStateException("manifest.json is not valid JSON")
         }
         val scrapersJson = manifest.optJSONArray("scrapers")
-            ?: throw IllegalStateException("manifest.json senza la lista \"scrapers\"")
+            ?: throw IllegalStateException("manifest.json is missing the list \"scrapers\"")
 
         val scrapers = mutableListOf<NuvioScraper>()
         for (i in 0 until scrapersJson.length()) {
@@ -116,7 +116,7 @@ class NuvioRepoManager(context: Context) {
                 )
             )
         }
-        if (scrapers.isEmpty()) throw IllegalStateException("Nessuno scraper nel manifest.json")
+        if (scrapers.isEmpty()) throw IllegalStateException("No scrapers found in manifest.json")
 
         val repoId = repoId(base)
         val dir = File(root, repoId).apply { mkdirs() }
@@ -258,7 +258,7 @@ class NuvioRepoManager(context: Context) {
 
     /** Runs onSettings() (blocking, call from IO), caches the result and explains why it failed if it did. */
     fun loadBlueprint(repo: NuvioRepo, scraper: NuvioScraper): BlueprintResult {
-        val code = readScript(repo, scraper) ?: return BlueprintResult(null, "file dello scraper non scaricato (prova AGGIORNA)")
+        val code = readScript(repo, scraper) ?: return BlueprintResult(null, "Scraper file not downloaded (try REFRESH)")
         val res = NuvioJsEngine.settingsBlueprint(scraper.name, code, scraperSettingsJson, app.baseClient)
         if (res.error != null) return BlueprintResult(null, res.error)
         val parsed: Any? = try { org.json.JSONTokener(res.json ?: "null").nextValue() } catch (_: Exception) { null }
@@ -274,7 +274,7 @@ class NuvioRepoManager(context: Context) {
             }
             else -> null
         }
-        if (arr == null || arr.length() == 0) return BlueprintResult(null, "onSettings ha restituito un formato non riconosciuto: ${res.json?.take(120)}")
+        if (arr == null || arr.length() == 0) return BlueprintResult(null, "onSettings returned an unrecognized format: ${res.json?.take(120)}")
         blueprintFile(repo, scraper).writeText(arr.toString())
         return BlueprintResult(arr, null)
     }

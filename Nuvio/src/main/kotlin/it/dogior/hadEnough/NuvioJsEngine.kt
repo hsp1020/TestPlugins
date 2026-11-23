@@ -259,7 +259,7 @@ object NuvioJsEngine {
                                 JSONObject(result.headers as Map<*, *>).toString(), result.text, null
                             )
                         } else {
-                            callJs("__fetchDone", id, 0, "", url, "{}", "", failure ?: "errore di rete")
+                            callJs("__fetchDone", id, 0, "", url, "{}", "", failure ?: "network error")
                         }
                     }
                 }
@@ -326,13 +326,13 @@ object NuvioJsEngine {
             val error = callJs("__getError")?.let { Context.toString(it) }
             return when {
                 timedOut -> Result(null, "timeout")
-                !done -> Result(null, "lo scraper non ha restituito un risultato")
+                !done -> Result(null, "scraper did not return a result")
                 else -> Result(json, error)
             }
         } catch (_: NuvioTimeoutError) {
             return Result(null, "timeout")
         } catch (e: RhinoException) {
-            return Result(null, "${e.details()} (riga ${e.lineNumber()})")
+            return Result(null, "${e.details()} (line ${e.lineNumber()})")
         } catch (t: Throwable) {
             return Result(null, t.message ?: t.javaClass.simpleName)
         } finally {

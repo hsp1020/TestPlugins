@@ -48,14 +48,14 @@ import java.util.concurrent.atomic.AtomicInteger
 class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
     override var mainUrl = "https://www.themoviedb.org"
     override var name = "Nuvio"
-    override var lang = "it"
+    override var lang = "en"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     override val mainPage = mainPageOf(
-        "$TMDB_API/trending/all/day?api_key=$API_KEY&region=IT&language=it" to "Di tendenza",
-        "$TMDB_API/movie/popular?api_key=$API_KEY&region=IT&language=it" to "Film popolari",
-        "$TMDB_API/tv/popular?api_key=$API_KEY&region=IT&language=it" to "Serie TV popolari",
+        "$TMDB_API/trending/all/day?api_key=$API_KEY&region=IT&language=en-US" to "Trending",
+        "$TMDB_API/movie/popular?api_key=$API_KEY&region=IT&language=en-US" to "Popular movies",
+        "$TMDB_API/tv/popular?api_key=$API_KEY&region=IT&language=en-US" to "Popular TV series",
     )
 
     companion object {
@@ -89,7 +89,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         val type = if (request.data.contains("/movie")) "movie" else "tv"
         val home = app.get("${request.data}$adultQuery&page=$page")
             .parsedSafe<TmdbResults>()?.results?.mapNotNull { it.toSearchResponse(this, type) }
-            ?: throw ErrorLoadingException("Risposta TMDB non valida")
+            ?: throw ErrorLoadingException("Invalid TMDB response")
         return newHomePageResponse(request.name, home)
     }
 
@@ -102,7 +102,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
     private suspend fun searchTmdb(query: String, page: Int): SearchResponseList? {
         val q = URLEncoder.encode(query, "UTF-8")
         return app.get(
-            "$TMDB_API/search/multi?api_key=$API_KEY&language=it&query=$q&page=$page" +
+            "$TMDB_API/search/multi?api_key=$API_KEY&language=en-US&query=$q&page=$page" +
                     "&include_adult=${settingsForProvider.enableAdult}"
         ).parsedSafe<TmdbResults>()?.results
             ?.filter { it.mediaType == null || it.mediaType == "movie" || it.mediaType == "tv" }
@@ -116,11 +116,11 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         val kind = if (isMovie) "movie" else "tv"
 
         val res = app.get(
-            "$TMDB_API/$kind/${data.id}?api_key=$API_KEY&language=it" +
+            "$TMDB_API/$kind/${data.id}?api_key=$API_KEY&language=en-US" +
                     "&append_to_response=keywords,credits,external_ids,videos,recommendations"
-        ).parsedSafe<MediaDetail>() ?: throw ErrorLoadingException("Risposta TMDB non valida")
+        ).parsedSafe<MediaDetail>() ?: throw ErrorLoadingException("Invalid TMDB response")
 
-        val title = res.title ?: res.name ?: throw ErrorLoadingException("Titolo non trovato")
+        val title = res.title ?: res.name ?: throw ErrorLoadingException("Title not found")
         val poster = imageUrl(res.posterPath)
         val backdrop = imageUrl(res.backdropPath)
         val releaseDate = res.releaseDate ?: res.firstAirDate
@@ -164,7 +164,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         val seasons = res.seasons.orEmpty().filter { (it.seasonNumber ?: 0) > 0 }
         val episodes = seasons.amap { season ->
             val seasonUrl = "$TMDB_API/tv/${data.id}/season/${season.seasonNumber}" +
-                    "?api_key=$API_KEY&language=it"
+                    "?api_key=$API_KEY&language=en-US"
             app.get(seasonUrl).parsedSafe<SeasonDetail>()?.episodes.orEmpty().map { ep ->
                 newEpisode(
                     NuvioLoadData(
@@ -242,7 +242,7 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
             try {
                 found.addAndGet(emitStreams(json, scraper, subtitleCallback, callback))
             } catch (e: Exception) {
-                Log.d(TAG, "${scraper.name}: risposta non leggibile (${e.message})")
+                Log.d(TAG, "${scraper.name}: unreadable response (${e.message})")
             }
             Unit
         }

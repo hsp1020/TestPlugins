@@ -14,8 +14,8 @@ dependencies {
 }
 
 cloudstream {
-    language = "it"
-    description = "Usa gli scraper dei repository Nuvio (JavaScript) dentro CloudStream"
+    language = "en"
+    description = "Use Nuvio repository scrapers (JavaScript) in CloudStream"
     authors = listOf("DieGon")
 
     /**
