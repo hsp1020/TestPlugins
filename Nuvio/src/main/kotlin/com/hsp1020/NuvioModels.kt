@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 data class NuvioScraper(
     val id: String,

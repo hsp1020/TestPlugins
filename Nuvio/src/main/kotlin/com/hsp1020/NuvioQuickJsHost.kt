@@ -1,29 +1,23 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import android.util.Base64
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.function
 import com.lagradost.cloudstream3.app
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
+import com.lagradost.api.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.security.SecureRandom
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
-/** P0-2 QuickJS host bindings. Tests inject a deterministic transport. */
-internal class NuvioQuickJsHost(
-    private val onRequest: ((Long, String, Long) -> Unit)? = null,
-    private val onResponse: ((Long, String, Int?, String?, Long) -> Unit)? = null,
-    private val request: suspend (String, String, Map<String, String>, String?, Boolean) -> NuvioHttpResult =
-        { url, method, headers, body, redirects ->
-            withContext(Dispatchers.IO) {
-                NuvioHttp.execute(app.baseClient, url, method, headers, body, redirects)
-            }
-        },
-) {
-    private val requestIds = AtomicLong()
+/** Runtime-local bindings for fetch, DOM, crypto, settings and cancellable timers. */
+internal class NuvioQuickJsHost {
+    private val timers = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
+    private val nextTimerId = AtomicInteger()
 
     fun register(qjs: QuickJs, settingsJson: String) {
         val dom = NuvioDom()
@@ -55,23 +49,16 @@ internal class NuvioQuickJsHost(
             val rawHeaders = JSONObject(a.getOrNull(2)?.toString() ?: "{}")
             val headers = LinkedHashMap<String, String>()
             for (key in rawHeaders.keys()) headers[key] = rawHeaders.optString(key)
-            val id = requestIds.incrementAndGet()
-            val startedAt = android.os.SystemClock.elapsedRealtime()
-            onRequest?.invoke(id, url, startedAt)
             val result = try {
-                request(url, method, headers, a.getOrNull(3)?.toString(),
-                    a.getOrNull(4)?.toString() != "manual")
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                onResponse?.invoke(id, url, null, "CANCELLED",
-                    android.os.SystemClock.elapsedRealtime() - startedAt)
+                NuvioHttp.executeAsync(app.baseClient, url, method, headers,
+                    a.getOrNull(3)?.toString(), a.getOrNull(4)?.toString() != "manual")
+            } catch (e: CancellationException) {
                 throw e
-            } catch (t: Throwable) {
-                onResponse?.invoke(id, url, null, t.javaClass.simpleName,
-                    android.os.SystemClock.elapsedRealtime() - startedAt)
-                throw t
+            } catch (e: Exception) {
+                val host = runCatching { java.net.URI(url).host }.getOrNull() ?: "unknown"
+                Log.d("NuvioQuickJS", "HTTP $host: ${e.javaClass.simpleName}")
+                throw e
             }
-            onResponse?.invoke(id, url, result.status, null,
-                android.os.SystemClock.elapsedRealtime() - startedAt)
             JSONObject().apply {
                 put("status", result.status)
                 put("statusText", result.statusText)
@@ -89,8 +76,27 @@ internal class NuvioQuickJsHost(
             random.nextBytes(bytes)
             Base64.encodeToString(bytes, Base64.NO_WRAP)
         }
-        qjs.asyncFunction("__nuvioSleep") { a ->
-            delay(((a.getOrNull(0) as? Number)?.toLong() ?: 0L).coerceIn(0L, 60_000L))
+
+        // Register before scheduling: clearing even an immediately cancelled timer
+        // resolves its native deferred so quickjs-kt doesn't wait for the full delay.
+        qjs.function("__nuvioNewTimer") {
+            val id = nextTimerId.incrementAndGet()
+            timers[id] = CompletableDeferred()
+            id
+        }
+        qjs.function("__nuvioCancelTimer") { args ->
+            val id = (args.getOrNull(0) as? Number)?.toInt() ?: 0
+            timers.remove(id)?.complete(Unit)
+            null
+        }
+        qjs.asyncFunction("__nuvioSleep") { args ->
+            val id = (args.getOrNull(0) as? Number)?.toInt() ?: 0
+            val ms = ((args.getOrNull(1) as? Number)?.toLong() ?: 0L).coerceIn(0L, 60_000L)
+            val signal = timers[id]
+            if (signal != null) {
+                try { withTimeoutOrNull(ms) { signal.await() } }
+                finally { timers.remove(id, signal) }
+            }
             null
         }
     }
@@ -113,11 +119,16 @@ if (typeof globalThis.crypto.getRandomValues !== 'function') {
   };
 }
 globalThis.setTimeout = function(fn, ms) {
-  var token = { cancelled: false };
-  __nuvioSleep(ms).then(function() { if (!token.cancelled) fn(); });
+  var token = { id: __nuvioNewTimer(), cancelled: false };
+  __nuvioSleep(token.id, ms).then(function() { if (!token.cancelled) fn(); });
   return token;
 };
-globalThis.clearTimeout = function(token) { if (token) token.cancelled = true; };
+globalThis.clearTimeout = function(token) {
+  if (token && !token.cancelled) {
+    token.cancelled = true;
+    __nuvioCancelTimer(token.id);
+  }
+};
 globalThis.fetch = async function(input, init) {
   init = init || {};
   var url = typeof input === 'string' ? input : String(input.url);

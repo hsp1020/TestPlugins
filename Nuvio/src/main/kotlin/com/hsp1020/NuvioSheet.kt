@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import android.os.Bundle
 import android.view.KeyEvent

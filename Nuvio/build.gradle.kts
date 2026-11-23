@@ -7,7 +7,7 @@ import java.util.zip.ZipFile
 version = 1
 
 android {
-    namespace = "it.dogior.hadEnough"
+    namespace = "com.hsp1020"
 
     buildFeatures {
         buildConfig = true
@@ -16,45 +16,45 @@ android {
 
 dependencies {
     implementation("com.google.android.material:material:1.13.0")
-    // Only for the isolated P0-0 probe. No QuickJS calls in the Rhino scraper path.
-    compileOnly(files(layout.buildDirectory.file("quickjs-probe/classes.jar")))
+    // Compile against the bundled QuickJS runtime; preserve the Rhino fallback.
+    compileOnly(files(layout.buildDirectory.file("quickjs-runtime/classes.jar")))
 }
 
 // CloudStream make packages DEX and resources, not dependencies' JNI binaries.
-// Stage QuickJS Kotlin classes and Android .so files into this module's .cs3.
-val quickJsProbeAar = configurations.detachedConfiguration(
+// Package QuickJS Kotlin classes and Android .so files into this module's .cs3.
+val quickJsRuntimeAar = configurations.detachedConfiguration(
     dependencies.create("io.github.dokar3:quickjs-kt-android:1.0.5@aar")
 ).apply { isTransitive = false }
 
-val stageQuickJsProbe by tasks.registering(Copy::class) {
-    from({ zipTree(quickJsProbeAar.singleFile) }) {
+val stageQuickJsRuntime by tasks.registering(Copy::class) {
+    from({ zipTree(quickJsRuntimeAar.singleFile) }) {
         include("classes.jar", "jni/**/*.so")
     }
-    into(layout.buildDirectory.dir("quickjs-probe"))
+    into(layout.buildDirectory.dir("quickjs-runtime"))
 }
 
 tasks.matching { it.name == "compileDebugKotlin" }.configureEach {
-    dependsOn(stageQuickJsProbe)
+    dependsOn(stageQuickJsRuntime)
 }
 
 // CloudStream's DEX task closes JAR inputs before D8 reads their classes.
 // Unpack only the .class files so D8 reads regular files instead of a closed ZIP.
-val unpackQuickJsProbeClasses by tasks.registering(Copy::class) {
-    dependsOn(stageQuickJsProbe)
-    from({ zipTree(layout.buildDirectory.file("quickjs-probe/classes.jar").get().asFile) }) {
+val unpackQuickJsRuntimeClasses by tasks.registering(Copy::class) {
+    dependsOn(stageQuickJsRuntime)
+    from({ zipTree(layout.buildDirectory.file("quickjs-runtime/classes.jar").get().asFile) }) {
         include("**/*.class")
     }
-    into(layout.buildDirectory.dir("quickjs-probe-dex"))
+    into(layout.buildDirectory.dir("quickjs-runtime-dex"))
 }
 
 tasks.named<CompileDexTask>("compileDex") {
-    dependsOn(unpackQuickJsProbeClasses)
-    input.from(layout.buildDirectory.dir("quickjs-probe-dex"))
+    dependsOn(unpackQuickJsRuntimeClasses)
+    input.from(layout.buildDirectory.dir("quickjs-runtime-dex"))
 }
 
 tasks.named<Zip>("make") {
-    dependsOn(stageQuickJsProbe)
-    from(layout.buildDirectory.dir("quickjs-probe/jni")) {
+    dependsOn(stageQuickJsRuntime)
+    from(layout.buildDirectory.dir("quickjs-runtime/jni")) {
         into("lib")
     }
     doLast {

@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import java.security.MessageDigest
 import java.security.SecureRandom

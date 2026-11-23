@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -37,7 +37,6 @@ class NuvioSettings(
     private val activityCtx: Context,
     private val manager: NuvioRepoManager,
     private val pluginResources: android.content.res.Resources? = null,
-    private val pluginFilePath: String? = null,
 ) {
     private var uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -180,26 +179,14 @@ class NuvioSettings(
 
         container.addView(label("General settings", 17f, bold = true, topDp = 22))
 
-        container.addView(label("QuickJS compatibility test", 13f, bold = true, topDp = 12))
-        container.addView(label(
-            "Tests QuickJS loading and modern JavaScript in this plugin. Rhino stays active.",
-            12f, alpha = 0.65f
-        ))
-        container.addView(button("RUN QUICKJS TEST", GREEN) { runQuickJsTest(false) })
-        container.addView(label("P0-1 getStreams adapter test", 13f, bold = true, topDp = 12))
-        container.addView(label(
-            "Tests module.exports, movie/TV inputs and async JSON without HTTP. Rhino stays active.",
-            12f, alpha = 0.65f
-        ))
-        container.addView(button("RUN P0-1 TEST", GREEN) { runQuickJsTest(true) })
-        container.addView(label("P0-2 QuickJS host API test", 13f, bold = true, topDp = 12))
-        container.addView(label(
-            "Offline tests of fetch, DOM, crypto, modules, settings and cancellation.",
-            12f, alpha = 0.65f
-        ))
-        container.addView(button("RUN P0-2 TEST", GREEN) { runQuickJsTest(false, true) })
+        container.addView(label("JavaScript engine", 13f, bold = true, topDp = 12))
+        val engineToggle = androidx.appcompat.widget.SwitchCompat(ctx).apply {
+            text = "QuickJS (turn OFF to use Rhino)"
+            isChecked = manager.quickJsEnabled
+        }
+        container.addView(engineToggle)
 
-        container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 8))
+        container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 12))
         container.addView(
             label(
                 "The scraper stops after this time. Recommended: 45.",
@@ -243,34 +230,9 @@ class NuvioSettings(
             }
             manager.timeoutSeconds = seconds
             manager.scraperSettingsJson = raw
+            manager.quickJsEnabled = engineToggle.isChecked
             toast("Settings saved")
         })
-    }
-
-    private fun runQuickJsTest(adapterTest: Boolean, hostTest: Boolean = false) {
-        if (busy) return
-        busy = true
-        uiScope.launch {
-            try {
-                val report = withContext(Dispatchers.IO) {
-                    NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath, adapterTest, hostTest)
-                }
-                AlertDialog.Builder(ctx)
-                    .setTitle(if (hostTest) "QuickJS P0-2 results" else if (adapterTest) "QuickJS P0-1 results" else "QuickJS test results")
-                    .setMessage(report)
-                    .setPositiveButton("OK", null)
-                    .setNeutralButton("COPY") { _, _ ->
-                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-                            as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText("QuickJS test", report)
-                        )
-                    }
-                    .show()
-            } finally {
-                busy = false
-            }
-        }
     }
 
     private fun repoCard(repo: NuvioRepo): View {
@@ -403,11 +365,6 @@ class NuvioSettings(
         bulk.addView(small("ENABLE ALL", GREEN) { manager.setAllEnabled(repo, true); fill() })
         bulk.addView(small("DISABLE ALL", RED) { manager.setAllEnabled(repo, false); fill() })
         container.addView(bulk)
-        container.addView(button("RUN ALL QUICKJS TESTS", GREEN) { runAllQuickJsTests(repo) })
-        container.addView(label(
-            "Tests each installed scraper automatically. Up to 3 tests run at once; no playback.",
-            12f, alpha = 0.65f, topDp = 5
-        ))
         container.addView(counter)
         container.addView(holder)
         fill()
@@ -491,138 +448,6 @@ class NuvioSettings(
         }
 
         return card
-    }
-
-    /** Choose representative content using manifest genres/description, not scraper IDs. */
-    private fun quickJsProbeCases(scraper: NuvioScraper, code: String, settings: String):
-        List<NuvioQuickJsEvaluator.RealScraper> {
-        val langs = scraper.languages.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
-        val desc = scraper.description.lowercase(java.util.Locale.ROOT)
-        val indianLanguages = setOf("hi", "hin", "ta", "tam", "te", "tel", "bn", "ba")
-        val isAnime = scraper.types.any { it.equals("anime", true) } ||
-            Regex("""\banime\b|\bmanga\b""").containsMatchIn(desc) ||
-            (scraper.name.contains("anime", true) && !desc.contains("movies via")) ||
-            ("ja" in langs && desc.contains("tv episodes"))
-        val isKorean = !isAnime && "ko" in langs &&
-            (desc.contains("korean") || desc.contains("asian drama") || "en" !in langs)
-        val isFrench = !isAnime && "fr" in langs &&
-            (desc.contains("french") || desc.contains("france") ||
-                desc.contains("vostfr") || langs.size == 1)
-        val isIndian = !isAnime && langs.any { it in indianLanguages } &&
-            listOf("bollywood", "indian", "hindi", "tamil", "telugu", "desi")
-                .any { desc.contains(it) }
-        val isPersian = "pe" in langs || "fa" in langs
-        val (movieId, tvId) = when {
-            isAnime -> "372058" to "1429" // Your Name / Attack on Titan
-            isKorean -> "496243" to "93405" // Parasite / Squid Game
-            isFrench -> "77338" to "96677" // Intouchables / Lupin
-            isIndian -> "579974" to "79352" // RRR / Sacred Games
-            isPersian -> "60243" to "1399" // A Separation / general TV
-            else -> "550" to "1399" // Fight Club / Game of Thrones
-        }
-        val movie = scraper.supports("movie")
-        val tv = scraper.supports("tv") || scraper.types.any { it.equals("anime", true) }
-        val firstTv = isAnime || isKorean || desc.contains("tv episodes")
-        val candidates = buildList {
-            if (firstTv && tv) add("tv" to tvId)
-            if (movie) add("movie" to movieId)
-            if (!firstTv && tv) add("tv" to tvId)
-            // Only after both primary media types are a clean no-match: try a
-            // second content language, without reusing an identical fixture.
-            if (!isAnime && !isIndian && movie && langs.any { it in indianLanguages })
-                add("movie" to "579974")
-            if (!isAnime && !isKorean && tv && "ja" in langs) add("tv" to "1429")
-            if (!isAnime && !isFrench && movie && "fr" in langs) add("movie" to "77338")
-        }.distinct().take(3)
-        val timeoutMs = minOf(manager.timeoutSeconds, 15) * 1000L
-        val retryMs = minOf(manager.timeoutSeconds, 45) * 1000L
-        return candidates.map { (type, id) ->
-            NuvioQuickJsEvaluator.RealScraper(
-                name = scraper.name,
-                code = code,
-                settingsJson = settings,
-                tmdbId = id,
-                mediaType = type,
-                season = if (type == "tv") 1 else null,
-                episode = if (type == "tv") 1 else null,
-                timeoutMs = timeoutMs,
-                retryTimeoutMs = retryMs,
-            )
-        }
-    }
-
-    /** One automated, type-aware batch entry per scraper; ON/OFF remains untouched. */
-    private fun runAllQuickJsTests(repo: NuvioRepo) {
-        if (busy) { toast("Another operation is running"); return }
-        busy = true
-        val progress = AlertDialog.Builder(ctx)
-            .setTitle("QuickJS P0-3 · ${repo.name}")
-            .setMessage("Preparing scraper tests…")
-            .setNegativeButton("CANCEL", null)
-            .create()
-        progress.show()
-
-        var job: kotlinx.coroutines.Job? = null
-        progress.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-            job?.cancel()
-            progress.dismiss()
-        }
-        progress.setOnCancelListener { job?.cancel() }
-        job = uiScope.launch {
-            try {
-                val tests = withContext(Dispatchers.IO) {
-                    repo.scrapers.mapNotNull { scraper ->
-                        quickJsProbeCases(
-                            scraper,
-                            manager.readScript(repo, scraper).orEmpty(),
-                            manager.settingsFor(repo, scraper)
-                        ).takeIf { it.isNotEmpty() }
-                    }
-                }
-                if (tests.isEmpty()) {
-                    progress.dismiss()
-                    toast("No supported scrapers to test")
-                    return@launch
-                }
-                progress.setMessage("0 / ${tests.size}")
-                val report = withContext(Dispatchers.IO) {
-                    NuvioQuickJsProbe.run(
-                        ctx.applicationContext, pluginFilePath,
-                        batchTest = tests,
-                        onBatchProgress = { done, total, name ->
-                            withContext(Dispatchers.Main) {
-                                if (progress.isShowing) progress.setMessage("$done / $total · $name")
-                            }
-                        }
-                    )
-                }
-                progress.dismiss()
-                AlertDialog.Builder(ctx)
-                    .setTitle("QuickJS P0-3 · all scrapers")
-                    .setMessage(report)
-                    .setPositiveButton("OK", null)
-                    .setNeutralButton("COPY ALL") { _, _ ->
-                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-                            as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText("QuickJS P0-3 batch", report)
-                        )
-                    }
-                    .show()
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                progress.dismiss()
-                throw e
-            } catch (t: Exception) {
-                progress.dismiss()
-                AlertDialog.Builder(ctx)
-                    .setTitle("QuickJS P0-3 failed")
-                    .setMessage(t.javaClass.simpleName + ": " + t.message.orEmpty())
-                    .setPositiveButton("OK", null)
-                    .show()
-            } finally {
-                busy = false
-            }
-        }
     }
 
     // ── logo ──

@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
@@ -39,6 +39,8 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -220,31 +222,46 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         if (targets.isEmpty()) return false
 
         val timeoutMs = manager.timeoutSeconds * 1000L
+        val quickJs = manager.quickJsEnabled
+        val nativeSlots = Semaphore(10)
         val found = AtomicInteger(0)
 
         targets.amap { (repo, scraper) ->
-            val code = manager.readScript(repo, scraper) ?: return@amap
-            val result = withContext(Dispatchers.IO) {
-                NuvioJsEngine.run(
-                    scraperName = scraper.name,
-                    code = code,
-                    settingsJson = manager.settingsFor(repo, scraper),
-                    tmdbId = tmdbId,
-                    mediaType = mediaType,
-                    season = load.season,
-                    episode = load.episode,
-                    timeoutMs = timeoutMs,
-                    client = app.baseClient,
-                )
+            val execute: suspend () -> Unit = {
+                val code = manager.readScript(repo, scraper)
+                if (code != null) {
+                    val settings = manager.settingsFor(repo, scraper)
+                    val result = if (quickJs) {
+                        val q = withContext(Dispatchers.IO) {
+                            NuvioQuickJsEvaluator.run(
+                                scraper.name, code, settings, tmdbId, mediaType,
+                                load.season, load.episode, timeoutMs
+                            )
+                        }
+                        if (q.fallbackToRhino) {
+                            Log.d(TAG, "${scraper.name}: QuickJS failed (${q.error}), trying Rhino")
+                            withContext(Dispatchers.IO) {
+                                NuvioJsEngine.run(scraper.name, code, settings, tmdbId, mediaType,
+                                    load.season, load.episode, timeoutMs, app.baseClient)
+                            }
+                        } else NuvioJsEngine.Result(q.json, q.error)
+                    } else withContext(Dispatchers.IO) {
+                        NuvioJsEngine.run(scraper.name, code, settings, tmdbId, mediaType,
+                            load.season, load.episode, timeoutMs, app.baseClient)
+                    }
+                    if (result.error != null) Log.d(TAG, "${scraper.name}: ${result.error}")
+                    val json = result.json
+                    if (json != null) {
+                        try {
+                            found.addAndGet(emitStreams(json, scraper, subtitleCallback, callback))
+                        } catch (e: Exception) {
+                            Log.d(TAG, "${scraper.name}: unreadable response (${e.message})")
+                        }
+                    }
+                }
+                Unit
             }
-            if (result.error != null) Log.d(TAG, "${scraper.name}: ${result.error}")
-            val json = result.json ?: return@amap
-            try {
-                found.addAndGet(emitStreams(json, scraper, subtitleCallback, callback))
-            } catch (e: Exception) {
-                Log.d(TAG, "${scraper.name}: unreadable response (${e.message})")
-            }
-            Unit
+            if (quickJs) nativeSlots.withPermit { execute() } else execute()
         }
         return found.get() > 0
     }

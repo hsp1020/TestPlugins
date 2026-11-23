@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -307,6 +307,10 @@ class NuvioRepoManager(context: Context) {
         return out.toString()
     }
 
+    var quickJsEnabled: Boolean
+        get() = prefs.getBoolean(KEY_QUICKJS, true)
+        set(enabled) { prefs.edit().putBoolean(KEY_QUICKJS, enabled).apply() }
+
     var timeoutSeconds: Int
         get() = prefs.getInt(KEY_TIMEOUT, DEFAULT_TIMEOUT).coerceIn(5, 180)
         set(value) {
@@ -320,6 +324,7 @@ class NuvioRepoManager(context: Context) {
         private const val KEY_REPOS = "repos"
         private const val KEY_ENABLED = "enabled_overrides"
         private const val KEY_SETTINGS = "scraper_settings"
+        private const val KEY_QUICKJS = "quickjs_enabled"
         private const val KEY_TIMEOUT = "timeout_seconds"
         private const val KEY_DISABLED_REPOS = "disabled_repos"
         private const val KEY_VALUES = "scraper_values"

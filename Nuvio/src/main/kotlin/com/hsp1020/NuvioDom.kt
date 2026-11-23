@@ -1,4 +1,4 @@
-package it.dogior.hadEnough
+package com.hsp1020
 
 import org.json.JSONArray
 import org.json.JSONObject
