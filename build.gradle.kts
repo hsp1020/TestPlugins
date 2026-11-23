@@ -20,9 +20,6 @@ buildscript {
         // R8 버그 방지를 위해 8.8.2로 상향한 상태 유지
         classpath("com.android.tools.build:gradle:8.8.2")
 
-        // CloudStream compileDex uses this legacy buildscript classloader, not pluginManagement.
-        classpath("com.android.tools:r8:8.13.19")
-
         classpath("com.github.recloudstream:gradle:81b1d424d2")
 
         // 메타데이터 컴파일 에러 해결을 위해 맞춘 Kotlin 2.3.0 유지
@@ -132,7 +129,7 @@ subprojects {
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.20.1")
         implementation("com.fasterxml.jackson.core:jackson-databind:2.20.1")
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-        if (project.name != "Nuvio") implementation("org.mozilla:rhino:1.9.0")
+        implementation("org.mozilla:rhino:1.9.0")
         implementation("me.xdrop:fuzzywuzzy:1.4.0")
         implementation("com.google.code.gson:gson:2.13.2")
         implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")

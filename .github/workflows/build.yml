@@ -40,9 +40,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Nuvio QuickJS native toolchain
-        run: sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
-
       - name: Prepare plugin versions
         run: python3 "$GITHUB_WORKSPACE/src/.github/scripts/publish_plugins.py" prepare "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/builds"
 
@@ -52,7 +49,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/src"
           chmod +x gradlew
-          ./gradlew make makePluginsJson --no-daemon --stacktrace --info --console=plain
+          ./gradlew make makePluginsJson --no-daemon
           python3 .github/scripts/publish_plugins.py publish "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/builds"
           cp **/build/*.jar "$GITHUB_WORKSPACE/builds/" || true
           cp repo.json "$GITHUB_WORKSPACE/builds/"

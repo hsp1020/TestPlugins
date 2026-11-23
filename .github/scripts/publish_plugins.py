@@ -37,12 +37,10 @@ def prepare(src: Path, builds: Path) -> None:
     modules = sorted(src.glob("*/build.gradle.kts"))
     if not modules:
         raise ValueError("No plugin modules found")
-    # All plugins share one monotonic release version, including newly added modules.
-    current_versions = [version_in(file)[0] for file in modules]
-    target = 1 if first_build_after_reset else max(max(current_versions), max(old.values(), default=0) + 1)
     for gradle_file in modules:
         module = gradle_file.parent.name
         current, contents = version_in(gradle_file)
+        target = 1 if first_build_after_reset else max(current, old.get(module, 0) + 1)
         gradle_file.write_text(VERSION.sub(lambda m: m.group(1) + str(target), contents, count=1), encoding="utf-8")
         print(f"Version {module}: {current} -> {target}")
 
