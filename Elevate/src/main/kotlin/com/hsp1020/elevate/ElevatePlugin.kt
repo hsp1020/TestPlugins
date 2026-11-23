@@ -1067,6 +1067,8 @@ internal class NativeEpisodeOverlayHook(
         private var fullEpisodes = emptyList<ResultEpisode>()
         private var selectedSeason: Int? = null
         private var filteredAdapter: EpisodeAdapter? = null
+        private val speedControls = if (playerPanelEnabled)
+            ElevatePlaybackSpeedControl(fragment, root) else null
         private val playerPanel: ElevatePlayerPanel? =
             if (playerPanelEnabled && overlay != null) ElevatePlayerPanel(
                 fragment, root, overlay, title, list, { selector }, { openWithoutPause() },
@@ -1251,6 +1253,7 @@ internal class NativeEpisodeOverlayHook(
 
         fun attach() {
             // Preserve concrete CS3IPlayer for preview scrubbing and compressor.
+            speedControls?.attach()
             playerPanel?.attach()
             installButtonGuards()
             installRemoteGuard()
@@ -1283,6 +1286,8 @@ internal class NativeEpisodeOverlayHook(
             oldNextFocusUpId?.let { list?.nextFocusUpId = it }
         }
 
+        fun restoreNativeSpeedLimit() = speedControls?.restoreNativeLimit()
+
         fun detach() {
             val standalone = playerPanelEnabled && !fragment.isThereEpisodes()
             val restoreNativeList = fragment.isAdded && fragment.view === root &&
@@ -1310,6 +1315,7 @@ internal class NativeEpisodeOverlayHook(
             originalCardColors.clear()
             removeSelector()
             playerPanel?.detach()
+            speedControls?.detach()
             restoreNativePanelButtons()
             if (standalone) {
                 episodeButtonRoot?.visibility = View.GONE
@@ -1621,6 +1627,11 @@ internal class NativeEpisodeOverlayHook(
     }
 
     fun stop() {
+        if (playerPanelEnabled) {
+            screens.values.forEach { it.restoreNativeSpeedLimit() }
+            if (com.lagradost.cloudstream3.utils.DataStoreHelper.playBackSpeed > 2f)
+                com.lagradost.cloudstream3.utils.DataStoreHelper.playBackSpeed = 2f
+        }
         application.unregisterActivityLifecycleCallbacks(this)
         unbind()
     }
