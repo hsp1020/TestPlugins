@@ -1069,6 +1069,8 @@ internal class NativeEpisodeOverlayHook(
         private var filteredAdapter: EpisodeAdapter? = null
         private val speedControls = if (playerPanelEnabled)
             ElevatePlaybackSpeedControl(fragment, root) else null
+        private val resizeControls = if (playerPanelEnabled)
+            ElevatePlayerResizeControl(fragment, root) { host } else null
         private val playerPanel: ElevatePlayerPanel? =
             if (playerPanelEnabled && overlay != null) ElevatePlayerPanel(
                 fragment, root, overlay, title, list, { selector }, { openWithoutPause() },
@@ -1160,6 +1162,16 @@ internal class NativeEpisodeOverlayHook(
                     playerPanel?.onTracksChanged()
                 }
 
+                override fun playerUpdated(player: Any?) {
+                    original.playerUpdated(player)
+                    resizeControls?.onVideoChanged()
+                }
+
+                override fun playerDimensionsLoaded(width: Int, height: Int) {
+                    original.playerDimensionsLoaded(width, height)
+                    resizeControls?.onVideoChanged()
+                }
+
                 override fun nextMirror() {
                     original.nextMirror()
                     playerPanel?.onMirrorChanged()
@@ -1236,8 +1248,13 @@ internal class NativeEpisodeOverlayHook(
                     fragment.player.isActive() && (playerPanelEnabled || fragment.isThereEpisodes()) &&
                     runCatching { lockedField?.getBoolean(fragment) == false }.getOrDefault(false) &&
                     openWithoutPause()
-                // Only bypass the native key callback if the overlay is already opened.
-                opened || current(input)
+                val resized = !input.second && event?.action == KeyEvent.ACTION_DOWN &&
+                    event.repeatCount == 0 && (event.keyCode == KeyEvent.KEYCODE_R ||
+                        event.keyCode == KeyEvent.KEYCODE_NUMPAD_0 ||
+                        event.keyCode == KeyEvent.KEYCODE_0) &&
+                    resizeControls?.nextFromShortcut() == true
+                // Keep the native key handler for every other shortcut.
+                resized || opened || current(input)
             }
             nativeKeyListener = current
             guardedKeyListener = wrapper
@@ -1254,6 +1271,7 @@ internal class NativeEpisodeOverlayHook(
         fun attach() {
             // Preserve concrete CS3IPlayer for preview scrubbing and compressor.
             speedControls?.attach()
+            resizeControls?.attach()
             playerPanel?.attach()
             installButtonGuards()
             installRemoteGuard()
@@ -1316,6 +1334,7 @@ internal class NativeEpisodeOverlayHook(
             removeSelector()
             playerPanel?.detach()
             speedControls?.detach()
+            resizeControls?.detach()
             restoreNativePanelButtons()
             if (standalone) {
                 episodeButtonRoot?.visibility = View.GONE
