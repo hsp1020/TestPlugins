@@ -144,6 +144,9 @@ internal object NuvioQuickJsEvaluator {
             val runtimeId = nextRuntime.incrementAndGet()
             val host = NuvioQuickJsHost(scraperName, runtimeId)
             var captured: String? = null
+            var captureCalls = 0
+            var jsStage = "NOT_STARTED"
+            var jsError: String? = null
             var authMissing = false
             nativeEntered = true
             withTimeout(timeoutMs) {
@@ -162,6 +165,20 @@ internal object NuvioQuickJsEvaluator {
                             }
                             null
                         }
+                        qjs.function("__nuvioCapture") { args ->
+                            captureCalls++
+                            captured = args.getOrNull(0)?.toString()
+                            jsStage = "CAPTURED"
+                            null
+                        }
+                        // Record only state; write a diagnostic line if capture fails.
+                        qjs.function("__nuvioStage") { args ->
+                            jsStage = args.getOrNull(0)?.toString() ?: "UNKNOWN"
+                            if (jsStage == "JS_ERROR") {
+                                jsError = args.getOrNull(1)?.toString()?.take(180)
+                            }
+                            null
+                        }
                         qjs.evaluate<Any?>(bootstrap)
                         val exported = qjs.evaluate<String>(
                             "var module = { exports: {} }; var exports = module.exports;\n" +
@@ -174,30 +191,39 @@ internal object NuvioQuickJsEvaluator {
                         val normalize = if (method == "getStreams")
                             "Array.isArray(value) ? value : (value && Array.isArray(value.streams) ? value.streams : [])"
                         else "value === undefined ? null : value"
-                        // Return the scraper Promise itself so QuickJS-KT awaits its
-                        // settlement before we read the result and close this runtime.
-                        captured = qjs.evaluate<String>(
+                        val evaluation = qjs.evaluate<Any?>(
                             """(async function() {
                             try {
-                                var value = await module.exports[""" + JSONObject.quote(method) +
+                                __nuvioStage("STARTED");
+                                var pending = module.exports[""" + JSONObject.quote(method) +
                             """].apply(module.exports, """ + argsJson +
                             """);
+                                __nuvioStage(pending && typeof pending.then === "function" ? "PROMISE" : "SYNC");
+                                var value = await pending;
+                                __nuvioStage("SETTLED");
                                 var output = """ + normalize +
                             """;
-                                return JSON.stringify({ok:true,data:output});
+                                __nuvioCapture(JSON.stringify({ok:true,data:output}));
                             } catch(e) {
-                                return JSON.stringify({ok:false,error:String(e && (e.message || e))});
+                                __nuvioStage("JS_ERROR", String(e && (e.message || e)));
+                                __nuvioCapture(JSON.stringify({ok:false,error:String(e && (e.message || e))}));
                             }
                         })();"""
                         )
+                        if (captured == null) {
+                            Log.d(TAG, "runtime=$runtimeId scraper=$scraperName method=$method " +
+                                "phase=CAPTURE_MISSING jsStage=$jsStage captureCalls=$captureCalls " +
+                                "evalType=${evaluation?.javaClass?.simpleName ?: "null"} " +
+                                "jsError=${jsError ?: "none"}")
+                        }
                     } finally {
                         Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CLOSE_BEGIN")
                         qjs.close()
                         Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CLOSED")
                     }
             }
-            // evaluate<String> returns the settled Promise's JSON result.
-            val response = JSONObject(captured ?: error("QuickJS Promise returned no result"))
+            // Check after the async QuickJS evaluation scope has completed.
+            val response = JSONObject(captured ?: error("QuickJS result was not captured"))
             if (!response.optBoolean("ok")) {
                 return Result(null, response.optString("error", "JavaScript error"),
                     elapsedMs = SystemClock.elapsedRealtime() - started)
