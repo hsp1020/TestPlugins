@@ -32,7 +32,14 @@ internal class ElevatePlayerResizeControl(
     private val touchListener = View.OnTouchListener { view, event ->
         if (event.actionMasked == MotionEvent.ACTION_UP && view.isEnabled && view.isClickable &&
             event.x >= 0 && event.x < view.width && event.y >= 0 && event.y < view.height
-        ) next(view) else false
+        ) {
+            // An intercepted UP bypasses View.onTouchEvent's pressed/ripple cleanup.
+            val cancel = MotionEvent.obtain(event)
+            cancel.action = MotionEvent.ACTION_CANCEL
+            view.onTouchEvent(cancel)
+            cancel.recycle()
+            next(view)
+        } else false
     }
     private val keyListener = View.OnKeyListener { view, key, event ->
         val select = when (key) {
