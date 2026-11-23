@@ -222,46 +222,47 @@ class NuvioProvider(private val manager: NuvioRepoManager) : MainAPI() {
         if (targets.isEmpty()) return false
 
         val timeoutMs = manager.timeoutSeconds * 1000L
-        val quickJs = manager.quickJsEnabled
-        val nativeSlots = Semaphore(10)
+        // Prepare once per loadLinks invocation. A native failure is cached per ClassLoader.
+        if (withContext(Dispatchers.IO) { NuvioQuickJsEvaluator.prepare() } != null) {
+            Log.d(TAG, "engine=QUICKJS status=ERROR skipped=${targets.size} (native init unavailable)")
+            return false
+        }
+        val slots = Semaphore(10)
         val found = AtomicInteger(0)
 
         targets.amap { (repo, scraper) ->
-            val execute: suspend () -> Unit = {
+            slots.withPermit {
                 val code = manager.readScript(repo, scraper)
-                if (code != null) {
+                if (code == null) {
+                    Log.d(TAG, "${scraper.name}: engine=QUICKJS status=ERROR reason=SCRIPT_MISSING")
+                } else {
                     val settings = manager.settingsFor(repo, scraper)
-                    val result = if (quickJs) {
-                        val q = withContext(Dispatchers.IO) {
-                            NuvioQuickJsEvaluator.run(
-                                scraper.name, code, settings, tmdbId, mediaType,
-                                load.season, load.episode, timeoutMs
-                            )
-                        }
-                        if (q.fallbackToRhino) {
-                            Log.d(TAG, "${scraper.name}: QuickJS failed (${q.error}), trying Rhino")
-                            withContext(Dispatchers.IO) {
-                                NuvioJsEngine.run(scraper.name, code, settings, tmdbId, mediaType,
-                                    load.season, load.episode, timeoutMs, app.baseClient)
-                            }
-                        } else NuvioJsEngine.Result(q.json, q.error)
-                    } else withContext(Dispatchers.IO) {
-                        NuvioJsEngine.run(scraper.name, code, settings, tmdbId, mediaType,
-                            load.season, load.episode, timeoutMs, app.baseClient)
+                    val result = withContext(Dispatchers.IO) {
+                        NuvioQuickJsEvaluator.run(
+                            scraper.name, code, settings, tmdbId, mediaType,
+                            load.season, load.episode, timeoutMs
+                        )
                     }
-                    if (result.error != null) Log.d(TAG, "${scraper.name}: ${result.error}")
-                    val json = result.json
-                    if (json != null) {
+                    var emitted = 0
+                    var error = result.error
+                    if (error == null && result.json != null) {
                         try {
-                            found.addAndGet(emitStreams(json, scraper, subtitleCallback, callback))
+                            emitted = emitStreams(result.json, scraper, subtitleCallback, callback)
+                            found.addAndGet(emitted)
                         } catch (e: Exception) {
-                            Log.d(TAG, "${scraper.name}: unreadable response (${e.message})")
+                            error = "RESULT_PARSE: " + (e.message ?: e.javaClass.simpleName)
                         }
                     }
+                    val status = when {
+                        error != null -> "ERROR"
+                        emitted > 0 -> "PASS"
+                        else -> "EMPTY"
+                    }
+                    Log.d(TAG, "${scraper.name}: engine=QUICKJS status=$status " +
+                        "streams=${result.streams} emitted=$emitted elapsedMs=${result.elapsedMs}" +
+                        (if (error != null) " error=" + error.take(200) else ""))
                 }
-                Unit
             }
-            if (quickJs) nativeSlots.withPermit { execute() } else execute()
         }
         return found.get() > 0
     }

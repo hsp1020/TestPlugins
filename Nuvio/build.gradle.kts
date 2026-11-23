@@ -16,7 +16,7 @@ android {
 
 dependencies {
     implementation("com.google.android.material:material:1.13.0")
-    // Compile against the bundled QuickJS runtime; preserve the Rhino fallback.
+    // Compile against the QuickJS runtime packaged into the plugin.
     compileOnly(files(layout.buildDirectory.file("quickjs-runtime/classes.jar")))
 }
 

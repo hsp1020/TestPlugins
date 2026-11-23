@@ -256,10 +256,10 @@ class NuvioRepoManager(context: Context) {
 
     class BlueprintResult(val items: JSONArray?, val error: String?)
 
-    /** Runs onSettings() (blocking, call from IO), caches the result and explains why it failed if it did. */
-    fun loadBlueprint(repo: NuvioRepo, scraper: NuvioScraper): BlueprintResult {
+    /** Runs onSettings() through QuickJS, caching its result for the existing settings form. */
+    suspend fun loadBlueprint(repo: NuvioRepo, scraper: NuvioScraper): BlueprintResult {
         val code = readScript(repo, scraper) ?: return BlueprintResult(null, "Scraper file not downloaded (try REFRESH)")
-        val res = NuvioJsEngine.settingsBlueprint(scraper.name, code, scraperSettingsJson, app.baseClient)
+        val res = NuvioQuickJsEvaluator.settingsBlueprint(scraper.name, code, scraperSettingsJson)
         if (res.error != null) return BlueprintResult(null, res.error)
         val parsed: Any? = try { org.json.JSONTokener(res.json ?: "null").nextValue() } catch (_: Exception) { null }
         val arr: JSONArray? = when (parsed) {
@@ -307,10 +307,6 @@ class NuvioRepoManager(context: Context) {
         return out.toString()
     }
 
-    var quickJsEnabled: Boolean
-        get() = prefs.getBoolean(KEY_QUICKJS, true)
-        set(enabled) { prefs.edit().putBoolean(KEY_QUICKJS, enabled).apply() }
-
     var timeoutSeconds: Int
         get() = prefs.getInt(KEY_TIMEOUT, DEFAULT_TIMEOUT).coerceIn(5, 180)
         set(value) {
@@ -324,7 +320,6 @@ class NuvioRepoManager(context: Context) {
         private const val KEY_REPOS = "repos"
         private const val KEY_ENABLED = "enabled_overrides"
         private const val KEY_SETTINGS = "scraper_settings"
-        private const val KEY_QUICKJS = "quickjs_enabled"
         private const val KEY_TIMEOUT = "timeout_seconds"
         private const val KEY_DISABLED_REPOS = "disabled_repos"
         private const val KEY_VALUES = "scraper_values"

@@ -13,17 +13,20 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import java.util.zip.ZipFile
 
-/** QuickJS production runtime; Rhino remains available for engine errors or manual selection. */
+/** QuickJS-only runtime for scrapers and settings. */
 internal object NuvioQuickJsEvaluator {
     private const val TAG = "NuvioQuickJS"
-    data class Result(val json: String?, val error: String?, val fallbackToRhino: Boolean = false)
+    data class Result(val json: String?, val error: String?, val streams: Int = 0, val elapsedMs: Long = 0L)
 
     @Volatile private var context: Context? = null
     @Volatile private var archive: String? = null
     @Volatile private var nativeLoaded = false
+    @Volatile private var nativeFailure: String? = null
     private val nativeLock = Any()
+    private val nativeScope = UUID.randomUUID().toString()
     private const val LIB = "libquickjs.so"
     private const val PATH_KEY = "com.dokar.quickjs.library.path"
     private const val NAME_KEY = "com.dokar.quickjs.library.name"
@@ -46,46 +49,65 @@ internal object NuvioQuickJsEvaluator {
         archive = pluginFilePath
     }
 
-    private fun ensureNative() {
-        if (nativeLoaded) return
+    /** A failed initialization is recorded once for this plugin ClassLoader. */
+    fun prepare(): String? {
+        if (nativeLoaded) return null
+        nativeFailure?.let { return it }
         synchronized(nativeLock) {
-            if (nativeLoaded) return
-            val appContext = requireNotNull(context) { "Nuvio QuickJS is not configured" }
-            val cs3 = File(requireNotNull(archive) { "Nuvio plugin archive path is missing" })
-            require(cs3.isFile) { "Nuvio plugin archive is missing" }
-            val nativeFile = ZipFile(cs3).use { zip ->
-                val abi = Build.SUPPORTED_ABIS.firstOrNull {
-                    zip.getEntry("lib/${it}/$LIB") != null
-                } ?: error("QuickJS native ABI is not available")
-                val entry = requireNotNull(zip.getEntry("lib/${abi}/$LIB"))
-                val folder = File(appContext.codeCacheDir,
-                    "nuvio-quickjs/${abi}/${entry.crc.toString(16)}")
-                check(folder.isDirectory || folder.mkdirs()) { "Cannot create native cache" }
-                val target = File(folder, LIB)
-                if (!target.isFile || target.length() != entry.size) {
-                    val temp = File(folder, "$LIB.tmp")
-                    try {
-                        zip.getInputStream(entry).use { input ->
-                            temp.outputStream().use { output -> input.copyTo(output) }
-                        }
-                        check(temp.setReadOnly()) { "Cannot mark QuickJS native library read-only" }
-                        if (target.exists()) check(target.delete()) { "Cannot replace native library" }
-                        check(temp.renameTo(target)) { "Cannot stage native library" }
-                    } finally {
-                        temp.delete()
-                    }
-                }
-                target
+            if (nativeLoaded) return null
+            nativeFailure?.let { return it }
+            try {
+                loadNative()
+                nativeLoaded = true
+            } catch (t: Throwable) {
+                if (t is VirtualMachineError || t is ThreadDeath) throw t
+                val reason = t.javaClass.simpleName + ": " + (t.message ?: "native init failed")
+                nativeFailure = reason
+                Log.d(TAG, "engine=QUICKJS native=ERROR " + reason.take(240))
             }
+            return nativeFailure
+        }
+    }
+
+    private fun loadNative() {
+        val appContext = requireNotNull(context) { "Nuvio QuickJS is not configured" }
+        val cs3 = File(requireNotNull(archive) { "Nuvio plugin archive path is missing" })
+        require(cs3.isFile) { "Nuvio plugin archive is missing" }
+        val nativeFile = ZipFile(cs3).use { zip ->
+            val abi = Build.SUPPORTED_ABIS.firstOrNull {
+                zip.getEntry("lib/${it}/$LIB") != null
+            } ?: error("QuickJS native ABI is not available")
+            val entry = requireNotNull(zip.getEntry("lib/${abi}/$LIB"))
+            // Each plugin ClassLoader must load its own absolute .so path.
+            val folder = File(appContext.codeCacheDir,
+                "nuvio-quickjs/${abi}/${entry.crc.toString(16)}/$nativeScope")
+            check(folder.isDirectory || folder.mkdirs()) { "Cannot create native cache" }
+            val target = File(folder, LIB)
+            if (!target.isFile || target.length() != entry.size) {
+                val temp = File(folder, "$LIB.tmp")
+                try {
+                    zip.getInputStream(entry).use { input ->
+                        temp.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    check(temp.setReadOnly()) { "Cannot mark QuickJS native library read-only" }
+                    if (target.exists()) check(target.delete()) { "Cannot replace native library" }
+                    check(temp.renameTo(target)) { "Cannot stage native library" }
+                } finally {
+                    temp.delete()
+                }
+            }
+            target
+        }
+        // QuickJS 1.0.5 companion initializer reads process-wide properties.
+        // Serialize property/load/restore across plugin ClassLoaders.
+        synchronized(System.getProperties()) {
             val oldPath = System.getProperty(PATH_KEY)
             val oldName = System.getProperty(NAME_KEY)
             try {
                 System.setProperty(PATH_KEY, nativeFile.parentFile!!.absolutePath)
                 System.setProperty(NAME_KEY, LIB)
-                // QuickJS 1.0.5 loads JNI in its companion initializer.
                 Class.forName("com.dokar.quickjs.QuickJs", true,
                     NuvioQuickJsEvaluator::class.java.classLoader)
-                nativeLoaded = true
             } finally {
                 if (oldPath == null) System.clearProperty(PATH_KEY) else System.setProperty(PATH_KEY, oldPath)
                 if (oldName == null) System.clearProperty(NAME_KEY) else System.setProperty(NAME_KEY, oldName)
@@ -97,13 +119,28 @@ internal object NuvioQuickJsEvaluator {
         scraperName: String, code: String, settingsJson: String, tmdbId: String,
         mediaType: String, season: Int?, episode: Int?, timeoutMs: Long,
     ): Result {
+        val args = JSONArray().put(tmdbId).put(mediaType)
+            .put(season ?: JSONObject.NULL).put(episode ?: JSONObject.NULL)
+        return execute(scraperName, code, settingsJson, "getStreams", args.toString(), timeoutMs)
+    }
+
+    /** Run the existing scraper-provided settings form entirely through QuickJS. */
+    suspend fun settingsBlueprint(scraperName: String, code: String, settingsJson: String): Result =
+        execute(scraperName, code, settingsJson, "onSettings", "[]", 20_000L)
+
+    private suspend fun execute(
+        scraperName: String, code: String, settingsJson: String,
+        method: String, argsJson: String, timeoutMs: Long,
+    ): Result {
+        val started = SystemClock.elapsedRealtime()
+        val initError = prepare()
+        if (initError != null) return Result(null, initError,
+            elapsedMs = SystemClock.elapsedRealtime() - started)
         try {
             require(code.isNotBlank()) { "Scraper JS is empty" }
-            ensureNative()
-            val host = NuvioQuickJsHost()
+        val host = NuvioQuickJsHost()
             var captured: String? = null
             var authMissing = false
-            val started = SystemClock.elapsedRealtime()
             withTimeout(timeoutMs) {
                 quickJs(Dispatchers.Default) {
                     host.register(this, settingsJson)
@@ -125,22 +162,23 @@ internal object NuvioQuickJsEvaluator {
                     val exported = evaluate<String>(
                         "var module = { exports: {} }; var exports = module.exports;\n" +
                             "(function() {\n" + code + "\n" +
-                            "if (typeof module.exports.getStreams !== 'function' && " +
-                            "typeof getStreams === 'function') module.exports.getStreams = getStreams;\n" +
-                            "})();\nString(typeof module.exports.getStreams)"
+                            "if (typeof module.exports.$method !== 'function' && " +
+                            "typeof $method === 'function') module.exports.$method = $method;\n" +
+                            "})();\nString(typeof module.exports.$method)"
                     )
-                    check(exported == "function") { "getStreams export is missing" }
+                    check(exported == "function") { "$method export is missing" }
+                    val normalize = if (method == "getStreams")
+                        "Array.isArray(value) ? value : (value && Array.isArray(value.streams) ? value.streams : [])"
+                    else "value === undefined ? null : value"
                     evaluate<Any?>(
                         """(async function() {
                             try {
-                                var streams = await module.exports.getStreams(""" +
-                            JSONObject.quote(tmdbId) + ", " + JSONObject.quote(mediaType) + ", " +
-                            (season?.toString() ?: "null") + ", " + (episode?.toString() ?: "null") +
+                                var value = await module.exports[""" + JSONObject.quote(method) +
+                            """].apply(module.exports, """ + argsJson +
                             """);
-                                if (streams && typeof streams.then === 'function') streams = await streams;
-                                if (!Array.isArray(streams))
-                                    streams = streams && Array.isArray(streams.streams) ? streams.streams : [];
-                                __nuvioCapture(JSON.stringify({ok:true, streams:streams}));
+                                var output = """ + normalize +
+                            """;
+                                __nuvioCapture(JSON.stringify({ok:true,data:output}));
                             } catch(e) {
                                 __nuvioCapture(JSON.stringify({ok:false,error:String(e && (e.message || e))}));
                             }
@@ -151,20 +189,29 @@ internal object NuvioQuickJsEvaluator {
             // Check after the async QuickJS evaluation scope has completed.
             val response = JSONObject(captured ?: error("QuickJS result was not captured"))
             if (!response.optBoolean("ok")) {
-                return Result(null, response.optString("error", "JavaScript error"), true)
+                return Result(null, response.optString("error", "JavaScript error"),
+                    elapsedMs = SystemClock.elapsedRealtime() - started)
             }
-            val streams = response.optJSONArray("streams") ?: JSONArray()
-            val elapsed = SystemClock.elapsedRealtime() - started
-            if (elapsed >= 15_000) Log.d(TAG, "[$scraperName] QuickJS took ${elapsed}ms")
-            return Result(streams.toString(),
-                if (streams.length() == 0 && authMissing) "AUTH_REQUIRED" else null)
+            val value = response.opt("data")
+            val json = when (value) {
+                is JSONObject, is JSONArray -> value.toString()
+                is String -> JSONObject.quote(value)
+                null, JSONObject.NULL -> "null"
+                else -> value.toString()
+            }
+            val count = if (method == "getStreams") (value as? JSONArray)?.length() ?: 0 else 0
+            return Result(json,
+                if (method == "getStreams" && count == 0 && authMissing) "AUTH_REQUIRED" else null,
+                count, SystemClock.elapsedRealtime() - started)
         } catch (e: TimeoutCancellationException) {
-            return Result(null, "timeout")
+            return Result(null, "TIMEOUT",
+                elapsedMs = SystemClock.elapsedRealtime() - started)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             if (t is VirtualMachineError || t is ThreadDeath) throw t
-            return Result(null, t.message ?: t.javaClass.simpleName, true)
+            return Result(null, t.javaClass.simpleName + ": " + (t.message ?: "unknown"),
+                elapsedMs = SystemClock.elapsedRealtime() - started)
         }
     }
 }

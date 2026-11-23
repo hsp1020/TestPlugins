@@ -179,13 +179,6 @@ class NuvioSettings(
 
         container.addView(label("General settings", 17f, bold = true, topDp = 22))
 
-        container.addView(label("JavaScript engine", 13f, bold = true, topDp = 12))
-        val engineToggle = androidx.appcompat.widget.SwitchCompat(ctx).apply {
-            text = "QuickJS (turn OFF to use Rhino)"
-            isChecked = manager.quickJsEnabled
-        }
-        container.addView(engineToggle)
-
         container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 12))
         container.addView(
             label(
@@ -230,7 +223,6 @@ class NuvioSettings(
             }
             manager.timeoutSeconds = seconds
             manager.scraperSettingsJson = raw
-            manager.quickJsEnabled = engineToggle.isChecked
             toast("Settings saved")
         })
     }
