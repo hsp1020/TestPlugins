@@ -3,6 +3,10 @@ version = 1
 
 android {
     namespace = "it.dogior.hadEnough"
+
+    buildFeatures {
+        buildConfig = true
+    }
 }
 
 dependencies {
