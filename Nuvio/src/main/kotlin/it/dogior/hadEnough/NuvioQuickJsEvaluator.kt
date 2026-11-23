@@ -369,7 +369,7 @@ internal object NuvioQuickJsEvaluator {
         tests: List<List<RealScraper>>,
         onProgress: suspend (Int, Int, String) -> Unit,
     ): String {
-        val slots = kotlinx.coroutines.sync.Semaphore(3)
+        val slots = kotlinx.coroutines.sync.Semaphore(10)
         val finished = AtomicInteger()
         val reports = Array(tests.size) { "" }
         val categories = Array(tests.size) { "FAIL" }

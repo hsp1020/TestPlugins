@@ -77,7 +77,7 @@ not a guarantee that a particular title is indexed by every site.
 The diagnostic starts with **15 seconds** (or a lower saved scraper timeout).
 Only a **TIMEOUT** triggers a conditional second attempt up to **45 seconds**,
 and only if the saved timeout permits it. This avoids retrying HTTP 403/429,
-missing tokens and unrelated failures. At most **3 scraper runtimes** execute
+missing tokens and unrelated failures. At most **10 scraper runtimes** execute
 concurrently, with no background polling.
 
 The test now reports elapsed time and stage timings
