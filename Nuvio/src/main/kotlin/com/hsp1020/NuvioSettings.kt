@@ -39,6 +39,7 @@ class NuvioSettings(
     private val pluginResources: android.content.res.Resources? = null,
 ) {
     private var uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var settingsCheckJob: kotlinx.coroutines.Job? = null
 
     
     private var ctx: Context = activityCtx
@@ -97,6 +98,7 @@ class NuvioSettings(
     }
 
     internal fun release() {
+        settingsCheckJob?.cancel()
         uiScope.cancel()
         sheetInflater = null
         closeAction = null
@@ -105,6 +107,7 @@ class NuvioSettings(
     
     internal fun onBack(): Boolean {
         if (openRepoId == null) return false
+        settingsCheckJob?.cancel()
         openRepoId = null
         render()
         return true
@@ -139,6 +142,7 @@ class NuvioSettings(
         container.removeAllViews()
         val repo = openRepoId?.let { id -> manager.repos().firstOrNull { it.id == id } }
         if (repo == null) {
+            settingsCheckJob?.cancel()
             openRepoId = null
             renderMain()
         } else {
@@ -319,9 +323,11 @@ class NuvioSettings(
 
         val holder = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         val counter = label("", 12f, alpha = 0.7f, topDp = 8)
+        val settingsButtons = HashMap<String, View>()
 
         fun fill() {
             holder.removeAllViews()
+            settingsButtons.clear()
             val q = query.trim().lowercase()
             val list = repo.scrapers.filter {
                 q.isEmpty() || it.name.lowercase().contains(q) || it.description.lowercase().contains(q)
@@ -329,7 +335,11 @@ class NuvioSettings(
             counter.text = "${repo.scrapers.count { manager.isEnabled(repo, it) }}/${repo.scrapers.size} active scrapers" +
                     if (q.isNotEmpty()) " · ${list.size} found" else ""
             if (list.isEmpty()) holder.addView(label("No scrapers found.", 13f, alpha = 0.65f, topDp = 10))
-            list.forEach { s -> holder.addView(scraperCard(repo, s) { fill() }) }
+            list.forEach { s ->
+                holder.addView(scraperCard(repo, s, { fill() }) { gear ->
+                    settingsButtons[s.id] = gear
+                })
+            }
         }
 
         val search = EditText(ctx).apply {
@@ -360,9 +370,21 @@ class NuvioSettings(
         container.addView(counter)
         container.addView(holder)
         fill()
+        settingsCheckJob?.cancel()
+        settingsCheckJob = uiScope.launch {
+            for (s in repo.scrapers) {
+                if (manager.settingsAvailability(repo, s) != null) continue
+                withContext(Dispatchers.IO) { manager.loadBlueprint(repo, s) }
+                if (openRepoId != repo.id) break
+                settingsButtons[s.id]?.visibility =
+                    if (manager.settingsAvailability(repo, s) == false) View.GONE else View.VISIBLE
+            }
+        }
     }
 
-    private fun scraperCard(repo: NuvioRepo, s: NuvioScraper, onChanged: () -> Unit): View {
+    private fun scraperCard(
+        repo: NuvioRepo, s: NuvioScraper, onChanged: () -> Unit, onGear: (View) -> Unit
+    ): View {
         val card = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -393,8 +415,9 @@ class NuvioSettings(
         if (s.author.isNotEmpty()) texts.addView(label("by ${s.author}", 11f, alpha = 0.5f, topDp = 1))
         top.addView(texts)
 
-        if (manager.hasSettings(repo, s)) {
-            top.addView(TextView(ctx).apply {
+        val settingsAvailable = manager.settingsAvailability(repo, s)
+        if (settingsAvailable != false) {
+            val gear = TextView(ctx).apply {
                 text = "⚙"
                 textSize = 22f
                 gravity = Gravity.CENTER
@@ -403,8 +426,11 @@ class NuvioSettings(
                 isClickable = true
                 contentDescription = "Settings for ${s.name}"
                 layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(8) }
+                visibility = if (settingsAvailable == true) View.VISIBLE else View.GONE
                 setOnClickListener { openScraperSettings(repo, s) }
-            })
+            }
+            top.addView(gear)
+            onGear(gear)
         }
 
         val sw = toggle(manager.isEnabled(repo, s))

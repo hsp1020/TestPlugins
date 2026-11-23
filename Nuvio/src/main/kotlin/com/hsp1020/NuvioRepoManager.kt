@@ -64,6 +64,10 @@ class NuvioRepoManager(context: Context) {
     fun removeRepo(id: String) {
         saveRepos(repos().filterNot { it.id == id })
         File(root, id).deleteRecursively()
+        val statusKeys = prefs.all.keys.filter { it.startsWith("settings_status_$id:") }
+        if (statusKeys.isNotEmpty()) {
+            prefs.edit().also { editor -> statusKeys.forEach { editor.remove(it) } }.apply()
+        }
         setRepoEnabled(id, true)
         val vals = valuesStore()
         val vKeys = vals.keys().asSequence().filter { it.startsWith("$id:") }.toList()
@@ -202,13 +206,28 @@ class NuvioRepoManager(context: Context) {
 
     private val settingsFlag = HashMap<String, Boolean>()
 
-    /** True if the manifest says so or the script itself defines onSettings (cached per file version). */
-    fun hasSettings(repo: NuvioRepo, scraper: NuvioScraper): Boolean {
-        if (scraper.hasSettings) return true
+    /** Null until the current script's onSettings result has been verified. */
+    fun settingsAvailability(repo: NuvioRepo, scraper: NuvioScraper): Boolean? {
         val f = scriptFile(repo, scraper)
-        if (!f.exists()) return false
-        val key = f.path + ":" + f.lastModified()
-        return settingsFlag.getOrPut(key) { f.readText().contains("onSettings") }
+        if (!f.isFile) return false
+        val revision = "${f.lastModified()}:${f.length()}"
+        when (prefs.getString(settingsStatusKey(repo, scraper), null)) {
+            "$revision:false" -> return false
+            "$revision:true" -> if (blueprint(repo, scraper) != null) return true
+        }
+        if (blueprint(repo, scraper) != null) return true
+        if (scraper.hasSettings) return null
+        val key = "$revision:${f.path}"
+        return if (settingsFlag.getOrPut(key) { f.readText().contains("onSettings") }) null else false
+    }
+
+    private fun settingsStatusKey(repo: NuvioRepo, scraper: NuvioScraper) =
+        "settings_status_${repo.id}:${scraper.id}"
+
+    private fun rememberSettings(repo: NuvioRepo, scraper: NuvioScraper, available: Boolean) {
+        val file = scriptFile(repo, scraper)
+        prefs.edit().putString(settingsStatusKey(repo, scraper),
+            "${file.lastModified()}:${file.length()}:$available").apply()
     }
 
     fun readScript(repo: NuvioRepo, scraper: NuvioScraper): String? {
@@ -250,8 +269,21 @@ class NuvioRepoManager(context: Context) {
     /** The cached onSettings() layout of a scraper, or null if it was never read (or has none). */
     fun blueprint(repo: NuvioRepo, scraper: NuvioScraper): JSONArray? {
         val f = blueprintFile(repo, scraper)
-        if (!f.exists()) return null
-        return try { JSONArray(f.readText()) } catch (_: Exception) { null }
+        if (!f.isFile || f.lastModified() < scriptFile(repo, scraper).lastModified()) return null
+        return try { JSONArray(f.readText()).takeIf { hasEditableSettings(it) } }
+        catch (_: Exception) { null }
+    }
+
+    private fun hasEditableSettings(items: JSONArray): Boolean {
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            if (item.optString("key").isBlank()) continue
+            when (item.optString("type")) {
+                "text", "toggle" -> return true
+                "select" -> if ((item.optJSONArray("options")?.length() ?: 0) > 0) return true
+            }
+        }
+        return false
     }
 
     class BlueprintResult(val items: JSONArray?, val error: String?)
@@ -260,7 +292,12 @@ class NuvioRepoManager(context: Context) {
     suspend fun loadBlueprint(repo: NuvioRepo, scraper: NuvioScraper): BlueprintResult {
         val code = readScript(repo, scraper) ?: return BlueprintResult(null, "Scraper file not downloaded (try REFRESH)")
         val res = NuvioQuickJsEvaluator.settingsBlueprint(scraper.name, code, scraperSettingsJson)
-        if (res.error != null) return BlueprintResult(null, res.error)
+        if (res.error != null) {
+            if (res.error.contains("onSettings export is missing")) {
+                rememberSettings(repo, scraper, false)
+            }
+            return BlueprintResult(null, res.error)
+        }
         val parsed: Any? = try { org.json.JSONTokener(res.json ?: "null").nextValue() } catch (_: Exception) { null }
         val arr: JSONArray? = when (parsed) {
             is JSONArray -> parsed
@@ -274,8 +311,13 @@ class NuvioRepoManager(context: Context) {
             }
             else -> null
         }
-        if (arr == null || arr.length() == 0) return BlueprintResult(null, "onSettings returned an unrecognized format: ${res.json?.take(120)}")
+        if (arr != null && !hasEditableSettings(arr)) {
+            rememberSettings(repo, scraper, false)
+            return BlueprintResult(null, "onSettings has no editable settings")
+        }
+        if (arr == null) return BlueprintResult(null, "onSettings returned an unrecognized format: ${res.json?.take(120)}")
         blueprintFile(repo, scraper).writeText(arr.toString())
+        rememberSettings(repo, scraper, true)
         return BlueprintResult(arr, null)
     }
 
