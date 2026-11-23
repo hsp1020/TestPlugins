@@ -1,5 +1,6 @@
 package com.hsp1020
 
+import android.os.SystemClock
 import android.util.Base64
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.asyncFunction
@@ -15,9 +16,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Runtime-local bindings for fetch, DOM, crypto, settings and cancellable timers. */
-internal class NuvioQuickJsHost {
+internal class NuvioQuickJsHost(
+    private val scraperName: String,
+    private val runtimeId: Long,
+) {
     private val timers = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
     private val nextTimerId = AtomicInteger()
+    private val nextRequestId = AtomicInteger()
+    private fun trace(event: String) =
+        Log.d("NuvioQuickJS", "runtime=$runtimeId scraper=$scraperName $event")
 
     fun register(qjs: QuickJs, settingsJson: String) {
         val dom = NuvioDom()
@@ -49,16 +56,21 @@ internal class NuvioQuickJsHost {
             val rawHeaders = JSONObject(a.getOrNull(2)?.toString() ?: "{}")
             val headers = LinkedHashMap<String, String>()
             for (key in rawHeaders.keys()) headers[key] = rawHeaders.optString(key)
+            val requestId = nextRequestId.incrementAndGet()
+            val httpHost = runCatching { java.net.URI(url).host }.getOrNull() ?: "unknown"
+            val started = SystemClock.elapsedRealtime()
+            trace("http=$requestId phase=START method=$method host=$httpHost")
             val result = try {
                 NuvioHttp.executeAsync(app.baseClient, url, method, headers,
                     a.getOrNull(3)?.toString(), a.getOrNull(4)?.toString() != "manual")
             } catch (e: CancellationException) {
+                trace("http=$requestId phase=CANCEL elapsedMs=${SystemClock.elapsedRealtime() - started}")
                 throw e
             } catch (e: Exception) {
-                val host = runCatching { java.net.URI(url).host }.getOrNull() ?: "unknown"
-                Log.d("NuvioQuickJS", "HTTP $host: ${e.javaClass.simpleName}")
+                trace("http=$requestId phase=ERROR host=$httpHost elapsedMs=${SystemClock.elapsedRealtime() - started} cause=${e.javaClass.simpleName}")
                 throw e
             }
+            trace("http=$requestId phase=DONE host=$httpHost status=${result.status} elapsedMs=${SystemClock.elapsedRealtime() - started}")
             JSONObject().apply {
                 put("status", result.status)
                 put("statusText", result.statusText)
@@ -94,8 +106,13 @@ internal class NuvioQuickJsHost {
             val ms = ((args.getOrNull(1) as? Number)?.toLong() ?: 0L).coerceIn(0L, 60_000L)
             val signal = timers[id]
             if (signal != null) {
+                val started = SystemClock.elapsedRealtime()
+                if (ms >= 1_000L) trace("timer=$id phase=START waitMs=$ms")
                 try { withTimeoutOrNull(ms) { signal.await() } }
-                finally { timers.remove(id, signal) }
+                finally {
+                    timers.remove(id, signal)
+                    if (ms >= 1_000L) trace("timer=$id phase=DONE elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                }
             }
             null
         }

@@ -141,10 +141,10 @@ internal object NuvioQuickJsEvaluator {
             elapsedMs = SystemClock.elapsedRealtime() - started)
         try {
             require(code.isNotBlank()) { "Scraper JS is empty" }
-            val host = NuvioQuickJsHost()
+            val runtimeId = nextRuntime.incrementAndGet()
+            val host = NuvioQuickJsHost(scraperName, runtimeId)
             var captured: String? = null
             var authMissing = false
-            val runtimeId = nextRuntime.incrementAndGet()
             nativeEntered = true
             withTimeout(timeoutMs) {
                     Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CREATE")
@@ -162,10 +162,6 @@ internal object NuvioQuickJsEvaluator {
                             }
                             null
                         }
-                        qjs.function("__nuvioCapture") { args ->
-                            captured = args.getOrNull(0)?.toString()
-                            null
-                        }
                         qjs.evaluate<Any?>(bootstrap)
                         val exported = qjs.evaluate<String>(
                             "var module = { exports: {} }; var exports = module.exports;\n" +
@@ -178,7 +174,9 @@ internal object NuvioQuickJsEvaluator {
                         val normalize = if (method == "getStreams")
                             "Array.isArray(value) ? value : (value && Array.isArray(value.streams) ? value.streams : [])"
                         else "value === undefined ? null : value"
-                        qjs.evaluate<Any?>(
+                        // Return the scraper Promise itself so QuickJS-KT awaits its
+                        // settlement before we read the result and close this runtime.
+                        captured = qjs.evaluate<String>(
                             """(async function() {
                             try {
                                 var value = await module.exports[""" + JSONObject.quote(method) +
@@ -186,9 +184,9 @@ internal object NuvioQuickJsEvaluator {
                             """);
                                 var output = """ + normalize +
                             """;
-                                __nuvioCapture(JSON.stringify({ok:true,data:output}));
+                                return JSON.stringify({ok:true,data:output});
                             } catch(e) {
-                                __nuvioCapture(JSON.stringify({ok:false,error:String(e && (e.message || e))}));
+                                return JSON.stringify({ok:false,error:String(e && (e.message || e))});
                             }
                         })();"""
                         )
@@ -198,8 +196,8 @@ internal object NuvioQuickJsEvaluator {
                         Log.d(TAG, "runtime=$runtimeId scraper=$scraperName phase=CLOSED")
                     }
             }
-            // Check after the async QuickJS evaluation scope has completed.
-            val response = JSONObject(captured ?: error("QuickJS result was not captured"))
+            // evaluate<String> returns the settled Promise's JSON result.
+            val response = JSONObject(captured ?: error("QuickJS Promise returned no result"))
             if (!response.optBoolean("ok")) {
                 return Result(null, response.optString("error", "JavaScript error"),
                     elapsedMs = SystemClock.elapsedRealtime() - started)
