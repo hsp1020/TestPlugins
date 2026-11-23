@@ -9,9 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.security.SecureRandom
 
 /** P0-2 QuickJS host bindings. Tests inject a deterministic transport. */
 internal class NuvioQuickJsHost(
+    private val onRequest: ((String) -> Unit)? = null,
     private val onResponse: ((String, Int?, String?) -> Unit)? = null,
     private val request: suspend (String, String, Map<String, String>, String?, Boolean) -> NuvioHttpResult =
         { url, method, headers, body, redirects ->
@@ -50,6 +52,7 @@ internal class NuvioQuickJsHost(
             val rawHeaders = JSONObject(a.getOrNull(2)?.toString() ?: "{}")
             val headers = LinkedHashMap<String, String>()
             for (key in rawHeaders.keys()) headers[key] = rawHeaders.optString(key)
+            onRequest?.invoke(url)
             val result = try {
                 request(url, method, headers, a.getOrNull(3)?.toString(),
                     a.getOrNull(4)?.toString() != "manual")
@@ -69,6 +72,14 @@ internal class NuvioQuickJsHost(
                 put("bodyBase64", Base64.encodeToString(result.bytes, Base64.NO_WRAP))
             }.toString()
         }
+        val random = SecureRandom()
+        qjs.function("__nuvioRandomBytes") { args ->
+            val count = (args.getOrNull(0) as? Number)?.toInt() ?: 0
+            require(count in 0..65_536) { "Invalid random byte length" }
+            val bytes = ByteArray(count)
+            random.nextBytes(bytes)
+            Base64.encodeToString(bytes, Base64.NO_WRAP)
+        }
         qjs.asyncFunction("__nuvioSleep") { a ->
             delay(((a.getOrNull(0) as? Number)?.toLong() ?: 0L).coerceIn(0L, 60_000L))
             null
@@ -79,6 +90,19 @@ internal class NuvioQuickJsHost(
 /** Minimal Fetch response adapter; URL/axios/cheerio/crypto-js come from shared Nuvio modules. */
 internal const val NUVIO_QUICKJS_FETCH_JS = """
 globalThis.SCRAPER_SETTINGS = JSON.parse(__get_scraper_settings());
+globalThis.window = globalThis;
+globalThis.self = globalThis;
+globalThis.global = globalThis;
+if (!globalThis.crypto) globalThis.crypto = {};
+if (typeof globalThis.crypto.getRandomValues !== 'function') {
+  globalThis.crypto.getRandomValues = function(bytes) {
+    if (!bytes || !ArrayBuffer.isView(bytes) || bytes.byteLength > 65536)
+      throw new TypeError('Invalid random buffer');
+    var raw = __b64ToBytes(__nuvioRandomBytes(bytes.byteLength));
+    new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).set(raw);
+    return bytes;
+  };
+}
 globalThis.setTimeout = function(fn, ms) {
   var token = { cancelled: false };
   __nuvioSleep(ms).then(function() { if (!token.cancelled) fn(); });

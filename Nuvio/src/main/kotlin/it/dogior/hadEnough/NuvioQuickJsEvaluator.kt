@@ -195,6 +195,7 @@ internal object NuvioQuickJsEvaluator {
         val season: Int?,
         val episode: Int?,
         val timeoutMs: Long,
+        val retryTimeoutMs: Long = timeoutMs,
     )
 
     suspend fun evaluateReal(test: RealScraper): String {
@@ -202,13 +203,31 @@ internal object NuvioQuickJsEvaluator {
         require(test.code.length <= 2_000_000) { "SCRIPT_TOO_LARGE" }
         require(test.tmdbId.isNotBlank() && test.tmdbId.all { it.isDigit() }) { "INVALID_TMDB_ID" }
         require(test.mediaType == "movie" || test.mediaType == "tv") { "INVALID_MEDIA_TYPE" }
-        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val jsErrors = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val host = NuvioQuickJsHost(onResponse = { url, status, error ->
-            val domain = runCatching { URI(url).host }.getOrNull() ?: "unknown"
-            requests.add("$domain: ${status ?: error ?: "error"}")
-        })
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         var stage = "BOOTSTRAP"
+        var stageSince = startedAt
+        val stageTimes = mutableListOf<String>()
+        fun nextStage(name: String) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            stageTimes.add("$stage=" + (now - stageSince) + "ms")
+            stageSince = now
+            stage = name
+        }
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val statusCodes = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        val httpErrors = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val jsErrors = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val lastHost = java.util.concurrent.atomic.AtomicReference("none")
+        val startedHttp = AtomicInteger()
+        fun domain(url: String) = runCatching { URI(url).host }.getOrNull() ?: "unknown"
+        val host = NuvioQuickJsHost(
+            onRequest = { url -> lastHost.set(domain(url)); startedHttp.incrementAndGet() },
+            onResponse = { url, status, error ->
+                requests.add(domain(url) + ": " + (status?.toString() ?: error ?: "error"))
+                if (status != null) statusCodes.add(status)
+                if (error != null) httpErrors.add(error)
+            },
+        )
         try {
             val json = withTimeout(test.timeoutMs) {
                 quickJs(Dispatchers.Default) {
@@ -220,6 +239,11 @@ internal object NuvioQuickJsEvaluator {
                                 jsErrors.add("$level: " + args.getOrNull(1)?.toString().orEmpty().take(160))
                             }
                         }
+                        null
+                    }
+                    var captured: String? = null
+                    function("__p03Capture") { args ->
+                        captured = args.getOrNull(0)?.toString()
                         null
                     }
                     val bootstrap = evaluate<String>(
@@ -237,7 +261,7 @@ internal object NuvioQuickJsEvaluator {
                     )
                     check(bootstrap == "function") { "FETCH_BRIDGE_MISSING" }
 
-                    stage = "SCRIPT_COMPILE"
+                    nextStage("SCRIPT_COMPILE")
                     val exported = evaluate<String>(
                         "var module = { exports: {} }; var exports = module.exports;\n" +
                             "(function() {\n" + test.code + "\n" +
@@ -247,24 +271,36 @@ internal object NuvioQuickJsEvaluator {
                     )
                     check(exported == "function") { "GETSTREAMS_MISSING: $exported" }
 
-                    stage = "GETSTREAMS"
-                    evaluate<String>(
-                        """JSON.stringify(await (async function() {
-                          var fn = module.exports.getStreams;
-                          var result = await fn.call(module.exports, """ +
+                    nextStage("GETSTREAMS")
+                    // Receive the settled async result via callback, as in official NuvioTV.
+                    evaluate<Any?>(
+                        """(async function() {
+                          try {
+                            var fn = module.exports.getStreams;
+                            var result = await fn.call(module.exports, """ +
                             JSONObject.quote(test.tmdbId) + ", " + JSONObject.quote(test.mediaType) + ", " +
                             (test.season?.toString() ?: "null") + ", " +
                             (test.episode?.toString() ?: "null") +
                             """);
-                          return Array.isArray(result) ? result :
-                            (result && Array.isArray(result.streams) ? result.streams : []);
-                        })())"""
+                            if (result && typeof result.then === 'function') result = await result;
+                            var streams = Array.isArray(result) ? result :
+                              (result && Array.isArray(result.streams) ? result.streams : []);
+                            __p03Capture(JSON.stringify({ok:true,streams:streams}));
+                          } catch(e) {
+                            __p03Capture(JSON.stringify({ok:false,error:String(e && (e.message || e))}));
+                          }
+                        })();"""
                     )
+                    captured ?: error("ASYNC_UNSETTLED: completion callback not invoked")
                 }
             }
-            stage = "RESULT_PARSE"
+            nextStage("RESULT_PARSE")
             check(json.length <= 5_000_000) { "RESULT_TOO_LARGE" }
-            val array = JSONArray(json)
+            val payload = JSONObject(json)
+            if (!payload.optBoolean("ok")) {
+                throw IllegalStateException("JS_ERROR: " + payload.optString("error", "unknown").take(280))
+            }
+            val array = payload.getJSONArray("streams")
             var links = 0
             val samples = ArrayList<String>(3)
             for (i in 0 until array.length()) {
@@ -279,18 +315,40 @@ internal object NuvioQuickJsEvaluator {
             }
             val hosts = synchronized(requests) { requests.take(8).joinToString("; ") }
             val warnings = synchronized(jsErrors) { jsErrors.take(5).joinToString("; ") }
+            val statuses = synchronized(statusCodes) { statusCodes.toList() }
+            val errors = synchronized(httpErrors) { httpErrors.joinToString(" ") }
+            val emptyReason = when {
+                warnings.contains("token", true) || warnings.contains("cookie", true) ||
+                    warnings.contains("configure", true) -> "AUTH_REQUIRED"
+                statuses.any { it == 401 || it == 403 || it == 429 } -> "HTTP_BLOCKED"
+                errors.contains("UnknownHost") || errors.contains("SSL") -> "NETWORK_ERROR"
+                statuses.any { it >= 400 } -> "UPSTREAM_ERROR"
+                else -> "NO_MATCH_OR_PARSE"
+            }
+            nextStage("DONE")
             return buildString {
                 append("REAL: ").append(
                     if (links > 0) "PASS" else if (array.length() == 0) "EMPTY" else "INVALID"
                 )
                 append(" (links=").append(links).append(", items=").append(array.length()).append(")")
-                append("\nHTTP: ").append(requests.size).append(" requests")
+                if (links == 0 && array.length() == 0) append(" reason=").append(emptyReason)
+                append("\nTIME: ").append(android.os.SystemClock.elapsedRealtime() - startedAt)
+                    .append("ms (").append(stageTimes.joinToString(", ")).append(")")
+                append("\nHTTP: ").append(startedHttp.get()).append(" started, ")
+                    .append(requests.size).append(" completed")
                 if (hosts.isNotEmpty()) append("\nHOSTS: ").append(hosts)
                 if (samples.isNotEmpty()) append("\nSAMPLES: ").append(samples.joinToString("; "))
                 if (warnings.isNotEmpty()) append("\nJS WARN/ERROR: ").append(warnings)
             }
         } catch (e: TimeoutCancellationException) {
-            throw IllegalStateException("TIMEOUT: ${test.timeoutMs} ms; HTTP requests=${requests.size}", e)
+            throw IllegalStateException(
+                "TIMEOUT: " + test.timeoutMs + "ms stage=" + stage +
+                    " stageMs=" + (android.os.SystemClock.elapsedRealtime() - stageSince) +
+                    " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - startedAt) +
+                    " timings=" + stageTimes.joinToString(",") +
+                    " http=" + requests.size + "/" + startedHttp.get() +
+                    " lastHost=" + lastHost.get(), e
+            )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -298,48 +356,72 @@ internal object NuvioQuickJsEvaluator {
             val warnings = synchronized(jsErrors) { jsErrors.takeLast(3).joinToString("; ") }
             throw IllegalStateException(buildString {
                 append(stage).append(": ").append(t.message)
+                append(" | elapsedMs=").append(android.os.SystemClock.elapsedRealtime() - startedAt)
+                append(" | timings=").append(stageTimes.joinToString(","))
                 if (recent.isNotEmpty()) append(" | HTTP: ").append(recent)
                 if (warnings.isNotEmpty()) append(" | JS: ").append(warnings)
             }, t)
         }
     }
 
-    /** One smoke test per installed scraper; only three native runtimes run concurrently. */
+    /** One batch entry per scraper, with a conditional alternative media type. */
     suspend fun evaluateBatch(
-        tests: List<RealScraper>,
+        tests: List<List<RealScraper>>,
         onProgress: suspend (Int, Int, String) -> Unit,
     ): String {
         val slots = kotlinx.coroutines.sync.Semaphore(3)
         val finished = AtomicInteger()
         val reports = Array(tests.size) { "" }
+        val categories = Array(tests.size) { "FAIL" }
+        suspend fun run(test: RealScraper): String {
+            suspend fun attempt(item: RealScraper): String = try {
+                evaluateReal(item)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (t: Exception) {
+                "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty().take(400)
+            }
+            val initial = attempt(test)
+            if (!initial.contains("TIMEOUT:") || test.retryTimeoutMs <= test.timeoutMs) return initial
+            val retried = attempt(test.copy(timeoutMs = test.retryTimeoutMs))
+            return initial + "\nRETRY (" + test.retryTimeoutMs + "ms): " + retried
+        }
         coroutineScope {
-            tests.mapIndexed { index, test ->
+            tests.mapIndexed { index, variants ->
                 async(Dispatchers.Default) {
                     slots.withPermit {
-                        reports[index] = try {
-                            evaluateReal(test)
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (t: Exception) {
-                            "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty().take(280)
+                        val first = run(variants[0])
+                        val outcomes = ArrayList<String>(2)
+                        outcomes.add(variants[0].mediaType + " TMDB " + variants[0].tmdbId + ": " + first)
+                        if (!first.contains("REAL: PASS") && variants.size > 1 &&
+                            first.contains("REAL: EMPTY") && first.contains("reason=NO_MATCH_OR_PARSE")) {
+                            val alternative = run(variants[1])
+                            outcomes.add(variants[1].mediaType + " TMDB " +
+                                variants[1].tmdbId + ": " + alternative)
                         }
-                        onProgress(finished.incrementAndGet(), tests.size, test.name)
+                        val details = outcomes.joinToString("\n")
+                        reports[index] = details
+                        categories[index] = when {
+                            details.contains("REAL: PASS") -> "PASS"
+                            details.contains("REAL: INVALID") -> "INVALID"
+                            details.contains("REAL: FAIL") -> "FAIL"
+                            else -> "EMPTY"
+                        }
+                        onProgress(finished.incrementAndGet(), tests.size, variants[0].name)
                     }
                 }
             }.awaitAll()
         }
-        val passed = reports.count { it.startsWith("REAL: PASS") }
-        val empty = reports.count { it.startsWith("REAL: EMPTY") }
-        val invalid = reports.count { it.startsWith("REAL: INVALID") }
-        val failed = reports.size - passed - empty - invalid
         val redactUrls = Regex("""https?://\S+""")
         return buildString {
             append("BATCH: COMPLETE (").append(tests.size).append(" scrapers)")
-            append("\nPASS=").append(passed).append(" EMPTY=").append(empty)
-            append(" INVALID=").append(invalid).append(" FAIL=").append(failed)
-            tests.forEachIndexed { index, test ->
-                append("\n\n").append(index + 1).append(". ").append(test.name)
-                append(" [").append(test.mediaType).append("] ")
+            append("\nPASS=").append(categories.count { it == "PASS" })
+            append(" EMPTY=").append(categories.count { it == "EMPTY" })
+            append(" INVALID=").append(categories.count { it == "INVALID" })
+            append(" FAIL=").append(categories.count { it == "FAIL" })
+            tests.forEachIndexed { index, variants ->
+                append("\n\n").append(index + 1).append(". ").append(variants[0].name)
+                append(" [").append(categories[index]).append("]\n")
                 append(redactUrls.replace(reports[index], "[URL]"))
             }
         }

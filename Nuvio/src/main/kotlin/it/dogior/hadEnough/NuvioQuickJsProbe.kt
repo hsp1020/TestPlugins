@@ -18,7 +18,7 @@ internal object NuvioQuickJsProbe {
 
     suspend fun run(context: Context, pluginFilePath: String?, adapterTest: Boolean = false,
         hostTest: Boolean = false, realTest: NuvioQuickJsEvaluator.RealScraper? = null,
-        batchTest: List<NuvioQuickJsEvaluator.RealScraper>? = null,
+        batchTest: List<List<NuvioQuickJsEvaluator.RealScraper>>? = null,
         onBatchProgress: (suspend (Int, Int, String) -> Unit)? = null): String =
         withContext(Dispatchers.IO) {
             val report = ArrayList<String>(5)

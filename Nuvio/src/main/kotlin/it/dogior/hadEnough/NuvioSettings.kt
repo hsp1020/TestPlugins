@@ -493,7 +493,51 @@ class NuvioSettings(
         return card
     }
 
-    /** Diagnostic only: one automatic sample per manifest scraper, regardless of ON/OFF. */
+    /** Fixture selection is metadata-based; no scraper name or ID exceptions. */
+    private fun quickJsProbeCases(scraper: NuvioScraper, code: String, settings: String):
+        List<NuvioQuickJsEvaluator.RealScraper> {
+        val languages = scraper.languages.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
+        val indian = languages.any { it in setOf("hi", "hin", "ta", "tam", "te", "tel", "bn", "ba") }
+        val anime = scraper.types.any { it.equals("anime", true) } ||
+            scraper.description.contains("anime", true) ||
+            ("ja" in languages && !indian && ("ko" !in languages || "en" in languages))
+        val korean = "ko" in languages && !anime
+        val french = "fr" in languages && !indian && !anime
+        val persian = "pe" in languages || "fa" in languages
+        val (movieId, tvId) = when {
+            korean -> "496243" to "93405" // Parasite / Squid Game
+            anime -> "372058" to "1429" // Your Name / Attack on Titan
+            indian -> "579974" to "79352" // RRR / Sacred Games
+            french -> "77338" to "96677" // Intouchables / Lupin
+            persian -> "60243" to "1399" // A Separation / generic TV fallback
+            else -> "550" to "1399" // Fight Club / Game of Thrones
+        }
+        val movie = scraper.supports("movie")
+        val tv = scraper.supports("tv") || scraper.types.any { it.equals("anime", true) }
+        val firstTv = korean || anime
+        val cases = buildList {
+            if (firstTv && tv) add("tv")
+            if (movie) add("movie")
+            if (!firstTv && tv) add("tv")
+        }
+        val initialMs = minOf(manager.timeoutSeconds, 15) * 1000L
+        val retryMs = minOf(manager.timeoutSeconds, 45) * 1000L
+        return cases.map { type ->
+            NuvioQuickJsEvaluator.RealScraper(
+                name = scraper.name,
+                code = code,
+                settingsJson = settings,
+                tmdbId = if (type == "movie") movieId else tvId,
+                mediaType = type,
+                season = if (type == "tv") 1 else null,
+                episode = if (type == "tv") 1 else null,
+                timeoutMs = initialMs,
+                retryTimeoutMs = retryMs,
+            )
+        }
+    }
+
+    /** One automated, type-aware batch entry per scraper; ON/OFF remains untouched. */
     private fun runAllQuickJsTests(repo: NuvioRepo) {
         if (busy) { toast("Another operation is running"); return }
         busy = true
@@ -514,21 +558,11 @@ class NuvioSettings(
             try {
                 val tests = withContext(Dispatchers.IO) {
                     repo.scrapers.mapNotNull { scraper ->
-                        val type = when {
-                            scraper.supports("movie") -> "movie"
-                            scraper.supports("tv") -> "tv"
-                            else -> null
-                        } ?: return@mapNotNull null
-                        NuvioQuickJsEvaluator.RealScraper(
-                            name = scraper.name,
-                            code = manager.readScript(repo, scraper).orEmpty(),
-                            settingsJson = manager.settingsFor(repo, scraper),
-                            tmdbId = if (type == "movie") "550" else "1399",
-                            mediaType = type,
-                            season = if (type == "tv") 1 else null,
-                            episode = if (type == "tv") 1 else null,
-                            timeoutMs = minOf(manager.timeoutSeconds, 15) * 1000L,
-                        )
+                        quickJsProbeCases(
+                            scraper,
+                            manager.readScript(repo, scraper).orEmpty(),
+                            manager.settingsFor(repo, scraper)
+                        ).takeIf { it.isNotEmpty() }
                     }
                 }
                 if (tests.isEmpty()) {

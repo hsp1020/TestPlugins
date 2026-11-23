@@ -56,21 +56,44 @@ movies or TV, regardless of its ON/OFF switch. It reads the already downloaded J
 including the existing per-scraper settings, and uses actual HTTP. No manual selection,
 ID typing, or individual test buttons are required.
 
-One representative input is used per scraper to avoid duplicate work: movie-capable
-scrapers receive movie TMDB **550**; TV-only scrapers receive TV TMDB **1399**,
-season **1**, episode **1**. This is a compatibility smoke test, **not** an exhaustive
-movie/TV content coverage test. Some sources may return EMPTY due to missing tokens
-or unsupported titles even when their JS runtime works.
+P0-3 selects a representative **movie or TV episode** from the scraper's
+`supportedTypes`, `contentLanguage`, and anime-related manifest description.
+It does not special-case individual scraper IDs or names.
 
-At most **3 QuickJS test runtimes** operate concurrently, each using a diagnostic
-timeout of at most **15 seconds** (or the existing shorter timeout setting). This
-limits simultaneous work but cannot guarantee interruption of a synchronous
-infinite JavaScript loop or an already-blocking native HTTP call.
-The batch runs **only when pressed**; no polling or scheduled tests are added.
+Sample TMDB inputs are:
+- General: Fight Club (movie 550), Game of Thrones (TV 1399 S01E01)
+- Japanese anime: Your Name (movie 372058), Attack on Titan (TV 1429 S01E01)
+- Korean: Parasite (movie 496243), Squid Game (TV 93405 S01E01)
+- Indian: RRR (movie 579974), Sacred Games (TV 79352 S01E01)
+- French: Intouchables (movie 77338), Lupin (TV 96677 S01E01)
+- Persian: A Separation (movie 60243); otherwise the general TV sample.
+
+Anime and Korean sources try TV first. Others try movie first. If the
+first probe returns **EMPTY reason=NO_MATCH_OR_PARSE**, another declared
+media type is tried once. A PASS or an established auth/network/HTTP block
+does not trigger a second media-type test. These are representative probes,
+not a guarantee that a particular title is indexed by every site.
+
+The diagnostic starts with **15 seconds** (or a lower saved scraper timeout).
+Only a **TIMEOUT** triggers a conditional second attempt up to **45 seconds**,
+and only if the saved timeout permits it. This avoids retrying HTTP 403/429,
+missing tokens and unrelated failures. At most **3 scraper runtimes** execute
+concurrently, with no background polling.
+
+The test now reports elapsed time and stage timings
+(`BOOTSTRAP`, `SCRIPT_COMPILE`, `GETSTREAMS`, `RESULT_PARSE`), plus
+started/completed HTTP requests and the last request hostname at timeout.
+Promise-based scripts use the NuvioTV-style native completion callback
+instead of coercing a Promise to String; `window`, `self`, `global`
+and a cryptographic `getRandomValues` bridge support browser-oriented code.
+
 
 Result categories: `REAL: PASS` (at least one URL/infoHash),
 `REAL: EMPTY` (no streams), `REAL: INVALID` (items without valid links),
-and `REAL: FAIL` (script/HTTP/timeout/parse errors). Summary totals and
+and `REAL: FAIL` (script/HTTP/timeout/parse errors). EMPTY is further classified as
+`AUTH_REQUIRED`, `HTTP_BLOCKED`, `NETWORK_ERROR`, `UPSTREAM_ERROR` or
+`NO_MATCH_OR_PARSE` (a possible title mismatch, not a proven runtime defect).
+Summary totals and
 per-scraper diagnostics are copied together; any tokenized full URLs are omitted.
 PASS does not prove actual video playback.
 
