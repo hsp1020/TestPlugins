@@ -132,11 +132,20 @@ internal class ElevatePlayerResizeControl(
                 (height * ratio).roundToInt() to height
             else width to (width / ratio).roundToInt()
         }
-        val params = content.layoutParams as? FrameLayout.LayoutParams ?: return
-        if (params.width != targetW || params.height != targetH || params.gravity != Gravity.CENTER) {
-            content.layoutParams = FrameLayout.LayoutParams(targetW, targetH, Gravity.CENTER)
+        // Keep the full player frame for native pinch zoom, resizing only the video surface.
+        val frameParams = content.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (frameParams.width != ViewGroup.LayoutParams.MATCH_PARENT ||
+            frameParams.height != ViewGroup.LayoutParams.MATCH_PARENT || frameParams.gravity != Gravity.CENTER
+        ) {
+            content.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
+            )
         }
-        // Identical stretching behavior to the native Fill mode; only bounds differ.
+        val surface = view.videoSurfaceView ?: return
+        val params = surface.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (params.width != targetW || params.height != targetH || params.gravity != Gravity.CENTER) {
+            surface.layoutParams = FrameLayout.LayoutParams(targetW, targetH, Gravity.CENTER)
+        }
         view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
     }
 
@@ -145,9 +154,24 @@ internal class ElevatePlayerResizeControl(
         val content = view.findViewById<AspectRatioFrameLayout>(
             androidx.media3.ui.R.id.exo_content_frame
         ) ?: return
-        content.layoutParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
-        )
+        val frameParams = content.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (frameParams.width != ViewGroup.LayoutParams.MATCH_PARENT ||
+            frameParams.height != ViewGroup.LayoutParams.MATCH_PARENT || frameParams.gravity != Gravity.CENTER
+        ) {
+            content.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
+            )
+        }
+        view.videoSurfaceView?.let { surface ->
+            val params = surface.layoutParams as? FrameLayout.LayoutParams
+            if (params != null && (params.width != ViewGroup.LayoutParams.MATCH_PARENT ||
+                    params.height != ViewGroup.LayoutParams.MATCH_PARENT || params.gravity != Gravity.CENTER)
+            ) {
+                surface.layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER
+                )
+            }
+        }
         view.resizeMode = when (host()?.resizeMode ?: DataStoreHelper.resizeMode) {
             1 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
             2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
