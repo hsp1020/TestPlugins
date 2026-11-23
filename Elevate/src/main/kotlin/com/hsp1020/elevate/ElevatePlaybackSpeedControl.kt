@@ -114,7 +114,7 @@ internal class ElevatePlaybackSpeedControl(
         val row = first.parent as? LinearLayout ?: return
         val extra = MaterialButton(ContextThemeWrapper(first.context, R.style.BlackButton)).apply {
             id = View.generateViewId()
-            text = "0.75x"
+            this.text = "0.75x"
             setTextColor(first.textColors)
             setTextSize(TypedValue.COMPLEX_UNIT_PX, first.textSize)
             backgroundTintList = first.backgroundTintList
