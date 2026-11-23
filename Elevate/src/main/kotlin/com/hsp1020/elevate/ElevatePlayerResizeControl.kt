@@ -23,6 +23,9 @@ internal class ElevatePlayerResizeControl(
     private val root: View,
     private val host: () -> PlayerView?
 ) {
+    private val prefs = root.context.getSharedPreferences(
+        ElevateFeaturePrefs.FILE, android.content.Context.MODE_PRIVATE
+    )
     private var mode = -1
     private var button: View? = null
     private var videoView: androidx.media3.ui.PlayerView? = null
@@ -55,7 +58,9 @@ internal class ElevatePlayerResizeControl(
         val target = root.findViewById<View>(R.id.player_resize_btt) ?: return
         if (target === button) return
         detach()
-        mode = (host()?.resizeMode ?: DataStoreHelper.resizeMode).coerceIn(0, 2)
+        val saved = prefs.getInt("PLAYER_RESIZE_MODE", -1)
+        mode = if (saved in 3..6) saved
+            else (host()?.resizeMode ?: DataStoreHelper.resizeMode).coerceIn(0, 2)
         button = target
         target.setOnTouchListener(touchListener)
         target.setOnKeyListener(keyListener)
@@ -101,6 +106,7 @@ internal class ElevatePlayerResizeControl(
                 com.lagradost.cloudstream3.CommonActivity.showToast(label, Toast.LENGTH_SHORT)
             }
         }
+        prefs.edit().putInt("PLAYER_RESIZE_MODE", mode).apply()
         return true
     }
 
