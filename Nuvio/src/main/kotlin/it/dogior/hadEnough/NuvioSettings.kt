@@ -493,45 +493,59 @@ class NuvioSettings(
         return card
     }
 
-    /** Fixture selection is metadata-based; no scraper name or ID exceptions. */
+    /** Choose representative content using manifest genres/description, not scraper IDs. */
     private fun quickJsProbeCases(scraper: NuvioScraper, code: String, settings: String):
         List<NuvioQuickJsEvaluator.RealScraper> {
-        val languages = scraper.languages.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
-        val indian = languages.any { it in setOf("hi", "hin", "ta", "tam", "te", "tel", "bn", "ba") }
-        val anime = scraper.types.any { it.equals("anime", true) } ||
-            scraper.description.contains("anime", true) ||
-            ("ja" in languages && !indian && ("ko" !in languages || "en" in languages))
-        val korean = "ko" in languages && !anime
-        val french = "fr" in languages && !indian && !anime
-        val persian = "pe" in languages || "fa" in languages
+        val langs = scraper.languages.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
+        val desc = scraper.description.lowercase(java.util.Locale.ROOT)
+        val indianLanguages = setOf("hi", "hin", "ta", "tam", "te", "tel", "bn", "ba")
+        val isAnime = scraper.types.any { it.equals("anime", true) } ||
+            Regex("""\banime\b|\bmanga\b""").containsMatchIn(desc) ||
+            (scraper.name.contains("anime", true) && !desc.contains("movies via")) ||
+            ("ja" in langs && desc.contains("tv episodes"))
+        val isKorean = !isAnime && "ko" in langs &&
+            (desc.contains("korean") || desc.contains("asian drama") || "en" !in langs)
+        val isFrench = !isAnime && "fr" in langs &&
+            (desc.contains("french") || desc.contains("france") ||
+                desc.contains("vostfr") || langs.size == 1)
+        val isIndian = !isAnime && langs.any { it in indianLanguages } &&
+            listOf("bollywood", "indian", "hindi", "tamil", "telugu", "desi")
+                .any { desc.contains(it) }
+        val isPersian = "pe" in langs || "fa" in langs
         val (movieId, tvId) = when {
-            korean -> "496243" to "93405" // Parasite / Squid Game
-            anime -> "372058" to "1429" // Your Name / Attack on Titan
-            indian -> "579974" to "79352" // RRR / Sacred Games
-            french -> "77338" to "96677" // Intouchables / Lupin
-            persian -> "60243" to "1399" // A Separation / generic TV fallback
+            isAnime -> "372058" to "1429" // Your Name / Attack on Titan
+            isKorean -> "496243" to "93405" // Parasite / Squid Game
+            isFrench -> "77338" to "96677" // Intouchables / Lupin
+            isIndian -> "579974" to "79352" // RRR / Sacred Games
+            isPersian -> "60243" to "1399" // A Separation / general TV
             else -> "550" to "1399" // Fight Club / Game of Thrones
         }
         val movie = scraper.supports("movie")
         val tv = scraper.supports("tv") || scraper.types.any { it.equals("anime", true) }
-        val firstTv = korean || anime
-        val cases = buildList {
-            if (firstTv && tv) add("tv")
-            if (movie) add("movie")
-            if (!firstTv && tv) add("tv")
-        }
-        val initialMs = minOf(manager.timeoutSeconds, 15) * 1000L
+        val firstTv = isAnime || isKorean || desc.contains("tv episodes")
+        val candidates = buildList {
+            if (firstTv && tv) add("tv" to tvId)
+            if (movie) add("movie" to movieId)
+            if (!firstTv && tv) add("tv" to tvId)
+            // Only after both primary media types are a clean no-match: try a
+            // second content language, without reusing an identical fixture.
+            if (!isAnime && !isIndian && movie && langs.any { it in indianLanguages })
+                add("movie" to "579974")
+            if (!isAnime && !isKorean && tv && "ja" in langs) add("tv" to "1429")
+            if (!isAnime && !isFrench && movie && "fr" in langs) add("movie" to "77338")
+        }.distinct().take(3)
+        val timeoutMs = minOf(manager.timeoutSeconds, 15) * 1000L
         val retryMs = minOf(manager.timeoutSeconds, 45) * 1000L
-        return cases.map { type ->
+        return candidates.map { (type, id) ->
             NuvioQuickJsEvaluator.RealScraper(
                 name = scraper.name,
                 code = code,
                 settingsJson = settings,
-                tmdbId = if (type == "movie") movieId else tvId,
+                tmdbId = id,
                 mediaType = type,
                 season = if (type == "tv") 1 else null,
                 episode = if (type == "tv") 1 else null,
-                timeoutMs = initialMs,
+                timeoutMs = timeoutMs,
                 retryTimeoutMs = retryMs,
             )
         }

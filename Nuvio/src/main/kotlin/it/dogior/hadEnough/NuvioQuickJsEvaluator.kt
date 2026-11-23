@@ -219,13 +219,35 @@ internal object NuvioQuickJsEvaluator {
         val jsErrors = java.util.Collections.synchronizedList(mutableListOf<String>())
         val lastHost = java.util.concurrent.atomic.AtomicReference("none")
         val startedHttp = AtomicInteger()
+        val cancelledHttp = AtomicInteger()
+        val activeHttp = java.util.concurrent.ConcurrentHashMap<Long, Pair<String, Long>>()
+        val durations = java.util.Collections.synchronizedList(mutableListOf<Pair<Long, String>>())
         fun domain(url: String) = runCatching { URI(url).host }.getOrNull() ?: "unknown"
+        fun slowRequests(): String = synchronized(durations) {
+            durations.sortedByDescending { it.first }.take(4).joinToString("; ") { it.second }
+        }
+        fun pendingRequests(): String {
+            val now = android.os.SystemClock.elapsedRealtime()
+            return activeHttp.values.sortedBy { it.second }.take(5).joinToString("; ") {
+                it.first + "=" + (now - it.second) + "ms"
+            }
+        }
         val host = NuvioQuickJsHost(
-            onRequest = { url -> lastHost.set(domain(url)); startedHttp.incrementAndGet() },
-            onResponse = { url, status, error ->
-                requests.add(domain(url) + ": " + (status?.toString() ?: error ?: "error"))
+            onRequest = { id, url, started ->
+                val name = domain(url)
+                lastHost.set(name)
+                startedHttp.incrementAndGet()
+                activeHttp[id] = name to started
+            },
+            onResponse = { id, url, status, error, duration ->
+                activeHttp.remove(id)
+                val name = domain(url)
+                requests.add(name + ": " + (status?.toString() ?: error ?: "error"))
                 if (status != null) statusCodes.add(status)
                 if (error != null) httpErrors.add(error)
+                if (error == "CANCELLED") cancelledHttp.incrementAndGet()
+                durations.add(duration to (name + "=" + duration + "ms(" +
+                    (status?.toString() ?: error ?: "error") + ")"))
             },
         )
         try {
@@ -317,12 +339,22 @@ internal object NuvioQuickJsEvaluator {
             val warnings = synchronized(jsErrors) { jsErrors.take(5).joinToString("; ") }
             val statuses = synchronized(statusCodes) { statusCodes.toList() }
             val errors = synchronized(httpErrors) { httpErrors.joinToString(" ") }
+            // An earlier HTTP 429 can be recovered by a later successful fallback worker.
+            val rateLimitAt = statuses.indexOfLast { it == 429 }
+            val rateLimitUnresolved = rateLimitAt >= 0 &&
+                statuses.drop(rateLimitAt + 1).none { it in 200..299 }
+            val authMissing = listOf(
+                "no token", "missing token", "token not found", "no cookie",
+                "missing cookie", "cookie not found", "please configure", "not configured"
+            ).any { warnings.contains(it, ignoreCase = true) }
             val emptyReason = when {
-                warnings.contains("token", true) || warnings.contains("cookie", true) ||
-                    warnings.contains("configure", true) -> "AUTH_REQUIRED"
-                statuses.any { it == 401 || it == 403 || it == 429 } -> "HTTP_BLOCKED"
-                errors.contains("UnknownHost") || errors.contains("SSL") -> "NETWORK_ERROR"
-                statuses.any { it >= 400 } -> "UPSTREAM_ERROR"
+                authMissing -> "AUTH_REQUIRED"
+                statuses.any { it == 401 || it == 403 } || rateLimitUnresolved -> "HTTP_BLOCKED"
+                errors.contains("Timeout", true) ||
+                    (warnings.contains("error:", true) && warnings.contains("timeout", true)) ->
+                    "NETWORK_TIMEOUT"
+                errors.contains("UnknownHost", true) || errors.contains("SSL", true) -> "NETWORK_ERROR"
+                statuses.any { it >= 400 && it != 429 } -> "UPSTREAM_ERROR"
                 else -> "NO_MATCH_OR_PARSE"
             }
             nextStage("DONE")
@@ -332,10 +364,17 @@ internal object NuvioQuickJsEvaluator {
                 )
                 append(" (links=").append(links).append(", items=").append(array.length()).append(")")
                 if (links == 0 && array.length() == 0) append(" reason=").append(emptyReason)
+                if (rateLimitAt >= 0) append("\nRATE_LIMIT: ")
+                    .append(if (rateLimitUnresolved) "UNRESOLVED" else "RECOVERED")
                 append("\nTIME: ").append(android.os.SystemClock.elapsedRealtime() - startedAt)
                     .append("ms (").append(stageTimes.joinToString(", ")).append(")")
                 append("\nHTTP: ").append(startedHttp.get()).append(" started, ")
-                    .append(requests.size).append(" completed")
+                    .append(requests.size).append(" finished")
+                if (cancelledHttp.get() > 0) append(", ").append(cancelledHttp.get()).append(" cancelled")
+                val slow = slowRequests()
+                if (slow.isNotEmpty()) append("\nHTTP_LATENCY: ").append(slow)
+                val pending = pendingRequests()
+                if (pending.isNotEmpty()) append("\nHTTP_PENDING: ").append(pending)
                 if (hosts.isNotEmpty()) append("\nHOSTS: ").append(hosts)
                 if (samples.isNotEmpty()) append("\nSAMPLES: ").append(samples.joinToString("; "))
                 if (warnings.isNotEmpty()) append("\nJS WARN/ERROR: ").append(warnings)
@@ -347,7 +386,10 @@ internal object NuvioQuickJsEvaluator {
                     " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - startedAt) +
                     " timings=" + stageTimes.joinToString(",") +
                     " http=" + requests.size + "/" + startedHttp.get() +
-                    " lastHost=" + lastHost.get(), e
+                    " cancelled=" + cancelledHttp.get() +
+                    " lastHost=" + lastHost.get() +
+                    " pending=" + pendingRequests() +
+                    " slow=" + slowRequests(), e
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -358,6 +400,8 @@ internal object NuvioQuickJsEvaluator {
                 append(stage).append(": ").append(t.message)
                 append(" | elapsedMs=").append(android.os.SystemClock.elapsedRealtime() - startedAt)
                 append(" | timings=").append(stageTimes.joinToString(","))
+                append(" | pending=").append(pendingRequests())
+                append(" | slow=").append(slowRequests())
                 if (recent.isNotEmpty()) append(" | HTTP: ").append(recent)
                 if (warnings.isNotEmpty()) append(" | JS: ").append(warnings)
             }, t)
@@ -373,39 +417,44 @@ internal object NuvioQuickJsEvaluator {
         val finished = AtomicInteger()
         val reports = Array(tests.size) { "" }
         val categories = Array(tests.size) { "FAIL" }
-        suspend fun run(test: RealScraper): String {
+        // The trace may contain an earlier timeout; verdict uses only the final attempt.
+        suspend fun run(test: RealScraper): Pair<String, String> {
             suspend fun attempt(item: RealScraper): String = try {
                 evaluateReal(item)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (t: Exception) {
-                "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty().take(400)
+                "REAL: FAIL: " + t.javaClass.simpleName + ": " + t.message.orEmpty().take(750)
             }
             val initial = attempt(test)
-            if (!initial.contains("TIMEOUT:") || test.retryTimeoutMs <= test.timeoutMs) return initial
+            if (!initial.contains("TIMEOUT:") || test.retryTimeoutMs <= test.timeoutMs)
+                return initial to initial
             val retried = attempt(test.copy(timeoutMs = test.retryTimeoutMs))
-            return initial + "\nRETRY (" + test.retryTimeoutMs + "ms): " + retried
+            return (initial + "\nRETRY (" + test.retryTimeoutMs + "ms): " + retried) to retried
         }
         coroutineScope {
             tests.mapIndexed { index, variants ->
                 async(Dispatchers.Default) {
                     slots.withPermit {
-                        val first = run(variants[0])
-                        val outcomes = ArrayList<String>(2)
-                        outcomes.add(variants[0].mediaType + " TMDB " + variants[0].tmdbId + ": " + first)
-                        if (!first.contains("REAL: PASS") && variants.size > 1 &&
-                            first.contains("REAL: EMPTY") && first.contains("reason=NO_MATCH_OR_PARSE")) {
-                            val alternative = run(variants[1])
-                            outcomes.add(variants[1].mediaType + " TMDB " +
-                                variants[1].tmdbId + ": " + alternative)
+                        val outcomes = ArrayList<String>(variants.size)
+                        val primary = run(variants[0])
+                        outcomes.add(variants[0].mediaType + " TMDB " + variants[0].tmdbId + ": " +
+                            primary.first)
+                        var finalResult = primary.second
+                        for (i in 1 until variants.size) {
+                            if (!finalResult.startsWith("REAL: EMPTY") ||
+                                !finalResult.contains("reason=NO_MATCH_OR_PARSE")) break
+                            val alternative = run(variants[i])
+                            outcomes.add(variants[i].mediaType + " TMDB " + variants[i].tmdbId +
+                                ": " + alternative.first)
+                            finalResult = alternative.second
                         }
-                        val details = outcomes.joinToString("\n")
-                        reports[index] = details
+                        reports[index] = outcomes.joinToString("\n")
                         categories[index] = when {
-                            details.contains("REAL: PASS") -> "PASS"
-                            details.contains("REAL: INVALID") -> "INVALID"
-                            details.contains("REAL: FAIL") -> "FAIL"
-                            else -> "EMPTY"
+                            finalResult.startsWith("REAL: PASS") -> "PASS"
+                            finalResult.startsWith("REAL: EMPTY") -> "EMPTY"
+                            finalResult.startsWith("REAL: INVALID") -> "INVALID"
+                            else -> "FAIL"
                         }
                         onProgress(finished.incrementAndGet(), tests.size, variants[0].name)
                     }

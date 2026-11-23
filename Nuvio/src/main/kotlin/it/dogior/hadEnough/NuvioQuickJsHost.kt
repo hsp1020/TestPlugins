@@ -10,11 +10,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.security.SecureRandom
+import java.util.concurrent.atomic.AtomicLong
 
 /** P0-2 QuickJS host bindings. Tests inject a deterministic transport. */
 internal class NuvioQuickJsHost(
-    private val onRequest: ((String) -> Unit)? = null,
-    private val onResponse: ((String, Int?, String?) -> Unit)? = null,
+    private val onRequest: ((Long, String, Long) -> Unit)? = null,
+    private val onResponse: ((Long, String, Int?, String?, Long) -> Unit)? = null,
     private val request: suspend (String, String, Map<String, String>, String?, Boolean) -> NuvioHttpResult =
         { url, method, headers, body, redirects ->
             withContext(Dispatchers.IO) {
@@ -22,6 +23,8 @@ internal class NuvioQuickJsHost(
             }
         },
 ) {
+    private val requestIds = AtomicLong()
+
     fun register(qjs: QuickJs, settingsJson: String) {
         val dom = NuvioDom()
         qjs.function("__get_scraper_settings") { settingsJson }
@@ -52,17 +55,23 @@ internal class NuvioQuickJsHost(
             val rawHeaders = JSONObject(a.getOrNull(2)?.toString() ?: "{}")
             val headers = LinkedHashMap<String, String>()
             for (key in rawHeaders.keys()) headers[key] = rawHeaders.optString(key)
-            onRequest?.invoke(url)
+            val id = requestIds.incrementAndGet()
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            onRequest?.invoke(id, url, startedAt)
             val result = try {
                 request(url, method, headers, a.getOrNull(3)?.toString(),
                     a.getOrNull(4)?.toString() != "manual")
             } catch (e: kotlinx.coroutines.CancellationException) {
+                onResponse?.invoke(id, url, null, "CANCELLED",
+                    android.os.SystemClock.elapsedRealtime() - startedAt)
                 throw e
             } catch (t: Throwable) {
-                onResponse?.invoke(url, null, t.javaClass.simpleName)
+                onResponse?.invoke(id, url, null, t.javaClass.simpleName,
+                    android.os.SystemClock.elapsedRealtime() - startedAt)
                 throw t
             }
-            onResponse?.invoke(url, result.status, null)
+            onResponse?.invoke(id, url, result.status, null,
+                android.os.SystemClock.elapsedRealtime() - startedAt)
             JSONObject().apply {
                 put("status", result.status)
                 put("statusText", result.statusText)

@@ -68,11 +68,17 @@ Sample TMDB inputs are:
 - French: Intouchables (movie 77338), Lupin (TV 96677 S01E01)
 - Persian: A Separation (movie 60243); otherwise the general TV sample.
 
-Anime and Korean sources try TV first. Others try movie first. If the
-first probe returns **EMPTY reason=NO_MATCH_OR_PARSE**, another declared
-media type is tried once. A PASS or an established auth/network/HTTP block
-does not trigger a second media-type test. These are representative probes,
-not a guarantee that a particular title is indexed by every site.
+Genres and explicit content descriptions now take precedence over a broad
+language list: an English/Hindi bilingual source is not automatically assumed
+to be Indian-only, and an anime-like scraper name associated with a movie-only
+description is not automatically treated as an anime catalog. Korean drama and
+anime sources try TV first; others normally try movie first.
+
+Only **EMPTY reason=NO_MATCH_OR_PARSE** triggers another candidate.
+Up to three unique movie/TV/secondary-language samples are tried per scraper,
+stopping on PASS, a network failure, an authentication problem, or any other
+classified outcome. No scraper ID-specific exclusions are used. A missing match
+for these representative works does not prove that the site lacks content.
 
 The diagnostic starts with **15 seconds** (or a lower saved scraper timeout).
 Only a **TIMEOUT** triggers a conditional second attempt up to **45 seconds**,
@@ -80,9 +86,15 @@ and only if the saved timeout permits it. This avoids retrying HTTP 403/429,
 missing tokens and unrelated failures. At most **10 scraper runtimes** execute
 concurrently, with no background polling.
 
-The test now reports elapsed time and stage timings
-(`BOOTSTRAP`, `SCRIPT_COMPILE`, `GETSTREAMS`, `RESULT_PARSE`), plus
-started/completed HTTP requests and the last request hostname at timeout.
+The test reports elapsed time and stage timings
+(`BOOTSTRAP`, `SCRIPT_COMPILE`, `GETSTREAMS`, `RESULT_PARSE`).
+It also tracks each HTTP request with an ID and timestamps, recording
+started/finished counts, cancellations, up to four slowest completed requests
+(`HTTP_LATENCY`), and up to five still-pending request hosts and ages
+(`HTTP_PENDING`). Timeout diagnostics include the last host, active request
+ages, and slow requests. This is intended to distinguish network waits from JS
+execution stalls, especially when requests are still running when the test is
+cancelled. It does not identify the root cause before a fresh device run.
 Promise-based scripts use the NuvioTV-style native completion callback
 instead of coercing a Promise to String; `window`, `self`, `global`
 and a cryptographic `getRandomValues` bridge support browser-oriented code.
@@ -91,8 +103,14 @@ and a cryptographic `getRandomValues` bridge support browser-oriented code.
 Result categories: `REAL: PASS` (at least one URL/infoHash),
 `REAL: EMPTY` (no streams), `REAL: INVALID` (items without valid links),
 and `REAL: FAIL` (script/HTTP/timeout/parse errors). EMPTY is further classified as
-`AUTH_REQUIRED`, `HTTP_BLOCKED`, `NETWORK_ERROR`, `UPSTREAM_ERROR` or
-`NO_MATCH_OR_PARSE` (a possible title mismatch, not a proven runtime defect).
+`AUTH_REQUIRED` (explicitly missing token/cookie), `HTTP_BLOCKED`,
+`NETWORK_TIMEOUT`, `NETWORK_ERROR`, `UPSTREAM_ERROR` or
+`NO_MATCH_OR_PARSE` (possible title mismatch, not a proven runtime defect).
+An earlier 429 followed by HTTP success is marked `RATE_LIMIT: RECOVERED`,
+not automatically a final HTTP block. An `unexpected token` parsing error
+alone is not treated as a missing authentication token.
+When a timeout is retried, the batch classification uses the **final retry**
+outcome rather than the earlier timeout; the trace retains both attempts.
 Summary totals and
 per-scraper diagnostics are copied together; any tokenized full URLs are omitted.
 PASS does not prove actual video playback.
