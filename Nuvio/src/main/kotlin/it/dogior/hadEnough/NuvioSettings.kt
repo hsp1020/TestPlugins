@@ -192,6 +192,12 @@ class NuvioSettings(
             12f, alpha = 0.65f
         ))
         container.addView(button("RUN P0-1 TEST", GREEN) { runQuickJsTest(true) })
+        container.addView(label("P0-2 QuickJS host API test", 13f, bold = true, topDp = 12))
+        container.addView(label(
+            "Offline tests of fetch, DOM, crypto, modules, settings and cancellation.",
+            12f, alpha = 0.65f
+        ))
+        container.addView(button("RUN P0-2 TEST", GREEN) { runQuickJsTest(false, true) })
 
         container.addView(label("Scraper timeout (seconds)", 13f, bold = true, topDp = 8))
         container.addView(
@@ -241,16 +247,16 @@ class NuvioSettings(
         })
     }
 
-    private fun runQuickJsTest(adapterTest: Boolean) {
+    private fun runQuickJsTest(adapterTest: Boolean, hostTest: Boolean = false) {
         if (busy) return
         busy = true
         uiScope.launch {
             try {
                 val report = withContext(Dispatchers.IO) {
-                    NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath, adapterTest)
+                    NuvioQuickJsProbe.run(ctx.applicationContext, pluginFilePath, adapterTest, hostTest)
                 }
                 AlertDialog.Builder(ctx)
-                    .setTitle(if (adapterTest) "QuickJS P0-1 results" else "QuickJS test results")
+                    .setTitle(if (hostTest) "QuickJS P0-2 results" else if (adapterTest) "QuickJS P0-1 results" else "QuickJS test results")
                     .setMessage(report)
                     .setPositiveButton("OK", null)
                     .setNeutralButton("COPY") { _, _ ->

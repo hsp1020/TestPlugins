@@ -1602,3 +1602,8 @@ function __nvTranspile(src) {
 """
 
 internal val NUVIO_PRELUDE: String = listOf(PART_CORE, PART_WEB, PART_CHEERIO, PART_CRYPTO, PART_MODULES, PART_ASYNC).joinToString("\n")
+
+
+// QuickJS reuses Nuvio's feature modules without Rhino's Promise shim or transpiler.
+internal val NUVIO_QUICKJS_HOST_PRELUDE: String =
+    listOf(PART_WEB, PART_CHEERIO, PART_CRYPTO, PART_MODULES).joinToString("\n")

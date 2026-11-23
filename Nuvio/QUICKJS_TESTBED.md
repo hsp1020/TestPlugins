@@ -1,4 +1,4 @@
-# QuickJS P0-0 / P0-1 testbed (Nuvio only)
+# QuickJS P0-0 / P0-1 / P0-2 testbed (Nuvio only)
 
 This diagnostic does **not** replace Rhino or modify scraper execution.
 
@@ -23,6 +23,25 @@ The test checks the installed .cs3 ZIP for `lib/<device-ABI>/libquickjs.so`, ext
 P0-1 creates a QuickJS runtime and an async `module.exports.getStreams` function. It checks both movie (TMDB 550, null season/episode) and TV (TMDB 1399, season 2 episode 3), awaits responses, and validates the JSON output, arguments, URL and quality. The stream URL uses the reserved `example.invalid` domain. **No HTTP, actual scraper or CloudStream stream lookup is performed.**
 
 The original **RUN QUICKJS TEST** remains the independent P0-0 test, and Rhino remains in use for real scrapers. P0-1 does not validate fetch, DOM, crypto, require, settings, or real scraper compatibility.
+
+## P0-2 QuickJS host API test
+
+1. Install/update the Nuvio .cs3 from the standard TestPlugins-build publication.
+2. Open **Nuvio → Settings → P0-2 QuickJS host API test**.
+3. Tap **RUN P0-2 TEST**, then **COPY** in the result dialog.
+4. Expect **PACKAGE: PASS**, **DEX: PASS**, **HOST: PASS**. Repeat after reopening settings.
+
+The test registers native QuickJS bindings and reuses existing NuvioDom, NuvioCrypto and
+JavaScript axios/cheerio/crypto-js/require modules. It checks asynchronous fetch (POST,
+headers, status and JSON), axios GET, DOM selection, SHA-256, SCRAPER_SETTINGS,
+unknown-module errors, rejected HTTP calls and coroutine cancellation.
+
+HTTP responses are injected from a deterministic in-memory fixture using the reserved
+`example.invalid` host. No external HTTP request or real scraper is run in the test.
+The bridge has a transport backed by the existing NuvioHttp for later integration,
+but real network behavior and cancellation of in-flight native HTTP calls are NOT yet verified.
+Neither full Nuvio API parity nor actual scraper compatibility is established until P0-3.
+The original P0-0 and P0-1 tests remain available, and Rhino scraper execution is unchanged.
 
 ## How to collect failure details
 
