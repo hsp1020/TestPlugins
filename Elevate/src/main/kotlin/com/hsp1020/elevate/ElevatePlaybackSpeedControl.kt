@@ -1,14 +1,12 @@
 package com.hsp1020.elevate
 
 import android.app.Dialog
-import android.graphics.Typeface
 import android.view.ContextThemeWrapper
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.util.TypedValue
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
 import com.lagradost.cloudstream3.R
@@ -117,9 +115,9 @@ internal class ElevatePlaybackSpeedControl(
         val extra = MaterialButton(ContextThemeWrapper(first.context, R.style.BlackButton)).apply {
             id = View.generateViewId()
             this.text = "0.75x"
+            // Copy the native TextPaint, including font face, weight, shaping and spacing.
+            paint.set(first.paint)
             setTextColor(first.textColors)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, first.textSize)
-            setTypeface(first.typeface, Typeface.BOLD)
             backgroundTintList = first.backgroundTintList
             cornerRadius = first.cornerRadius
             strokeColor = first.strokeColor
