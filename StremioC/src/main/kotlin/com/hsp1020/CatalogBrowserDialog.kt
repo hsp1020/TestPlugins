@@ -1562,6 +1562,12 @@ internal class CatalogBrowserDialog(
             insets
         }
         grid.spanCount = activity.getSpanCount(false)
+        (grid.layoutManager as? GridLayoutManager)?.let { manager ->
+            manager.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                override fun getSpanSize(position: Int): Int =
+                    if ((grid.adapter as? FolderCardAdapter)?.rows == true) manager.spanCount else 1
+            }
+        }
         root.addView(content, CoordinatorLayout.LayoutParams(-1, -1).apply {
             behavior = AppBarLayout.ScrollingViewBehavior()
         })
@@ -2204,9 +2210,10 @@ internal class CatalogBrowserDialog(
 
     private fun showCollectionCatalog() {
         updateCollectionArtwork()
-        grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, _ ->
+        val rows = collectionFolders.firstOrNull()?.rows == true
+        grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid = if (rows) null else grid, rows = rows) { folder, _ ->
             if (!closed && !inlineActive && collectionLevel == null)
-                openCollection(catalog?.name ?: catalog?.id.orEmpty(), collectionFolders.toList(), folder)
+                openCollection(catalog?.name ?: catalog?.id.orEmpty(), collectionFolders.toList(), folder, forceGrid = rows)
         }
     }
 

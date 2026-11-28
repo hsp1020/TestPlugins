@@ -158,7 +158,7 @@ private fun Context.collectionDp(value: Int) = (value * resources.displayMetrics
 internal class FolderCardAdapter(
     private val folders: List<StremioCollectionFolder>,
     private val grid: AutofitRecyclerView? = null,
-    private val rows: Boolean = false,
+    val rows: Boolean = false,
     private val select: (StremioCollectionFolder, View) -> Unit
 ) : RecyclerView.Adapter<FolderCardAdapter.Holder>() {
     class Holder(val root: View, rows: Boolean) : RecyclerView.ViewHolder(root) {
