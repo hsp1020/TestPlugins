@@ -777,7 +777,6 @@ internal class CatalogBrowserDialog(
     private fun openCollectionRow(folder: StremioCollectionFolder) {
         val level = collectionLevel?.takeIf { it.rows } ?: return
         if (!closed && !inlineActive) {
-            android.util.Log.i("StremioCollection", "ROW_OPEN folder=${folder.id.hashCode()} forceGrid=true")
             openCollection(level.title, level.folders, folder, true)
         }
     }
@@ -2349,7 +2348,6 @@ internal class CatalogBrowserDialog(
     private fun configureCollectionLevel(level: CollectionLevel, folder: StremioCollectionFolder) {
         level.rows = folder.rows && !level.forceGrid
         level.showAll = folder.showAll
-        android.util.Log.i("StremioCollection", "LAYOUT folder=${folder.id.hashCode()} export=${folder.presentation.viewMode} rows=${folder.rows} forceGrid=${level.forceGrid} tv=${isLayout(TV)} result=${if (level.rows) "ROWS_PREVIEW" else "TABBED_GRID"} showAll=${level.showAll}")
     }
 
     private fun updateCollectionArtwork() {
@@ -2501,12 +2499,11 @@ internal class CatalogBrowserDialog(
             retry.visibility = View.GONE
             if (previewLevel !== level) {
                 previewLevel = level
-                collectionRows.adapter = CollectionPreviewAdapter(level.folders.map { folder ->
+                collectionRows.adapter = FolderCardAdapter(level.folders.map { folder ->
                     collectionPages[folder.id]?.detail ?: folder
-                }, ::openCollectionRow)
+                }, rows = true) { folder, _ -> openCollectionRow(folder) }
                 if (restore && level.rowScroll != null) collectionRows.layoutManager?.onRestoreInstanceState(level.rowScroll)
                 else collectionRows.scrollToPosition(0)
-                android.util.Log.i("StremioCollection", "RENDER_ROWS folders=${level.folders.size} artworkOnly=true")
             }
             initialProgress(false)
             pageProgress(false)
