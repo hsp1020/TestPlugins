@@ -1,11 +1,13 @@
 package com.ohli24
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CloudStreamApp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -32,6 +34,8 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLDecoder
@@ -39,7 +43,17 @@ import java.net.URLEncoder
 
 class OHLI24 : MainAPI() {
 
-    override var mainUrl = "https://ani.ohli24.com"
+    companion object {
+        private const val DEFAULT_DOMAIN = "https://a101.ohli24.com"
+        private const val PREFS_NAME = "OHLI24_Domain_Cache"
+        private const val PREF_KEY = "current_domain"
+        private val domainPattern = Regex("^https?://(?:ani|a\\d+)\\.ohli24\\.com(?=/|\\?|#|$)", RegexOption.IGNORE_CASE)
+        private val domainMutex = Mutex()
+        private var currentDomain = DEFAULT_DOMAIN
+        private var isDomainChecked = false
+    }
+
+    override var mainUrl = DEFAULT_DOMAIN
     override var name = "OHLI24"
     override val hasMainPage = true
     override var lang = "ko"
@@ -54,13 +68,56 @@ class OHLI24 : MainAPI() {
         "bbs/board.php?bo_table=theater" to "극장판"
     )
 
-    private val headers = mapOf(
+    private val headers get() = mapOf(
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer" to "$mainUrl/"
     )
 
+    private suspend fun checkAndUpdateDomain() = domainMutex.withLock {
+        if (!isDomainChecked) {
+            val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            currentDomain = prefs?.getString(PREF_KEY, null)
+                ?.takeIf { domainPattern.matches(it) } ?: DEFAULT_DOMAIN
+
+            var found = probeDomain(currentDomain, 5L)
+            if (found == null) {
+                val start = Regex("a(\\d+)\\.ohli24\\.com").find(currentDomain)
+                    ?.groupValues?.get(1)?.toIntOrNull() ?: 101
+                for (batch in (start + 1..start + 100).chunked(5)) {
+                    found = coroutineScope {
+                        batch.map { number ->
+                            async { probeDomain("https://a$number.ohli24.com", 3L) }
+                        }.awaitAll().firstOrNull { it != null }
+                    }
+                    if (found != null) break
+                }
+            }
+            if (found != null) {
+                currentDomain = found
+                prefs?.edit()?.putString(PREF_KEY, found)?.apply()
+            }
+            isDomainChecked = true
+        }
+        mainUrl = currentDomain
+    }
+
+    private suspend fun probeDomain(domain: String, timeout: Long): String? {
+        return try {
+            val res = app.get("$domain/", headers = headers + ("Referer" to "$domain/"), timeout = timeout)
+            val finalDomain = domainPattern.find(res.url)?.value?.replace("http://", "https://")
+            if (res.isSuccessful && finalDomain != null &&
+                res.document.selectFirst("meta[property=og:site_name]")?.attr("content").equals("OHLI24", true) &&
+                res.document.selectFirst("script[data-page=app]") != null
+            ) finalDomain else null
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            null
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        checkAndUpdateDomain()
         if (request.data == "__popular__") {
             val items = if (page == 1) getPopular() else emptyList()
             return newHomePageResponse(
@@ -105,6 +162,7 @@ class OHLI24 : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        checkAndUpdateDomain()
         val encoded = URLEncoder.encode(query, "UTF-8")
         val doc = app.get(
             "$mainUrl/bbs/search.php?srows=24&gr_id=&sfl=wr_subject&stx=$encoded",
@@ -142,8 +200,10 @@ class OHLI24 : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = headers, timeout = 100).document
-        doc.setBaseUri(url)
+        checkAndUpdateDomain()
+        val targetUrl = absoluteUrl(url)
+        val doc = app.get(targetUrl, headers = headers, timeout = 100).document
+        doc.setBaseUri(targetUrl)
 
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBeforeLast(" - 애니24")?.trim()
@@ -163,7 +223,7 @@ class OHLI24 : MainAPI() {
         val ageRating = info["등급"]?.takeIf { it.isNotBlank() }
         val plot = doc.selectFirst(".view-story .view-stocon")?.text()?.trim().orEmpty()
 
-        val episodes = loadAllEpisodes(url, doc).map { item ->
+        val episodes = loadAllEpisodes(targetUrl, doc).map { item ->
             newEpisode(item.url) {
                 name = item.name
                 episode = item.number
@@ -318,7 +378,8 @@ class OHLI24 : MainAPI() {
     private fun absoluteUrl(raw: String): String {
         val value = raw.trim()
         if (value.isBlank()) return ""
-        return runCatching { URI("$mainUrl/").resolve(value).toString() }.getOrDefault(value)
+        return runCatching { URI("$mainUrl/").resolve(value).toString() }
+            .getOrDefault(value).replaceFirst(domainPattern, mainUrl)
     }
 
     private fun routeText(raw: String, route: String): String {
@@ -384,7 +445,9 @@ class OHLI24 : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (data.isBlank()) return false
-        val doc = app.get(data, headers = headers, timeout = 20).document
+        checkAndUpdateDomain()
+        val targetData = absoluteUrl(data)
+        val doc = app.get(targetData, headers = headers, timeout = 20).document
         var player = sequenceOf(
             doc.selectFirst("iframe[src]")?.attr("src"),
             doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
@@ -394,7 +457,7 @@ class OHLI24 : MainAPI() {
             }?.attr("href")
         ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
             ?.let(::absoluteUrl).orEmpty()
-        if (player.isBlank()) player = findVideoIframe(data).orEmpty()
+        if (player.isBlank()) player = findVideoIframe(targetData).orEmpty()
         if (player.isBlank()) return false
 
         if (player.contains("cdndania.com/video/", true)) {
