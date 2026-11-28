@@ -13,7 +13,7 @@ internal enum class ElevateActorSource { TMDB, ANILIST_STAFF, ANILIST_CHARACTER 
 /** AniList IDs are kept separate from TMDB IDs, including the secondary voice actor. */
 internal object ElevateAniListActors {
     private const val PERSON = "id name { userPreferred full native } image { large medium }"
-    private const val MEDIA = "id type format title { userPreferred romaji english native } coverImage { large medium } startDate { year month day } popularity"
+    private const val MEDIA = "id type format title { userPreferred romaji english native } coverImage { large medium } startDate { year month day } popularity status"
     private const val STAFF = "pageInfo { hasNextPage } edges { role node { $PERSON } }"
 
     private fun JSONObject.string(key: String): String? =
@@ -170,6 +170,7 @@ internal object ElevateAniListActors {
                     })
                     put(if (movie) "release_date" else "first_air_date", date(media.optJSONObject("startDate")))
                     put("popularity", media.optInt("popularity"))
+                    put("status", media.string("status"))
                     put("credit_role", role)
                 })
             }

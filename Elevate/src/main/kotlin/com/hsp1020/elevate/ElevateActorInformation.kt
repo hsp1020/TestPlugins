@@ -223,7 +223,8 @@ internal object ElevateActorInformation {
         val date: String?,
         val popularity: Double,
         val anilist: Boolean = false,
-        val role: String? = null
+        val role: String? = null,
+        val status: String? = null
     )
     private fun credits(json: JSONObject, preferCrew: Boolean, anilist: Boolean = false): List<Credit> {
         val primary = json.optJSONArray(if (preferCrew) "crew" else "cast") ?: JSONArray()
@@ -245,7 +246,8 @@ internal object ElevateActorInformation {
                 .takeIf { if (anilist) it.matches(Regex("[0-9]{4}(-[0-9]{2}){0,2}"))
                     else it.length == 10 && it[4] == '-' && it[7] == '-' }
             val credit = Credit(id, media, title, poster, date, value.optDouble("popularity", 0.0),
-                anilist, value.optString("credit_role").takeIf { it.isNotBlank() && it != "null" })
+                anilist, value.optString("credit_role").takeIf { it.isNotBlank() && it != "null" },
+                if (anilist) value.optString("status").takeIf { it.isNotBlank() && it != "null" } else null)
             val k = media + ":" + id
             val previous = unique[k]
             if (previous == null || credit.popularity > previous.popularity) unique[k] = credit
@@ -909,10 +911,16 @@ internal object ElevateActorInformation {
                         }
                         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                         val popular = all.sortedByDescending(Credit::popularity)
-                        val latest = all.filter { item -> item.date != null && item.date <= today }
-                            .sortedByDescending(Credit::date)
-                        val upcoming = all.filter { item -> item.date != null && item.date > today }
-                            .sortedBy(Credit::date)
+                        val latest = all.filter { item ->
+                            if (anilist) item.status == "RELEASING" || item.status == "FINISHED" ||
+                                item.status == "HIATUS"
+                            else item.date != null && item.date <= today
+                        }.sortedByDescending(Credit::date)
+                        // Nullable dates sort first: unscheduled AniList titles precede dated premieres.
+                        val upcoming = all.filter { item ->
+                            if (anilist) item.status == "NOT_YET_RELEASED"
+                            else item.date != null && item.date > today
+                        }.sortedBy(Credit::date)
                         if (all.isEmpty()) filmArea.addView(label("No credits available."))
                         val preloadSections = mutableListOf<() -> Unit>()
                         fun preparePosters(entries: List<Credit>, shown: Int) {
