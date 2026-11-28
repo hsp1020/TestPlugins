@@ -48,6 +48,8 @@ import android.os.Looper
 import android.view.ViewTreeObserver
 import android.widget.ImageView
 import coil3.result
+import coil3.dispose
+import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
@@ -751,6 +753,19 @@ internal class CatalogBrowserDialog(
     private val collectionLimit = Semaphore(4)
     private var collectionCatalogMore = false
     private var collectionCatalogScroll: Parcelable? = null
+    private val collectionBackdrop = ImageView(activity).apply {
+        scaleType = ImageView.ScaleType.CENTER_CROP
+        alpha = 0.18f
+        visibility = View.GONE
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private val collectionLogo = ImageView(activity).apply {
+        scaleType = ImageView.ScaleType.FIT_START
+        visibility = View.GONE
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private var collectionBackdropUrl: String? = null
+    private var collectionLogoUrl: String? = null
     private val collectionHeader = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
@@ -922,6 +937,7 @@ internal class CatalogBrowserDialog(
         inlineRetryVisibility = retry.visibility
         inlineSelectors.forEach { it.visibility = View.GONE }
         collectionHeader.visibility = View.GONE
+        collectionBackdrop.visibility = View.GONE
         collectionRows.visibility = View.GONE
         grid.visibility = View.INVISIBLE
         inlineResults.visibility = View.VISIBLE
@@ -948,6 +964,7 @@ internal class CatalogBrowserDialog(
         inlineEmpty.visibility = View.GONE
         updateCollectionSelectors()
         collectionHeader.visibility = if (collectionLevel?.configured == true) View.VISIBLE else View.GONE
+        updateCollectionArtwork()
         grid.visibility = if (initialSkeleton || collectionLevel?.rows == true) View.INVISIBLE else View.VISIBLE
         collectionRows.visibility = if (!initialSkeleton && collectionLevel?.rows == true) View.VISIBLE else View.GONE
         retry.visibility = inlineRetryVisibility
@@ -989,6 +1006,7 @@ internal class CatalogBrowserDialog(
     private var pendingCatalog = initialCatalog
     private var pendingGenre = initialCatalog?.genre
     private var pendingHome = initialHome?.takeIf { it.target == initialCatalog }
+    private val refreshedCollectionProviders = mutableSetOf<StremioC>()
     private var fetchingCatalogs = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
@@ -1532,6 +1550,7 @@ internal class CatalogBrowserDialog(
             isFocusable = false
         }
         val content = FrameLayout(activity).apply {
+            addView(collectionBackdrop, FrameLayout.LayoutParams(-1, -1))
             addView(grid, FrameLayout.LayoutParams(-1, -1))
             collectionRows.adapter = collectionRowAdapter
             addView(collectionRows, FrameLayout.LayoutParams(-1, -1))
@@ -1643,6 +1662,8 @@ internal class CatalogBrowserDialog(
             collectionRows.adapter = null
             collectionPages.clear()
             collectionParents.clear()
+            collectionBackdrop.dispose()
+            collectionLogo.dispose()
             thumbnailRatios.close()
             grid.adapter = null
             onDismiss()
@@ -1716,6 +1737,7 @@ internal class CatalogBrowserDialog(
         items.clear()
         collectionFolders.clear()
         clearCollectionMode()
+        updateCollectionArtwork()
         if (grid.adapter !== adapter) grid.adapter = adapter
         seen.clear()
         pageSignatures.clear()
@@ -1912,6 +1934,8 @@ internal class CatalogBrowserDialog(
         chosen = true
         hasNext = true
         if (next.catalog.type.equals("collection", true)) {
+            if (refreshedCollectionProviders.add(next.provider) && pendingHome == null)
+                next.provider.invalidateCollectionExport()
             val home = pendingHome?.takeIf { snapshot ->
                 snapshot.folders.isNotEmpty() && snapshot.nextSkip > 0 &&
                     snapshot.target.type == next.catalog.type && snapshot.target.catalogId == next.catalog.id &&
@@ -2204,6 +2228,7 @@ internal class CatalogBrowserDialog(
     }
 
     private fun showCollectionCatalog() {
+        updateCollectionArtwork()
         grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, _ ->
             if (!closed && !inlineActive && collectionLevel == null)
                 openCollection(catalog?.name ?: catalog?.id.orEmpty(), collectionFolders.toList(), folder)
@@ -2255,6 +2280,7 @@ internal class CatalogBrowserDialog(
         collectionHeader.removeAllViews()
         renderedCollectionLevel = null
         collectionTabKeys.clear()
+        updateCollectionArtwork()
         retry.text = "Retry"
         collectionRows.visibility = View.GONE
         collectionRowAdapter.submitList(emptyList())
@@ -2284,7 +2310,7 @@ internal class CatalogBrowserDialog(
         val detail = state.detail
         if (detail != null && (previous != null || !collectionCatalogMore)) {
             level.configured = true
-            level.rows = detail.rows && !forceGrid
+            level.rows = collectionUsesRows(detail) && !forceGrid
             level.showAll = detail.showAll
             showCollectionContent(restore = true)
             if (items.isEmpty() && hasNext) requestCollectionContent()
@@ -2345,13 +2371,39 @@ internal class CatalogBrowserDialog(
         val key: String, val title: String, val selected: Boolean, val action: () -> Unit
     )
 
+    private fun collectionUsesRows(folder: StremioCollectionFolder) =
+        folder.rows || folder.presentation.followLayout && isLayout(TV)
+
+    private fun updateCollectionArtwork() {
+        val level = collectionLevel
+        val folder = selectedFolderPages()?.let { it.detail ?: it.summary }
+        val presentation = folder?.presentation ?: level?.folders?.firstOrNull()?.presentation
+        val backdrop = if (level == null) collectionFolders.firstOrNull()?.presentation?.backdrop
+            else folder?.backdrop ?: presentation?.backdrop
+        val logo = folder?.logo
+        fun image(view: ImageView, previous: String?, url: String?): String? {
+            if (previous != url) {
+                view.dispose()
+                view.setImageDrawable(null)
+                if (url != null) view.loadImage(url)
+            }
+            view.visibility = if (url != null && !inlineActive) View.VISIBLE else View.GONE
+            return url
+        }
+        collectionBackdropUrl = image(collectionBackdrop, collectionBackdropUrl, backdrop)
+        collectionLogoUrl = image(collectionLogo, collectionLogoUrl, logo)
+    }
+
     private fun renderCollectionHeader() {
         val level = collectionLevel ?: return
         updateCollectionSelectors()
         // Layout and Show All are known only after the first folder metadata arrives.
         // Don't show a provisional tab strip that would need to be rebuilt a moment later.
         collectionHeader.visibility = if (inlineActive || !level.configured) View.GONE else View.VISIBLE
-        if (!level.configured) return
+        if (!level.configured) {
+            updateCollectionArtwork()
+            return
+        }
         if (renderedCollectionLevel !== level) {
             renderedCollectionLevel = level
             collectionTabKeys.clear()
@@ -2362,6 +2414,7 @@ internal class CatalogBrowserDialog(
                 applyStremioCNativeFont(bold = true, header = true)
                 setPadding(dp(12), dp(6), dp(12), dp(6))
             })
+            collectionHeader.addView(collectionLogo, LinearLayout.LayoutParams(dp(180), dp(52)).apply { marginStart = dp(12) })
             repeat(3) {
                 collectionHeader.addView(HorizontalScrollView(activity).apply {
                     isHorizontalScrollBarEnabled = false
@@ -2373,8 +2426,11 @@ internal class CatalogBrowserDialog(
                 }, LinearLayout.LayoutParams(-1, -2))
             }
         }
+        val presentation = level.folders.firstOrNull()?.presentation
+        collectionHeader.getChildAt(0).visibility = if (collectionParents.isEmpty() && presentation?.hideTitle == true) View.GONE else View.VISIBLE
+        updateCollectionArtwork()
         fun tabs(slot: Int, entries: List<CollectionTab>) {
-            val scroll = collectionHeader.getChildAt(slot + 1) as HorizontalScrollView
+            val scroll = collectionHeader.getChildAt(slot + 2) as HorizontalScrollView
             val strip = scroll.getChildAt(0) as LinearLayout
             val keys = entries.map { it.key to it.title }
             val rebuild = collectionTabKeys[slot] != keys
@@ -2398,7 +2454,10 @@ internal class CatalogBrowserDialog(
             var selectedView: View? = null
             entries.forEachIndexed { index, entry ->
                 val tab = strip.getChildAt(index) as MaterialButton
-                tab.setOnClickListener { entry.action() }
+                tab.setOnClickListener {
+                    entry.action()
+                    if (tab.parent === strip && renderedCollectionLevel === level) scroll.scrollTo(tab.left, 0)
+                }
                 if (rebuild || tab.isSelected != entry.selected) {
                     tab.isSelected = entry.selected
                     val fonts = tab.tag as? Pair<*, *>
@@ -2412,7 +2471,7 @@ internal class CatalogBrowserDialog(
                 }
                 if (entry.selected) selectedView = tab
             }
-            // Only place the initial selection on a new row; ordinary tab clicks never scroll it.
+            // New rows position the initial selection; clicks align the existing row immediately.
             if (rebuild) selectedView?.let { tab ->
                 scroll.doOnNextLayout {
                     if (renderedCollectionLevel === level && tab.parent === strip)
@@ -2456,7 +2515,7 @@ internal class CatalogBrowserDialog(
 
     private fun showCollectionContent(restore: Boolean = false, header: Boolean = true) {
         val level = collectionLevel ?: return
-        if (header) renderCollectionHeader()
+        if (header) renderCollectionHeader() else updateCollectionArtwork()
         val state = selectedFolderPages()
         val active = if (level.rows) level.folders.map(::pages)
             else if (level.selected == null) allFolderPages(level) else listOfNotNull(state)
@@ -2550,7 +2609,7 @@ internal class CatalogBrowserDialog(
                     val state = selectedFolderPages() ?: return@launch
                     state.prepare(source, collectionLimit)
                     val detail = requireNotNull(state.detail)
-                    level.rows = detail.rows && !level.forceGrid
+                    level.rows = collectionUsesRows(detail) && !level.forceGrid
                     level.showAll = detail.showAll
                     // Retain the catalog cursor separately from media pagination.
                     if (collectionParents.isEmpty() && collectionCatalogMore) {
@@ -2645,6 +2704,8 @@ internal data class CatalogHomeSnapshot(
 internal class CatalogHomeEntryHook(
     private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit,
     private val onPreviewView: (TextView?) -> Unit,
+    private val onNativeRowAttached: (RecyclerView) -> Unit,
+    private val onNativeRowDetached: (View) -> Unit,
     private val onPhoneHero: (RecyclerView?) -> Unit
 ) {
     private val rows = HashMap<RecyclerView, Row>()
@@ -2659,8 +2720,12 @@ internal class CatalogHomeEntryHook(
     }
 
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
-        override fun onChildViewAttachedToWindow(view: View) { bindRow(view) }
+        override fun onChildViewAttachedToWindow(view: View) {
+            bindRow(view)
+            master?.let(onNativeRowAttached)
+        }
         override fun onChildViewDetachedFromWindow(view: View) {
+            onNativeRowDetached(view)
             view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
                 ?.let { rows.remove(it)?.dispose() }
         }

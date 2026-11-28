@@ -2506,25 +2506,53 @@ open class StremioC(
         } else getManifest()
     }
 
+    private val collectionExportMutex = Mutex()
+    @Volatile private var collectionExportEpoch = 0
+    private var collectionExportSnapshot: Pair<Int, CollectionExport>? = null
+
+    internal fun invalidateCollectionExport() {
+        collectionExportEpoch++
+    }
+
+    private suspend fun collectionExport(): CollectionExport = collectionExportMutex.withLock {
+        val epoch = collectionExportEpoch
+        collectionExportSnapshot?.takeIf { it.first == epoch }?.let { return@withLock it.second }
+        val result = try {
+            val response = customSession.get(buildUrl("/aiometadata-collections.json"), timeout = 5L)
+            if (response.code in 200..299) CollectionExport.parse(response.text) else CollectionExport.EMPTY
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { CollectionExport.EMPTY }
+        collectionExportSnapshot = epoch to result
+        result
+    }
+
     internal suspend fun browseCollectionFolders(catalog: Catalog, genre: String?, offset: Int = 0): Pair<List<StremioCollectionFolder>, Int> {
         if (!isAddonEnabled()) return emptyList<StremioCollectionFolder>() to 0
         require(catalog.type.equals("collection", true))
-        val metas = homeForegroundSemaphore.withPermit {
-            fetchHomeJson(buildUrl(catalog.browsePath(genre, offset))).metas
-                ?: throw IllegalStateException("Collection response is missing metas")
+        val (metas, export) = coroutineScope {
+            val settings = async { if (catalog.id?.startsWith("aiom.collection.") == true) collectionExport() else CollectionExport.EMPTY }
+            val metas = homeForegroundSemaphore.withPermit {
+                fetchHomeJson(buildUrl(catalog.browsePath(genre, offset))).metas
+                    ?: throw IllegalStateException("Collection response is missing metas")
+            }
+            metas to settings.await()
         }
         return metas.mapNotNull { meta ->
             if (!(meta.type ?: catalog.type).equals("collection", true)) return@mapNotNull null
             val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            StremioCollectionFolder(id, meta.name?.takeIf { it.isNotBlank() } ?: id,
-                meta.poster, meta.posterShape ?: "poster")
+            export.apply(StremioCollectionFolder(id, meta.name?.takeIf { it.isNotBlank() } ?: id,
+                meta.poster ?: meta.landscapePoster, meta.posterShape ?: "poster",
+                hideTitle = meta.hideTitle == true, emoji = meta.coverEmoji,
+                backdrop = meta.background, logo = meta.logo,
+                presentation = CollectionPresentation(backdrop = catalog.background ?: catalog.poster)))
         }.distinctBy { it.id } to metas.size
     }
 
     internal suspend fun browseCollectionDetail(id: String): StremioCollectionFolder {
         require(isAddonEnabled()) { "Addon disabled" }
         val raw = fetchAddonMetaText(buildUrl("/meta/collection/${id.urlEncodeLocal()}.json"))
-        return parseStremioCollectionMeta(raw, id)
+        val folder = parseStremioCollectionMeta(raw, id)
+        return if (id.startsWith("aiom.collection:")) collectionExport().apply(folder) else folder
     }
 
     internal suspend fun browseCatalogs(): List<Catalog> {
@@ -4938,7 +4966,9 @@ open class StremioC(
         @JsonProperty("extra") val extra: List<Extra>? = null, 
         @JsonProperty("extraSupported") val extraSupported: List<String>? = null,
         @JsonProperty("genres") val genres: List<String>? = null,
-        @JsonProperty("extraRequired") val extraRequired: List<String>? = null
+        @JsonProperty("extraRequired") val extraRequired: List<String>? = null,
+        @JsonProperty("background") val background: String? = null,
+        @JsonProperty("poster") val poster: String? = null
     ) {
         fun supportsExtra(name: String): Boolean = if (extra != null) {
             extra.any { it.name == name }
@@ -5034,6 +5064,11 @@ open class StremioC(
     )
 
     private data class HomeCatalogEntry(
+        @JsonProperty("landscapePoster") val landscapePoster: String? = null,
+        @JsonProperty("background") val background: String? = null,
+        @JsonProperty("logo") val logo: String? = null,
+        @JsonProperty("hideTitle") val hideTitle: Boolean? = null,
+        @JsonProperty("coverEmoji") val coverEmoji: String? = null,
         @JsonProperty("id") val id: String? = null,
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("name") val name: String? = null,

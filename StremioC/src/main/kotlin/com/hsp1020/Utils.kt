@@ -263,7 +263,8 @@ internal class RatingPlotImageHook(
         ratioPopups.values.forEach { it.close() }
         ratioPopups.clear()
     }
-    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { master ->
+    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview,
+        collectionHome::onNativeRowAttached, collectionHome::onNativeRowDetached) { master ->
         val selected = host?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
         collectionHome.sync(host, master, selected?.let { APIHolder.getApiFromNameNull(it) as? StremioC })
     }
