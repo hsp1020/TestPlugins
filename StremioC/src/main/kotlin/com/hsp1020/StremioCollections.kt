@@ -364,7 +364,7 @@ internal class StremioCollectionHome(
                     }.getOrNull()
                 }.orEmpty()
                 val catalogs = manifest?.catalogs.orEmpty().filter { catalog ->
-                    if (!catalog.type.equals("collection", true) || catalog.browseBlockReason() != null) return@filter false
+                    if (!catalog.type.equals("collection", true) || !catalog.supportsHome()) return@filter false
                     val tab = "${catalog.id}_${catalog.type}_default"
                     prefs.getBoolean("tab_enabled_${key}_$tab", true) &&
                         prefs.getBoolean("tab_home_${key}_$tab", true)

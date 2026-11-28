@@ -4974,7 +4974,8 @@ open class StremioC(
         @JsonProperty("genres") val genres: List<String>? = null,
         @JsonProperty("extraRequired") val extraRequired: List<String>? = null,
         @JsonProperty("background") val background: String? = null,
-        @JsonProperty("poster") val poster: String? = null
+        @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("showInHome") val showInHome: Boolean? = null
     ) {
         fun supportsExtra(name: String): Boolean = if (extra != null) {
             extra.any { it.name == name }
@@ -5022,6 +5023,8 @@ open class StremioC(
         } else null
 
         fun supportsHome(): Boolean {
+            if (showInHome == false) return false
+            if (type.equals("collection", true)) return !id.isNullOrBlank() && browseBlockReason() == null
             val required = extra.orEmpty().filter { it.isRequired == true }.mapNotNull { it.name } +
                 extraRequired.orEmpty()
             return !id.isNullOrBlank() && required.all { it == "genre" || it == "skip" } &&
