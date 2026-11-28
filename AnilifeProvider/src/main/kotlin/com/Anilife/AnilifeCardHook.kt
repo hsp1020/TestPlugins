@@ -6,7 +6,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
@@ -24,6 +23,8 @@ import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
+import coil3.request.SuccessResult
+import coil3.util.CoilUtils
 import java.util.IdentityHashMap
 import kotlin.math.roundToInt
 
@@ -105,11 +106,35 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
         val card: View, val image: ImageView, val title: TextView,
         val originalWidth: Int, val originalHeight: Int,
         val originalImageHeight: Int, val originalTitleWidth: Int,
-        var itemUrl: String = "", var applied: Boolean = false
+        var identity: String = "", var posterUrl: String = "", var applied: Boolean = false
     )
     private inner class Watcher(private val list: RecyclerView, private val parent: Boolean) {
         private val states = IdentityHashMap<View, CardState>()
-        private val pending = IdentityHashMap<View, Pair<ViewTreeObserver, ViewTreeObserver.OnPreDrawListener>>()
+        private val pending = IdentityHashMap<View, CardState>()
+        private var preDrawTree: ViewTreeObserver? = null
+        private val imageReady = ViewTreeObserver.OnPreDrawListener {
+            val ready = ArrayList<View>()
+            val iterator = pending.entries.iterator()
+            while (iterator.hasNext()) {
+                val (view, state) = iterator.next()
+                if (states[view] !== state || view.parent !== list) {
+                    iterator.remove()
+                    continue
+                }
+                val result = CoilUtils.result(state.image)
+                if (result != null && result.request.data.toString() == state.posterUrl) {
+                    iterator.remove()
+                    ready.add(view)
+                }
+            }
+            if (pending.isEmpty()) clearPreDraw()
+            ready.forEach(::apply)
+            true
+        }
+        private fun clearPreDraw() {
+            preDrawTree?.takeIf { it.isAlive }?.removeOnPreDrawListener(imageReady)
+            preDrawTree = null
+        }
         private var observed: RecyclerView.Adapter<*>? = null
         private var posted = false
         private var closed = false
@@ -142,7 +167,8 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
             list.removeOnChildAttachStateChangeListener(children)
             observed?.unregisterAdapterDataObserver(changes)
             observed = null
-            pending.keys.toList().forEach(::disarm)
+            pending.clear()
+            clearPreDraw()
             states.keys.toList().forEach(::restore)
             if (parent) {
                 for (i in 0 until list.childCount) {
@@ -180,7 +206,7 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
             val position = list.getChildAdapterPosition(view)
             val item = if (position == RecyclerView.NO_POSITION) null
                 else adapter.getItemOrNull(position) as? SearchResponse
-            if (item?.apiName != "Anilife") { restore(view); return }
+            if (item?.apiName != "Anilife" || item.posterUrl.isNullOrBlank()) { restore(view); return }
             val state = states[view] ?: run {
                 val card = view.findViewById<View>(R.id.background_card) ?: return
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
@@ -189,61 +215,59 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
                     card.layoutParams.height, image.layoutParams.height,
                     title.layoutParams.width).also { states[view] = it }
             }
-            if (state.itemUrl != item.url) {
+            val posterUrl = item.posterUrl ?: return restore(view)
+            val identity = item.url + "|" + posterUrl
+            if (state.identity != identity) {
                 disarm(view)
                 restoreSize(state)
-                state.itemUrl = item.url
+                state.identity = identity
+                state.posterUrl = posterUrl
             }
-            if (!state.applied && !pending.containsKey(view)) {
-                val tree = view.viewTreeObserver
-                if (!tree.isAlive) return
-                val begin = SystemClock.uptimeMillis()
-                val listener = object : ViewTreeObserver.OnPreDrawListener {
-                    override fun onPreDraw(): Boolean {
-                        if (view.parent !== list || SystemClock.uptimeMillis() - begin > 2500L) {
-                            disarm(view)
-                            return true
-                        }
-                        val image = state.image.drawable
-                        val w = image?.intrinsicWidth ?: 0
-                        val h = image?.intrinsicHeight ?: 0
-                        if (w <= 8 || h <= 8) return true
-                        disarm(view)
-                        val ratio = w.toFloat() / h
-                        val landscape = ratio > 1.15f
-                        val width = if (list is AutofitRecyclerView) {
-                            (list.itemWidth - dp(4)).coerceAtLeast(1)
-                        } else if (landscape) HomeChildItemAdapter.maxPosterSize
-                        else HomeChildItemAdapter.minPosterSize
-                        if (width <= 0) return true
-                        val height = if (list is AutofitRecyclerView) {
-                            (width / (if (landscape) 1.8f else 0.68f)).roundToInt().coerceAtLeast(1)
-                        } else if (landscape) HomeChildItemAdapter.minPosterSize
-                        else HomeChildItemAdapter.maxPosterSize
-                        if (list is AutofitRecyclerView) {
-                            state.card.layoutParams = state.card.layoutParams.apply { this.width = width }
-                            state.image.layoutParams = state.image.layoutParams.apply { this.height = height }
-                        } else {
-                            state.card.layoutParams = state.card.layoutParams.apply {
-                                this.width = width
-                                this.height = height
-                            }
-                            if (state.title.parent !== state.card) {
-                                state.title.layoutParams = state.title.layoutParams.apply { this.width = width }
-                            }
-                        }
-                        state.applied = true
-                        return true
+            val result = CoilUtils.result(state.image)
+            if (result == null || result.request.data.toString() != posterUrl) {
+                restoreSize(state)
+                pending[view] = state
+                if (preDrawTree == null) {
+                    list.viewTreeObserver.takeIf { it.isAlive }?.let {
+                        preDrawTree = it
+                        it.addOnPreDrawListener(imageReady)
                     }
                 }
-                pending[view] = tree to listener
-                tree.addOnPreDrawListener(listener)
+                return
             }
+            disarm(view)
+            val loaded = result as? SuccessResult ?: run { restoreSize(state); return }
+            if (state.applied) return
+            val w = loaded.image.width
+            val h = loaded.image.height
+            if (w <= 8 || h <= 8) return
+            val landscape = w.toFloat() / h > 1.15f
+            val width = if (list is AutofitRecyclerView) {
+                (list.itemWidth - dp(4)).coerceAtLeast(1)
+            } else if (landscape) HomeChildItemAdapter.maxPosterSize
+            else HomeChildItemAdapter.minPosterSize
+            if (width <= 0) return
+            val height = if (list is AutofitRecyclerView) {
+                (width / (if (landscape) 1.8f else 0.68f)).roundToInt().coerceAtLeast(1)
+            } else if (landscape) HomeChildItemAdapter.minPosterSize
+            else HomeChildItemAdapter.maxPosterSize
+            if (list is AutofitRecyclerView) {
+                state.card.layoutParams = state.card.layoutParams.apply { this.width = width }
+                state.image.layoutParams = state.image.layoutParams.apply { this.height = height }
+            } else {
+                state.card.layoutParams = state.card.layoutParams.apply {
+                    this.width = width
+                    this.height = height
+                }
+                if (state.title.parent !== state.card) {
+                    state.title.layoutParams = state.title.layoutParams.apply { this.width = width }
+                }
+            }
+            state.applied = true
         }
         private fun disarm(view: View) {
-            pending.remove(view)?.let { (tree, listener) ->
-                if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-            }
+            pending.remove(view)
+            if (pending.isEmpty()) clearPreDraw()
         }
         private fun restoreSize(state: CardState) {
             if (!state.applied) return
