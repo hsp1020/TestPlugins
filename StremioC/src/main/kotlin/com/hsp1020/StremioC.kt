@@ -2202,7 +2202,7 @@ open class StremioC(
 
         val flatTabs = mutableListOf<FlatTab>()
         rawCatalogs.forEach { catalog ->
-            if (!catalog.supportsHome() ||
+            if (catalog.type.equals("collection", true) || !catalog.supportsHome() ||
                 (catalog.requiresExtra("skip") && !catalog.supportsExtra("skip"))) return@forEach
             val catalogId = catalog.id ?: ""
             val catalogType = catalog.type ?: "movie"
@@ -2479,6 +2479,7 @@ open class StremioC(
                 ?: throw IllegalStateException("Catalog response is missing metas")
             val items = metas.mapNotNull { meta ->
                 val type = meta.type ?: fallbackType
+                if (type.equals("collection", true)) return@mapNotNull null
                 val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val title = meta.name?.takeIf { it.isNotBlank() }
                     ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
@@ -2505,6 +2506,27 @@ open class StremioC(
         } else getManifest()
     }
 
+    internal suspend fun browseCollectionFolders(catalog: Catalog, genre: String?, offset: Int = 0): Pair<List<StremioCollectionFolder>, Int> {
+        if (!isAddonEnabled()) return emptyList<StremioCollectionFolder>() to 0
+        require(catalog.type.equals("collection", true))
+        val metas = homeForegroundSemaphore.withPermit {
+            fetchHomeJson(buildUrl(catalog.browsePath(genre, offset))).metas
+                ?: throw IllegalStateException("Collection response is missing metas")
+        }
+        return metas.mapNotNull { meta ->
+            if (!(meta.type ?: catalog.type).equals("collection", true)) return@mapNotNull null
+            val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            StremioCollectionFolder(id, meta.name?.takeIf { it.isNotBlank() } ?: id,
+                meta.poster, meta.posterShape ?: "poster")
+        }.distinctBy { it.id } to metas.size
+    }
+
+    internal suspend fun browseCollectionDetail(id: String): StremioCollectionFolder {
+        require(isAddonEnabled()) { "Addon disabled" }
+        val raw = fetchAddonMetaText(buildUrl("/meta/collection/${id.urlEncodeLocal()}.json"))
+        return parseStremioCollectionMeta(raw, id)
+    }
+
     internal suspend fun browseCatalogs(): List<Catalog> {
         if (!isAddonEnabled()) return emptyList()
         return browseManifest()?.catalogs?.filter { !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
@@ -2529,7 +2551,7 @@ open class StremioC(
         if (prefs != null) migrateStremioCatalogSettings(prefs, mainUrl)
 
         val supportedCatalogs = manifest?.catalogs?.filter { catalog ->
-            if (!catalog.supportsSearch()) return@filter false
+            if (catalog.type.equals("collection", true) || !catalog.supportsSearch()) return@filter false
             if (searchCatalogId != null &&
                 (catalog.id != searchCatalogId || catalog.type != searchCatalogType)) return@filter false
             if (prefs == null) return@filter true
@@ -2560,6 +2582,9 @@ open class StremioC(
     }
 
     override suspend fun load(url: String): LoadResponse {
+        require(parseDetailUrlHint(url)?.type?.equals("collection", true) != true) {
+            "Collection folders must be opened in the catalog browser."
+        }
         val requested = url.toHttpUrlOrNull()
         val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
@@ -2934,6 +2959,7 @@ open class StremioC(
         } ?: run {
             return false
         }
+        if (loadData.type.equals("collection", true)) return false
         traceSource(traceId, "ENTRY",
             "source=CloudStream type=${loadData.type} id=${loadData.id} imdbId=${loadData.imdbId}" +
             " tmdbId=${loadData.tmdbId} S=${loadData.season} E=${loadData.episode}" +
@@ -4995,7 +5021,8 @@ open class StremioC(
                     }
                 }.awaitAll().flatten()
             }
-            return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
+            return allMetasWithType.filterNot { (meta, type) -> (meta.type ?: type).equals("collection", true) }
+                .distinctBy { it.first.id }.map { (meta, type) ->
                 meta.toSearchResponse(resultProvider, typeName = type)
             }
         }
@@ -5011,6 +5038,7 @@ open class StremioC(
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("name") val name: String? = null,
         @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("posterShape") val posterShape: String? = null,
         @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
         @JsonProperty("_tmdbId") val tmdbIdExt: String? = null
     )

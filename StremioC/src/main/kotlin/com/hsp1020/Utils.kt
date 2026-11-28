@@ -264,7 +264,8 @@ internal class RatingPlotImageHook(
         ratioPopups.clear()
     }
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { master ->
-        collectionHome.sync(host, master)
+        val selected = host?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
+        collectionHome.sync(host, master, selected?.let { APIHolder.getApiFromNameNull(it) as? StremioC })
     }
     private var homeRoot: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
@@ -275,7 +276,11 @@ internal class RatingPlotImageHook(
         if (selected != null && APIHolder.allProviders.any {
                 it is StremioC && it.hasMainPage && it.name == selected
             }) {
-            homeRoot?.let { homeEntries.attach(it) }
+            homeRoot?.let { root ->
+                homeEntries.attach(root)
+                collectionHome.sync(activity, root.findViewById(R.id.home_master_recycler),
+                    APIHolder.getApiFromNameNull(selected) as? StremioC)
+            }
         } else {
             homeEntries.detach()
         }
@@ -395,6 +400,7 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        collectionHome.close()
         clearRatioScreens()
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -409,6 +415,7 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        collectionHome.close()
         clearRatioScreens()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
@@ -422,7 +429,15 @@ internal class RatingPlotImageHook(
         val homeModel = ViewModelProvider(activity)[HomeViewModel::class.java]
         val homeObserver = Observer<String?> { syncHomeHooks() }
         homeModel.apiName.observe(activity, homeObserver)
-        removeHomeProviderObserver = { homeModel.apiName.removeObserver(homeObserver) }
+        val pageObserver = Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> { page ->
+            if (page is Resource.Loading) collectionHome.refresh()
+            else if (page is Resource.Success) syncHomeHooks()
+        }
+        homeModel.page.observe(activity, pageObserver)
+        removeHomeProviderObserver = {
+            homeModel.apiName.removeObserver(homeObserver)
+            homeModel.page.removeObserver(pageObserver)
+        }
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 f.view?.let {
@@ -575,6 +590,7 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        collectionHome.close()
         clearRatioScreens()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }

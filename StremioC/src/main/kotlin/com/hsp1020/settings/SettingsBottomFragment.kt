@@ -1581,18 +1581,6 @@ class SettingsBottomFragment(
         }
         refreshSummaries = { updateSummaries() }
         if (hub != null) {
-            (hub as? LinearLayout)?.let { container ->
-                val row = dialogButton(ctx, "Collections", LinearLayout.LayoutParams(-1, -2))
-                val backupRow = view.findView<View>("rowBackup")
-                val position = container.indexOfChild(backupRow).takeIf { it >= 0 } ?: container.childCount
-                container.addView(row, position)
-                row.setOnClickListener {
-                    childDialogs.add(showStremioCollectionSettings(hostContext, sharedPref) {
-                        childDialogs.remove(it)
-                        if (!closing && row.isShown) row.requestFocus()
-                    })
-                }
-            }
             view.findView<View>("rowCatalogs").setOnClickListener { showlinks.performClick() }
             view.findView<View>("rowSources").setOnClickListener {
                 showAddonListDialog(sourceDraft, onDraftChanged = { refreshSummaries?.invoke() })

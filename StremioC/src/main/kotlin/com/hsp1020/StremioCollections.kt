@@ -7,14 +7,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.HorizontalScrollView
-import android.widget.Switch
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDialog
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -23,10 +20,8 @@ import androidx.navigation.fragment.NavHostFragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil3.dispose
-import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
@@ -45,89 +40,50 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 
 internal data class StremioCollectionSource(
-    val provider: String, val addonId: String?, val url: String?, val type: String,
-    val catalogId: String, val title: String, val genre: String?
+    val type: String, val catalogId: String, val title: String, val genre: String?
 )
 internal data class StremioCollectionFolder(
-    val id: String, val title: String, val cover: String?, val emoji: String?,
-    val shape: String, val hideTitle: Boolean, val sources: List<StremioCollectionSource>,
-    val folders: List<StremioCollectionFolder>
+    val id: String, val title: String, val cover: String?, val shape: String,
+    val sources: List<StremioCollectionSource> = emptyList(),
+    val folders: List<StremioCollectionFolder> = emptyList(),
+    val rows: Boolean = false, val showAll: Boolean = true,
+    val merge: String = "sequential", val shuffle: Boolean = false
 )
-internal data class StremioCollection(
-    val id: String, val title: String, val pinned: Boolean, val mode: String,
-    val showAll: Boolean, val folders: List<StremioCollectionFolder>
-)
+private fun JSONObject.string(key: String): String? =
+    optString(key, "").trim().takeIf { it.isNotEmpty() && it != "null" }
+private fun JSONArray.objects(): List<JSONObject> =
+    (0 until length()).mapNotNull { optJSONObject(it) }
 
-internal object StremioCollections {
-    const val ENABLED = "collections_enabled"
-    const val JSON = "collections_json"
-    const val URL = "collections_url"
-
-    private fun JSONObject.string(key: String): String? =
-        optString(key, "").trim().takeIf { it.isNotEmpty() && it != "null" }
-    private fun JSONArray.objects(): List<JSONObject> =
-        (0 until length()).mapNotNull { optJSONObject(it) }
-    private fun http(value: String?): String? = value?.takeIf {
-        val uri = Uri.parse(it)
-        uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
+internal fun parseStremioCollectionMeta(raw: String, id: String): StremioCollectionFolder {
+    val meta = JSONObject(raw).getJSONObject("meta")
+    require(meta.string("type").equals("collection", true) && meta.string("id") == id) {
+        "Invalid collection metadata"
     }
-    fun parse(raw: String, origin: String?): List<StremioCollection> {
-        val text = raw.trim()
-        val native = text.startsWith("{")
-        val entries = if (native) {
-            val objectValue = JSONObject(text)
-            require(objectValue.optString("exportType") == "aiometadataCollections" &&
-                objectValue.optInt("exportVersion") == 1) { "Unsupported collection format" }
-            objectValue.getJSONArray("entries")
-        } else JSONArray(text)
-        val originBase = origin?.substringBefore("?")?.substringBeforeLast("/")?.let(::http)
-        fun folder(value: JSONObject, depth: Int): StremioCollectionFolder? {
-            require(depth <= 32) { "Collection folders are too deeply nested" }
-            val id = value.string("id") ?: return null
-            val title = value.string("title") ?: return null
-            val sources = (value.optJSONArray("sources")?.takeIf { it.length() > 0 }
-                ?: value.optJSONArray("catalogSources") ?: JSONArray()).objects().mapNotNull { rawSource ->
-                val source = rawSource.optJSONObject("native") ?: rawSource
-                val provider = source.string("provider") ?: if (rawSource.has("native")) "unsupported" else "addon"
-                val type = source.string("type").orEmpty()
-                val catalogId = source.string("catalogId").orEmpty()
-                if (provider == "addon" && (type.isBlank() || catalogId.isBlank())) return@mapNotNull null
-                StremioCollectionSource(provider, source.string("addonId"),
-                    http(source.string("addonBaseUrl")) ?: originBase.takeIf { native && !rawSource.has("native") },
-                    type, catalogId, source.string("title") ?: source.string("catalogName")
-                        ?: rawSource.string("name") ?: catalogId.ifBlank { provider }, source.string("genre"))
-            }.distinct()
-            return StremioCollectionFolder(id, title, http(value.string("coverImageUrl")),
-                value.string("coverEmoji"), value.string("tileShape") ?: value.string("shape") ?: "SQUARE",
-                value.optBoolean("hideTitle"), sources,
-                value.optJSONArray("folders")?.objects()?.mapNotNull { folder(it, depth + 1) }
-                    ?.distinctBy { it.id }.orEmpty())
-        }
-        return entries.objects().mapNotNull { entry ->
-            if (native && entry.optString("kind") != "collection") return@mapNotNull null
-            val id = entry.string("id") ?: return@mapNotNull null
-            val title = entry.string("title") ?: return@mapNotNull null
-            StremioCollection(id, title, entry.optBoolean("pinToTop"),
-                entry.string("viewMode") ?: "TABBED_GRID", entry.optBoolean("showAllTab", true),
-                entry.optJSONArray("folders")?.objects()?.mapNotNull { folder(it, 0) }
-                    ?.distinctBy { it.id }.orEmpty())
-        }.distinctBy { it.id }
+    fun folder(value: JSONObject): StremioCollectionFolder? {
+        if (!value.string("type").equals("collection", true)) return null
+        val folderId = value.string("id") ?: return null
+        val detail = value.optJSONObject("collection") ?: JSONObject()
+        val sources = detail.optJSONArray("sources")?.objects()?.mapNotNull { source ->
+            val type = source.string("type") ?: return@mapNotNull null
+            val catalogId = source.string("catalogId") ?: return@mapNotNull null
+            if (type.equals("collection", true)) return@mapNotNull null
+            StremioCollectionSource(type, catalogId, source.string("name") ?: catalogId, source.string("genre"))
+        }?.distinctBy { Triple(it.type, it.catalogId, it.genre) }.orEmpty()
+        return StremioCollectionFolder(folderId, value.string("name") ?: folderId,
+            value.string("poster") ?: value.string("landscapePoster"),
+            value.string("posterShape") ?: "poster", sources,
+            detail.optJSONArray("items")?.objects()?.mapNotNull { item ->
+                if (!item.string("type").equals("collection", true)) null
+                else item.string("id")?.let { childId ->
+                    StremioCollectionFolder(childId, item.string("name") ?: childId,
+                        item.string("poster") ?: item.string("landscapePoster"),
+                        item.string("posterShape") ?: "poster")
+                }
+            }?.distinctBy { it.id }.orEmpty(),
+            detail.string("layout").equals("rows", true), detail.optBoolean("showAll", true),
+            detail.string("merge") ?: "sequential", detail.optBoolean("shuffle"))
     }
-
-    fun read(prefs: SharedPreferences): List<StremioCollection> =
-        prefs.getString(JSON, null)?.let { raw ->
-            runCatching { parse(raw, prefs.getString(URL, null)) }.getOrNull()
-        }.orEmpty()
-
-    suspend fun importCollections(value: String, prefs: SharedPreferences): Int {
-        val input = value.trim()
-        val url = http(input)
-        val raw = if (url != null) app.get(url, timeout = 15L).text else input
-        val collections = parse(raw, url)
-        currentCoroutineContext().ensureActive()
-        prefs.edit().putString(JSON, raw).putString(URL, url).apply()
-        return collections.size
-    }
+    return requireNotNull(folder(meta))
 }
 
 private fun Context.collectionDp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
@@ -145,68 +101,10 @@ private fun Context.collectionButton(value: String, action: () -> Unit) = Button
     setOnClickListener { action() }
 }
 
-internal fun showStremioCollectionSettings(context: Context, prefs: SharedPreferences,
-                                            onClosed: (AlertDialog) -> Unit): AlertDialog {
-    val scope = MainScope()
-    val panel = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        val padding = context.collectionDp(16)
-        setPadding(padding, padding, padding, padding)
-    }
-    val enabled = Switch(context).apply {
-        text = "Enable collections"
-        isChecked = prefs.getBoolean(StremioCollections.ENABLED, false)
-        setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean(StremioCollections.ENABLED, checked).apply()
-        }
-    }
-    val input = EditText(context).apply {
-        hint = "Collection URL or JSON"
-        setText(prefs.getString(StremioCollections.URL, ""))
-        maxLines = 5
-    }
-    val status = context.collectionText("")
-    fun updateCount() {
-        status.text = "${StremioCollections.read(prefs).size} collections"
-    }
-    updateCount()
-    panel.addView(enabled)
-    panel.addView(input)
-    panel.addView(status)
-    var job: Job? = null
-    val importButton = context.collectionButton("Import / Refresh") {
-        if (job?.isActive == true) return@collectionButton
-        val value = input.text.toString()
-        if (value.isBlank()) return@collectionButton
-        status.text = "Loading…"
-        job = scope.launch {
-            try {
-                val count = withContext(Dispatchers.IO) { StremioCollections.importCollections(value, prefs) }
-                prefs.edit().putBoolean(StremioCollections.ENABLED, true).apply()
-                enabled.isChecked = true
-                status.text = "$count collections"
-            } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { status.text = "Unable to import collections. Previous collections kept." }
-        }
-    }
-    panel.addView(importButton)
-    panel.addView(context.collectionButton("Remove imported collections") {
-        job?.cancel()
-        prefs.edit().remove(StremioCollections.JSON).remove(StremioCollections.URL).apply()
-        input.text.clear()
-        updateCount()
-    })
-    val dialog = AlertDialog.Builder(context).setTitle("Collections")
-        .setView(ScrollView(context).apply { addView(panel) })
-        .setPositiveButton("Close", null).create()
-    dialog.setOnDismissListener { scope.cancel(); onClosed(dialog) }
-    dialog.show()
-    return dialog
-}
-
 /** A collection folder is never a SearchResponse. */
-private class FolderCardAdapter(
+internal class FolderCardAdapter(
     private val folders: List<StremioCollectionFolder>,
+    private val grid: AutofitRecyclerView? = null,
     private val select: (StremioCollectionFolder, View) -> Unit
 ) : RecyclerView.Adapter<FolderCardAdapter.Holder>() {
     class Holder(val root: LinearLayout, val image: ImageView, val label: TextView, val emoji: TextView) :
@@ -249,13 +147,17 @@ private class FolderCardAdapter(
             holder.root.layoutParams = holder.root.layoutParams.apply { this.width = width }
             frame.layoutParams = frame.layoutParams.apply { this.height = height }
         }
-        val landscape = folder.shape.equals("LANDSCAPE", true)
-        val square = folder.shape.equals("SQUARE", true)
-        size(if (landscape) wide else narrow, if (landscape || square) narrow else wide)
+        val landscape = folder.shape.equals("landscape", true)
+        val square = folder.shape.equals("square", true)
+        fun cardWidth(isWide: Boolean) = grid?.itemWidth?.minus(ctx.collectionDp(8))?.takeIf { it > 0 }
+            ?: if (isWide) wide else narrow
+        val defaultWidth = cardWidth(landscape)
+        size(defaultWidth, when { landscape -> stremioPosterHeight(defaultWidth, 16, 9)
+            square -> defaultWidth; else -> stremioPosterHeight(defaultWidth, 2, 3) })
         holder.root.contentDescription = folder.title
         holder.label.text = folder.title
-        holder.label.visibility = if (folder.hideTitle) View.GONE else View.VISIBLE
-        holder.emoji.text = folder.emoji ?: "▣"
+        holder.label.visibility = View.VISIBLE
+        holder.emoji.text = "▣"
         holder.image.dispose()
         holder.image.setImageDrawable(null)
         holder.image.visibility = if (folder.cover == null) View.GONE else View.VISIBLE
@@ -267,7 +169,7 @@ private class FolderCardAdapter(
                     val w = result.image.width
                     val h = result.image.height
                     if (w > 0 && h > 0) {
-                        val width = if (w > h) wide else narrow
+                        val width = cardWidth(w > h)
                         size(width, stremioPosterHeight(width, w, h))
                         holder.emoji.visibility = View.GONE
                     }
@@ -288,7 +190,7 @@ private fun folderRow(context: Context, folders: List<StremioCollectionFolder>,
                       select: (StremioCollectionFolder, View) -> Unit) =
     RecyclerView(context).apply {
         layoutManager = LinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
-        adapter = FolderCardAdapter(folders, select)
+        adapter = FolderCardAdapter(folders, select = select)
         clipToPadding = false
         setPadding(context.collectionDp(8), 0, context.collectionDp(8), 0)
     }
@@ -297,44 +199,107 @@ private fun folderRow(context: Context, folders: List<StremioCollectionFolder>,
 internal class StremioCollectionHome(private val prefs: SharedPreferences) {
     private var header: LinearLayout? = null
     private var section: LinearLayout? = null
-    private var signature: Triple<Boolean, String?, String?>? = null
+    private var provider: StremioC? = null
+    private var scope: CoroutineScope? = null
+    private var job: Job? = null
+    private var loaded: List<Pair<StremioC.Catalog, List<StremioCollectionFolder>>>? = null
     private var active: StremioFolderDialog? = null
 
-    fun sync(activity: FragmentActivity?, master: RecyclerView?) {
-        if (activity == null || master == null) {
-            active?.dismiss()
-            active = null
+    fun sync(activity: FragmentActivity?, master: RecyclerView?, selected: StremioC?) {
+        if (activity == null || selected == null || !selected.hasMainPage) {
+            close()
+            return
+        }
+        if (master == null) {
+            if (loaded == null) { job?.cancel(); job = null }
             detach()
             return
         }
-        val target = master.findViewById<LinearLayout>(R.id.home_header)
-        val current = Triple(prefs.getBoolean(StremioCollections.ENABLED, false),
-            prefs.getString(StremioCollections.JSON, null), prefs.getString(StremioCollections.URL, null))
-        if (target === header && current == signature && (section == null || section?.parent === target)) return
-        if (!current.first) {
+        if (provider !== selected) {
             active?.dismiss()
             active = null
+            job?.cancel()
+            scope?.cancel()
+            loaded = null
+            provider = selected
+            scope = MainScope()
+            job = null
+            detach()
         }
+        val target = master.findViewById<LinearLayout>(R.id.home_header) ?: return
+        if (header !== target) {
+            detach()
+            header = target
+        }
+        if (loaded != null) {
+            if (section == null) render(activity, selected)
+            return
+        }
+        if (job != null) return
+        job = scope?.launch {
+            val result = withContext(Dispatchers.IO) {
+                val manifest = try { selected.browseManifest() }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                val key = stremioCatalogKey(selected.mainUrl)
+                migrateStremioCatalogSettings(prefs, selected.mainUrl)
+                val order = prefs.getString("catalog_order_$key", null)?.let { raw ->
+                    runCatching {
+                        val array = JSONArray(raw)
+                        (0 until array.length()).associate { array.getString(it) to it }
+                    }.getOrNull()
+                }.orEmpty()
+                val catalogs = manifest?.catalogs.orEmpty().filter { catalog ->
+                    if (!catalog.type.equals("collection", true) || catalog.browseBlockReason() != null) return@filter false
+                    val tab = "${catalog.id}_${catalog.type}_default"
+                    prefs.getBoolean("tab_enabled_${key}_$tab", true) &&
+                        prefs.getBoolean("tab_home_${key}_$tab", true)
+                }.sortedBy { order["${it.id}_${it.type}_default"] ?: Int.MAX_VALUE }
+                val semaphore = Semaphore(4)
+                coroutineScope {
+                    catalogs.map { catalog -> async {
+                        val genre = catalog.homeGenre() ?: if (catalog.requiresExtra("genre"))
+                            catalog.browseGenres().firstOrNull() else null
+                        try {
+                            catalog to semaphore.withPermit { selected.browseCollectionFolders(catalog, genre).first }
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { catalog to emptyList() }
+                    } }.awaitAll()
+                }
+            }
+            if (provider === selected) {
+                loaded = result
+                render(activity, selected)
+            }
+        }
+    }
+
+    fun refresh() {
+        job?.cancel()
+        job = null
+        loaded = null
+        val target = header
         detach()
-        if (target == null || !current.first) return
-        val collections = StremioCollections.read(prefs).filter { it.folders.isNotEmpty() }
-            .sortedByDescending { it.pinned }
         header = target
-        signature = current
-        if (collections.isEmpty()) return
+    }
+
+    private fun render(activity: FragmentActivity, source: StremioC) {
+        val target = header ?: return
+        if (!target.isAttachedToWindow || section != null) return
         val panel = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            collections.forEach { collection ->
-                addView(activity.collectionText(collection.title))
-                addView(folderRow(activity, collection.folders) { folder, focus ->
+            loaded.orEmpty().filter { it.second.isNotEmpty() }.forEach { (catalog, folders) ->
+                addView(activity.collectionText(catalog.name ?: catalog.id.orEmpty()))
+                addView(folderRow(activity, folders) { folder, focus ->
                     active?.dismiss()
-                    active = StremioFolderDialog(activity, collection, folder, focus).also { it.show() }
+                    active = StremioFolderDialog(activity, source, folder, focus).also { it.show() }
                 }, LinearLayout.LayoutParams(-1, -2))
             }
         }
         section = panel
         target.addView(panel, LinearLayout.LayoutParams(-1, -2))
     }
+
     private fun detach() {
         section?.let { panel ->
             for (i in 0 until panel.childCount) (panel.getChildAt(i) as? RecyclerView)?.adapter = null
@@ -342,14 +307,25 @@ internal class StremioCollectionHome(private val prefs: SharedPreferences) {
         }
         section = null
         header = null
-        signature = null
+    }
+
+    fun close() {
+        active?.dismiss()
+        active = null
+        job?.cancel()
+        scope?.cancel()
+        job = null
+        scope = null
+        loaded = null
+        provider = null
+        detach()
     }
 }
 
-private class StremioFolderDialog(
+internal class StremioFolderDialog(
     private val activity: FragmentActivity,
-    private val collection: StremioCollection,
-    private val folder: StremioCollectionFolder,
+    private val provider: StremioC,
+    private var folder: StremioCollectionFolder,
     private val origin: View,
     private val onClosed: () -> Unit = {}
 ) {
@@ -370,9 +346,9 @@ private class StremioFolderDialog(
     private val tabs = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
     private val more = activity.collectionButton("Load more / Retry") { requestSelected() }
     private val rowPanel = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-    private val rowsMode = collection.mode.equals("ROWS", true) || collection.mode.equals("FOLLOW_LAYOUT", true)
-    private val allEnabled = collection.showAll && folder.sources.size > 1
-    private var selected = if (allEnabled) -1 else 0
+    private val rowsMode get() = folder.rows
+    private val allEnabled get() = folder.showAll && folder.sources.size > 1
+    private var selected = 0
     private val tabScroll = mutableMapOf<Int, android.os.Parcelable>()
     private var child: StremioFolderDialog? = null
     private var closed = false
@@ -381,12 +357,13 @@ private class StremioFolderDialog(
     private val limit = Semaphore(4)
     private data class State(
         val source: StremioCollectionSource,
-        var provider: StremioC? = null, var catalog: StremioC.Catalog? = null,
+        var catalog: StremioC.Catalog? = null,
         var offset: Int = 0, var more: Boolean = true, var loading: Boolean = false,
-        var error: String? = null, val items: MutableList<SearchResponse> = mutableListOf(),
+        var error: String? = null, var mergedCount: Int = 0,
+        val items: MutableList<SearchResponse> = mutableListOf(),
         val seen: MutableSet<String> = mutableSetOf(), val pages: MutableSet<List<String>> = mutableSetOf()
     )
-    private val states = folder.sources.map { State(it) }
+    private var states = emptyList<State>()
     private val rowAdapters = mutableListOf<HomeChildItemAdapter>()
     private val rowStatuses = mutableListOf<TextView>()
     private val rowButtons = mutableListOf<Button>()
@@ -406,12 +383,13 @@ private class StremioFolderDialog(
         }
     }
 
-    fun show() {
+    private fun render() {
+        root.removeAllViews()
         root.addView(activity.collectionButton("‹  ${folder.title}") { dismiss() })
         if (folder.folders.isNotEmpty()) root.addView(folderRow(activity, folder.folders) { next, focus ->
             child?.dismiss()
             dialog.hide()
-            child = StremioFolderDialog(activity, collection, next, focus) {
+            child = StremioFolderDialog(activity, provider, next, focus) {
                 child = null
                 if (!closed && !activity.isDestroyed && !activity.isFinishing) {
                     if (navigation?.currentDestination?.id == R.id.navigation_home) dialog.show()
@@ -452,6 +430,13 @@ private class StremioFolderDialog(
             root.addView(more)
         }
         root.addView(status)
+        update()
+        requestSelected()
+    }
+
+    fun show() {
+        root.addView(activity.collectionButton("‹  ${folder.title}") { dismiss() })
+        root.addView(status)
         dialog.setContentView(root)
         dialog.setCanceledOnTouchOutside(false)
         dialog.setOnDismissListener {
@@ -469,8 +454,29 @@ private class StremioFolderDialog(
         activity.lifecycle.addObserver(hostObserver)
         dialog.show()
         dialog.window?.setLayout(-1, -1)
-        update()
-        requestSelected()
+        loadFolder()
+    }
+
+    private fun loadFolder() {
+        status.text = "Loading…"
+        scope.launch {
+            try {
+                folder = withContext(Dispatchers.IO) { provider.browseCollectionDetail(folder.id) }
+                if (closed) return@launch
+                states = folder.sources.map { State(it) }
+                selected = if (allEnabled) -1 else 0
+                render()
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                if (!closed) {
+                    status.text = "Unable to load collection."
+                    root.addView(activity.collectionButton("Retry") {
+                        root.removeViewAt(root.childCount - 1)
+                        loadFolder()
+                    })
+                }
+            }
+        }
     }
     fun dismiss() { if (!closed) dialog.dismiss() }
 
@@ -478,6 +484,7 @@ private class StremioFolderDialog(
         if (selected == index) return
         grid.layoutManager?.onSaveInstanceState()?.let { tabScroll[selected] = it }
         selected = index
+        if (index < 0 && states.none { it.loading }) merge()
         update(restoreScroll = true)
         val indices = if (index < 0) states.indices.toList() else listOf(index)
         load(indices.filter { states[it].items.isEmpty() && states[it].error == null })
@@ -489,8 +496,12 @@ private class StremioFolderDialog(
     }
 
     private fun load(indices: List<Int>) {
-        if (closed) return
-        val requested = indices.distinct().filter { states[it].more && !states[it].loading }
+        if (closed || (!rowsMode && selected < 0 && states.any { it.loading })) return
+        val eligible = indices.distinct().filter { states[it].more && !states[it].loading }
+        val requested = if (!rowsMode && selected < 0 && folder.merge == "sequential") {
+            val first = states.indexOfFirst { it.more }
+            eligible.filter { it == first }
+        } else eligible
         if (requested.isEmpty()) return
         requested.forEach { states[it].loading = true; states[it].error = null }
         update()
@@ -514,53 +525,53 @@ private class StremioFolderDialog(
                     }
                 }
             }.awaitAll()
-            if (!closed) { merge(); update() }
+            if (!closed) {
+                merge()
+                update()
+                if (!rowsMode && selected < 0 && folder.merge == "sequential" &&
+                    requested.none { states[it].more || states[it].error != null } &&
+                    states.any { it.more } && all.isEmpty()) requestSelected(false)
+            }
         }
     }
 
     private suspend fun fetch(state: State): Pair<List<SearchResponse>, Int> {
         val source = state.source
-        require(source.provider == "addon") { "Unsupported source: ${source.provider}" }
-        if (state.provider == null || state.catalog == null) {
-            val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
-                .filter { StremioC.isCatalogAddonEnabled(it.mainUrl, it.addonId) }
-                .sortedByDescending { it.hasMainPage }
-                .distinctBy { stremioManifestUrl(it.mainUrl.fixSourceUrl()) }
-                .filter { source.url == null || stremioManifestUrl(it.mainUrl.fixSourceUrl()) ==
-                    stremioManifestUrl(source.url.fixSourceUrl()) }
-            val matches = providers.mapNotNull { provider ->
-                val manifest = try { provider.browseManifest() }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { null } ?: return@mapNotNull null
-                if (source.addonId != null && manifest.id != source.addonId) return@mapNotNull null
-                val catalog = manifest.catalogs.firstOrNull { it.type == source.type && it.id == source.catalogId }
-                    ?: return@mapNotNull null
-                provider to catalog
-            }
-            require(matches.size == 1) { if (matches.isEmpty()) "Catalog unavailable or disabled" else "Ambiguous catalog source" }
-            state.provider = matches[0].first
-            state.catalog = matches[0].second
+        if (state.catalog == null) {
+            state.catalog = provider.browseCatalogs().firstOrNull {
+                it.type == source.type && it.id == source.catalogId
+            } ?: throw IllegalStateException("Catalog unavailable")
         }
-        val provider = requireNotNull(state.provider)
         val catalog = requireNotNull(state.catalog)
         require(StremioC.isCatalogAddonEnabled(provider.mainUrl, provider.addonId)) { "Addon disabled" }
         require(catalog.browseBlockReason() == null) { catalog.browseBlockReason().orEmpty() }
-        val genre = source.genre ?: catalog.homeGenre()
+        val genre = source.genre ?: catalog.homeGenre() ?: if (catalog.requiresExtra("genre"))
+            catalog.browseGenres().firstOrNull() else null
         return provider.browsePage(catalog, genre, state.offset)
     }
 
     private fun merge() {
-        if (!allEnabled) return
-        val max = states.maxOfOrNull { it.items.size } ?: 0
-        for (i in 0 until max) for (state in states) {
-            val item = state.items.getOrNull(i) ?: continue
+        if (!allEnabled || selected >= 0 || rowsMode) return
+        val eligible = if (folder.merge == "sequential") {
+            val stop = states.indexOfFirst { it.more }
+            if (stop < 0) states else states.take(stop + 1)
+        } else states
+        val pending = eligible.map { it.items.drop(it.mergedCount) }
+        val max = pending.maxOfOrNull { it.size } ?: 0
+        val merged = if (folder.merge == "interleaved") buildList {
+            for (i in 0 until max) for (items in pending) items.getOrNull(i)?.let { add(it) }
+        } else pending.flatten()
+        eligible.forEach { it.mergedCount = it.items.size }
+        val fresh = mutableListOf<SearchResponse>()
+        for (item in merged) {
             val uri = Uri.parse(item.url)
             val segments = uri.pathSegments
             val meta = segments.indexOfLast { it == "meta" }
             val key = if (meta >= 0 && meta + 2 < segments.size)
                 segments[meta + 1] + ":" + segments[meta + 2].removeSuffix(".json") else item.url
-            if (allSeen.add(key)) all.add(item)
+            if (allSeen.add(key)) fresh.add(item)
         }
+        all.addAll(if (folder.shuffle) fresh.shuffled() else fresh)
     }
 
     private fun update(restoreScroll: Boolean = false) {

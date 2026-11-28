@@ -712,6 +712,8 @@ internal class CatalogBrowserDialog(
     }
     private val grid = AutofitRecyclerView(activity)
     private val thumbnailRatios = StremioThumbnailRatios(activity.resources.displayMetrics.density)
+    private var folderDialog: StremioFolderDialog? = null
+    private val collectionFolders = mutableListOf<StremioCollectionFolder>()
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
@@ -936,7 +938,8 @@ internal class CatalogBrowserDialog(
     private val maxAutoFillPages = 12
     private fun updateCatalogResultState() {
         val finished = chosen && !loading && !hasNext && retry.visibility != View.VISIBLE
-        val empty = !inlineActive && finished && items.isEmpty()
+        val hasItems = if (catalog?.type.equals("collection", true)) collectionFolders.isNotEmpty() else items.isNotEmpty()
+        val empty = !inlineActive && finished && !hasItems
         val wasEmpty = catalogEmpty.visibility == View.VISIBLE
         catalogEmpty.visibility = if (empty) View.VISIBLE else View.GONE
         if (empty != wasEmpty) {
@@ -949,7 +952,7 @@ internal class CatalogBrowserDialog(
                 }
             }
         }
-        val end = !inlineActive && finished && items.isNotEmpty()
+        val end = !inlineActive && finished && hasItems
         if (showCatalogEnd != end) {
             showCatalogEnd = end
             if (grid.isComputingLayout) {
@@ -1085,7 +1088,7 @@ internal class CatalogBrowserDialog(
         fitWindowToNavigation()
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
-        if (closed) return@OnDestinationChangedListener
+        if (closed || folderDialog != null) return@OnDestinationChangedListener
         if (detailHandoff.isActive) {
             if (destination.id != R.id.navigation_home)
                 heldNavigationViews.forEach { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
@@ -1554,6 +1557,8 @@ internal class CatalogBrowserDialog(
             activity.findViewById<View>(R.id.nav_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
+            folderDialog?.dismiss()
+            folderDialog = null
             thumbnailRatios.close()
             grid.adapter = null
             onDismiss()
@@ -1625,6 +1630,8 @@ internal class CatalogBrowserDialog(
         offset = 0
         autoFillCount = 0
         items.clear()
+        collectionFolders.clear()
+        if (grid.adapter !== adapter) grid.adapter = adapter
         seen.clear()
         pageSignatures.clear()
         adapter.submitList(emptyList())
@@ -1809,6 +1816,11 @@ internal class CatalogBrowserDialog(
         genre = genres.getOrNull(genreIndex)
         chosen = true
         hasNext = true
+        if (next.catalog.type.equals("collection", true)) {
+            pendingHome = null
+            requestPage()
+            return
+        }
         val liveSnapshot = liveHomeSnapshot(next)
         val snapshot = liveSnapshot ?: pendingHome
         val sameCatalog = snapshot?.target?.catalogId == next.catalog.id
@@ -1956,6 +1968,10 @@ internal class CatalogBrowserDialog(
         val selectedCatalog = catalog
         if (selectedProvider == null || selectedCatalog == null) return
         if (!chosen || loading || !hasNext || closed) return
+        if (selectedCatalog.type.equals("collection", true)) {
+            requestCollectionPage(selectedProvider, selectedCatalog)
+            return
+        }
         val ticket = generation
         val selectedGenre = genre
         val requestedOffset = offset
@@ -2018,6 +2034,52 @@ internal class CatalogBrowserDialog(
             }
         }
     }
+    private fun requestCollectionPage(source: StremioC, selected: StremioC.Catalog) {
+        val ticket = generation
+        val selectedGenre = genre
+        val requestedOffset = offset
+        loading = true
+        retry.visibility = View.GONE
+        updateCatalogResultState()
+        if (collectionFolders.isEmpty()) initialProgress(true)
+        job = scope.launch {
+            try {
+                val (folders, count) = withContext(Dispatchers.IO) {
+                    source.browseCollectionFolders(selected, selectedGenre, requestedOffset)
+                }
+                if (ticket != generation || closed) return@launch
+                val known = collectionFolders.mapTo(mutableSetOf()) { it.id }
+                val fresh = folders.filter { known.add(it.id) }
+                collectionFolders.addAll(fresh)
+                offset += count
+                hasNext = selected.supportsExtra("skip") && count > 0 && fresh.isNotEmpty()
+                val scroll = grid.layoutManager?.onSaveInstanceState()
+                grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, focus ->
+                    if (!closed && folderDialog == null) {
+                        dialog.hide()
+                        folderDialog = StremioFolderDialog(activity, source, folder, focus) {
+                            folderDialog = null
+                            if (!closed && !activity.isFinishing && !activity.isDestroyed) {
+                                dialog.show()
+                                fitWindowToNavigation(force = true)
+                            }
+                        }.also { it.show() }
+                    }
+                }
+                scroll?.let { grid.layoutManager?.onRestoreInstanceState(it) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                if (ticket == generation && !closed) retry.visibility = View.VISIBLE
+            } finally {
+                if (ticket == generation && !closed) {
+                    loading = false
+                    initialProgress(false)
+                    updateCatalogResultState()
+                }
+            }
+        }
+    }
+
 }
 
 internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String, val genre: String? = null)

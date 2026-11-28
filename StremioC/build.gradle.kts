@@ -1,7 +1,7 @@
 
 
 
-version = 2
+version = 3
 
 android {
     namespace = "com.hsp1020" 

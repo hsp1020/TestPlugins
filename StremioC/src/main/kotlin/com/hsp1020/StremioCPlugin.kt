@@ -208,6 +208,12 @@ class StremioCPlugin : Plugin() {
             }
         }
 
+        appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE).let { prefs ->
+            if (listOf("collections_enabled", "collections_json", "collections_url").any { prefs.contains(it) }) {
+                prefs.edit().remove("collections_enabled").remove("collections_json")
+                    .remove("collections_url").apply()
+            }
+        }
         openSettings = { currentContext ->
             (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
                 if (host.isFinishing || host.isDestroyed) return@let
