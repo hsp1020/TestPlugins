@@ -231,7 +231,7 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val collectionHome = StremioCollectionHome(prefs)
+    private val collectionHome = StremioCollectionHome(prefs, openCatalog)
     private val ratioScreens = mutableMapOf<Fragment, StremioThumbnailRatios>()
     private val ratioPopups = mutableMapOf<RecyclerView, StremioThumbnailRatios>()
     private var ratioFocusTree: ViewTreeObserver? = null

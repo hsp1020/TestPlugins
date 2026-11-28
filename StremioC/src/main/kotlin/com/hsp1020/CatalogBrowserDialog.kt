@@ -29,6 +29,11 @@ import androidx.appcompat.widget.AppCompatSpinner
 import androidx.appcompat.widget.SearchView
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
+import android.widget.HorizontalScrollView
+import androidx.activity.OnBackPressedCallback
+import android.os.Parcelable
+import com.lagradost.cloudstream3.ui.search.SearchClickCallback
+import com.lagradost.cloudstream3.ui.ViewHolderState
 import android.view.Gravity
 import android.util.TypedValue
 import android.widget.TextView
@@ -84,6 +89,7 @@ import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
+import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_FOCUSED
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchHelper
@@ -712,10 +718,14 @@ internal class CatalogBrowserDialog(
     }
     private val grid = AutofitRecyclerView(activity)
     private val thumbnailRatios = StremioThumbnailRatios(activity.resources.displayMetrics.density)
-    private var folderDialog: StremioFolderDialog? = null
     private val collectionFolders = mutableListOf<StremioCollectionFolder>()
-    private val adapter = SearchAdapter(grid, false) { click ->
+    private val adapter = SearchAdapter(grid, false) { clickMedia(it) }
+    private fun clickMedia(click: SearchClickCallback) {
         if (!closed && !detailHandoff.isActive) when (click.action) {
+            SEARCH_ACTION_FOCUSED -> collectionLevel?.takeUnless { it.rows }?.let { level ->
+                if (items.any { it.url == click.card.url })
+                    level.focus[collectionScrollKey(level)] = click.card.url
+            }
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
@@ -723,6 +733,60 @@ internal class CatalogBrowserDialog(
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
+        }
+    }
+    private data class CollectionLevel(
+        val title: String, val folders: MutableList<StremioCollectionFolder>, var selected: String?,
+        val forceGrid: Boolean = false, var configured: Boolean = false,
+        var rows: Boolean = false, var showAll: Boolean = true,
+        val scroll: MutableMap<String, Parcelable> = mutableMapOf(),
+        val focus: MutableMap<String, String> = mutableMapOf(),
+        var rowScroll: Parcelable? = null
+    )
+    private val initialCatalogFolder = initialCatalog?.folderId != null
+    private var pendingFolderId = initialCatalog?.folderId
+    private val collectionPages = mutableMapOf<String, CollectionFolderPages>()
+    private val collectionParents = mutableListOf<CollectionLevel>()
+    private var collectionLevel: CollectionLevel? = null
+    private val collectionLimit = Semaphore(4)
+    private var collectionCatalogMore = false
+    private var collectionCatalogScroll: Parcelable? = null
+    private val collectionHeader = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        visibility = View.GONE
+    }
+    private val collectionRows = RecyclerView(activity).apply {
+        layoutManager = GridLayoutManager(activity, 1)
+        visibility = View.GONE
+    }
+    private fun openCollectionRow(row: HomeViewModel.ExpandableHomepageList) {
+        val level = collectionLevel?.takeIf { it.rows } ?: return
+        level.folders.firstOrNull { rowTitle(level, it) == row.list.name }?.let { folder ->
+            openCollection(level.title, level.folders, folder, true)
+        }
+    }
+    private val collectionRowAdapter = object : ParentItemAdapter(
+        "StremioCCollectionRows".hashCode(), ::clickMedia, ::openCollectionRow,
+        expandCallback = { name ->
+            collectionLevel?.let { level ->
+                level.folders.firstOrNull { rowTitle(level, it) == name }?.let { requestCollectionContent(it.id) }
+            }
+        }
+    ) {
+        override fun onBindContent(holder: ViewHolderState<Bundle>,
+                                   item: HomeViewModel.ExpandableHomepageList, position: Int) {
+            super.onBindContent(holder, item, position)
+            if (isLayout(TV)) holder.itemView.findViewById<View>(R.id.home_child_more_info)?.apply {
+                isFocusable = true
+                foreground = themedPressedForeground(this)
+                setOnClickListener { openCollectionRow(item) }
+            }
+        }
+    }
+    private val collectionBack = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            if (inlineActive) inlineInput?.setQuery("", false)
+            else backCollection()
         }
     }
     private val catalogEmpty = TextView(activity).apply {
@@ -857,6 +921,8 @@ internal class CatalogBrowserDialog(
         updateCatalogResultState()
         inlineRetryVisibility = retry.visibility
         inlineSelectors.forEach { it.visibility = View.GONE }
+        collectionHeader.visibility = View.GONE
+        collectionRows.visibility = View.GONE
         grid.visibility = View.INVISIBLE
         inlineResults.visibility = View.VISIBLE
         inlineLoading.visibility = View.GONE
@@ -880,8 +946,10 @@ internal class CatalogBrowserDialog(
         inlineResults.visibility = View.GONE
         inlineLoading.visibility = View.GONE
         inlineEmpty.visibility = View.GONE
-        inlineSelectors.forEach { it.visibility = View.VISIBLE }
-        grid.visibility = if (initialSkeleton) View.INVISIBLE else View.VISIBLE
+        inlineSelectors.forEach { it.visibility = if (collectionLevel == null) View.VISIBLE else View.GONE }
+        collectionHeader.visibility = if (collectionLevel == null) View.GONE else View.VISIBLE
+        grid.visibility = if (initialSkeleton || collectionLevel?.rows == true) View.INVISIBLE else View.VISIBLE
+        collectionRows.visibility = if (!initialSkeleton && collectionLevel?.rows == true) View.VISIBLE else View.GONE
         retry.visibility = inlineRetryVisibility
         inlineHeader?.let { header ->
             (header.getChildAt(0).layoutParams as? AppBarLayout.LayoutParams)?.let { params ->
@@ -917,7 +985,7 @@ internal class CatalogBrowserDialog(
     private data class CatalogSource(val url: String, val provider: StremioC, val catalog: StremioC.Catalog)
     private var catalogs = emptyList<CatalogSource>()
     private var selectedType = initialCatalog?.type ?: "movie"
-    private val directTarget = initialCatalog?.takeIf { !it.genre.isNullOrBlank() }
+    private val directTarget = initialCatalog?.takeIf { !it.genre.isNullOrBlank() && !it.type.equals("collection", true) }
     private var pendingCatalog = initialCatalog
     private var pendingGenre = initialCatalog?.genre
     private var pendingHome = initialHome?.takeIf { it.target == initialCatalog }
@@ -938,7 +1006,9 @@ internal class CatalogBrowserDialog(
     private val maxAutoFillPages = 12
     private fun updateCatalogResultState() {
         val finished = chosen && !loading && !hasNext && retry.visibility != View.VISIBLE
-        val hasItems = if (catalog?.type.equals("collection", true)) collectionFolders.isNotEmpty() else items.isNotEmpty()
+        val hasItems = if (collectionLevel != null) items.isNotEmpty() || collectionLevel?.rows == true ||
+            selectedFolderPages()?.detail?.folders?.isNotEmpty() == true
+        else if (catalog?.type.equals("collection", true)) collectionFolders.isNotEmpty() else items.isNotEmpty()
         val empty = !inlineActive && finished && !hasItems
         val wasEmpty = catalogEmpty.visibility == View.VISIBLE
         catalogEmpty.visibility = if (empty) View.VISIBLE else View.GONE
@@ -952,7 +1022,7 @@ internal class CatalogBrowserDialog(
                 }
             }
         }
-        val end = !inlineActive && finished && hasItems
+        val end = !inlineActive && finished && hasItems && collectionLevel?.rows != true && grid.adapter === adapter
         if (showCatalogEnd != end) {
             showCatalogEnd = end
             if (grid.isComputingLayout) {
@@ -964,7 +1034,8 @@ internal class CatalogBrowserDialog(
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
     private fun initialProgress(active: Boolean) {
         initialSkeleton = active
-        grid.visibility = if (active || inlineActive) View.INVISIBLE else View.VISIBLE
+        grid.visibility = if (active || inlineActive || collectionLevel?.rows == true) View.INVISIBLE else View.VISIBLE
+        collectionRows.visibility = if (!active && !inlineActive && collectionLevel?.rows == true) View.VISIBLE else View.GONE
         pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
         if (active) {
             pageSkeleton.startShimmer()
@@ -1088,7 +1159,7 @@ internal class CatalogBrowserDialog(
         fitWindowToNavigation()
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
-        if (closed || folderDialog != null) return@OnDestinationChangedListener
+        if (closed) return@OnDestinationChangedListener
         if (detailHandoff.isActive) {
             if (destination.id != R.id.navigation_home)
                 heldNavigationViews.forEach { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
@@ -1437,6 +1508,7 @@ internal class CatalogBrowserDialog(
                     marginEnd = dp(12)
                 })
             }
+            addView(collectionHeader, LinearLayout.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
             setBackgroundColor(headerColor)
@@ -1460,6 +1532,8 @@ internal class CatalogBrowserDialog(
         }
         val content = FrameLayout(activity).apply {
             addView(grid, FrameLayout.LayoutParams(-1, -1))
+            collectionRows.adapter = collectionRowAdapter
+            addView(collectionRows, FrameLayout.LayoutParams(-1, -1))
             addView(catalogEmpty, FrameLayout.LayoutParams(-1, -1))
             pageSkeleton.addView(pageSkeletonSlots, FrameLayout.LayoutParams(-1, -1))
             addView(pageSkeleton, FrameLayout.LayoutParams(-1, -1))
@@ -1497,6 +1571,13 @@ internal class CatalogBrowserDialog(
         grid.adapter = adapter
         thumbnailRatios.watch(grid)
         thumbnailRatios.watch(inlineResults, true)
+        dialog.onBackPressedDispatcher.addCallback(collectionBack)
+        collectionRows.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(view: RecyclerView, dx: Int, dy: Int) {
+                if (collectionLevel?.rows == true && dy > 0 && !view.canScrollVertically(1) &&
+                    hasNext && retry.visibility != View.VISIBLE) requestCollectionContent()
+            }
+        })
         grid.addItemDecoration(catalogEndDecoration)
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (pageSkeleton.visibility == View.VISIBLE) grid.post { updatePageSkeleton() }
@@ -1504,7 +1585,7 @@ internal class CatalogBrowserDialog(
                 grid.post {
                     if (!closed) {
                         grid.spanCount = activity.getSpanCount(false)
-                        adapter.notifyDataSetChanged()
+                        grid.adapter?.notifyDataSetChanged()
                     }
                 }
             }
@@ -1557,8 +1638,10 @@ internal class CatalogBrowserDialog(
             activity.findViewById<View>(R.id.nav_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
-            folderDialog?.dismiss()
-            folderDialog = null
+            collectionBack.remove()
+            collectionRows.adapter = null
+            collectionPages.clear()
+            collectionParents.clear()
             thumbnailRatios.close()
             grid.adapter = null
             onDismiss()
@@ -1631,6 +1714,7 @@ internal class CatalogBrowserDialog(
         autoFillCount = 0
         items.clear()
         collectionFolders.clear()
+        clearCollectionMode()
         if (grid.adapter !== adapter) grid.adapter = adapter
         seen.clear()
         pageSignatures.clear()
@@ -1968,6 +2052,10 @@ internal class CatalogBrowserDialog(
         val selectedCatalog = catalog
         if (selectedProvider == null || selectedCatalog == null) return
         if (!chosen || loading || !hasNext || closed) return
+        if (collectionLevel != null) {
+            requestCollectionContent()
+            return
+        }
         if (selectedCatalog.type.equals("collection", true)) {
             requestCollectionPage(selectedProvider, selectedCatalog)
             return
@@ -2054,19 +2142,16 @@ internal class CatalogBrowserDialog(
                 offset += count
                 hasNext = selected.supportsExtra("skip") && count > 0 && fresh.isNotEmpty()
                 val scroll = grid.layoutManager?.onSaveInstanceState()
-                grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, focus ->
-                    if (!closed && folderDialog == null) {
-                        dialog.hide()
-                        folderDialog = StremioFolderDialog(activity, source, folder, focus) {
-                            folderDialog = null
-                            if (!closed && !activity.isFinishing && !activity.isDestroyed) {
-                                dialog.show()
-                                fitWindowToNavigation(force = true)
-                            }
-                        }.also { it.show() }
-                    }
-                }
+                showCollectionCatalog()
                 scroll?.let { grid.layoutManager?.onRestoreInstanceState(it) }
+                val initial = pendingFolderId?.let { id -> collectionFolders.firstOrNull { it.id == id } }
+                if (initial != null) {
+                    pendingFolderId = null
+                    loading = false
+                    openCollection(selected.name ?: selected.id.orEmpty(), collectionFolders.toList(), initial)
+                } else if (pendingFolderId != null && hasNext) {
+                    grid.post { if (!closed && ticket == generation) requestPage() }
+                } else pendingFolderId = null
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
                 if (ticket == generation && !closed) retry.visibility = View.VISIBLE
@@ -2080,9 +2165,399 @@ internal class CatalogBrowserDialog(
         }
     }
 
+
+    private fun showCollectionCatalog() {
+        grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, _ ->
+            if (!closed && !inlineActive && collectionLevel == null)
+                openCollection(catalog?.name ?: catalog?.id.orEmpty(), collectionFolders.toList(), folder)
+        }
+    }
+
+    private fun pages(folder: StremioCollectionFolder) =
+        collectionPages.getOrPut(folder.id) { CollectionFolderPages(folder) }
+
+    private fun selectedFolderPages(): CollectionFolderPages? =
+        collectionLevel?.selected?.let { collectionPages[it] }
+
+    private fun rowTitle(level: CollectionLevel, folder: StremioCollectionFolder): String =
+        if (level.folders.count { it.title == folder.title } == 1) folder.title
+        else folder.title + " (" + (level.folders.indexOf(folder) + 1) + ")"
+
+    private fun saveCollectionScroll(level: CollectionLevel) {
+        if (level.rows) level.rowScroll = collectionRows.layoutManager?.onSaveInstanceState()
+        else grid.layoutManager?.onSaveInstanceState()?.let {
+            level.scroll[collectionScrollKey(level)] = it
+        }
+    }
+
+    private fun collectionScrollKey(level: CollectionLevel) =
+        level.selected.orEmpty() + ":" + (selectedFolderPages()?.selectedSource ?: -1)
+
+    private fun stopCollectionRequest() {
+        generation++
+        job?.cancel()
+        loading = false
+        initialProgress(false)
+        pageProgress(false)
+        retry.visibility = View.GONE
+        autoFillCount = 0
+    }
+
+    private fun clearCollectionMode() {
+        if (collectionLevel == null) return
+        collectionLevel = null
+        collectionParents.clear()
+        collectionPages.clear()
+        collectionBack.isEnabled = false
+        collectionHeader.visibility = View.GONE
+        collectionHeader.removeAllViews()
+        retry.text = "Retry"
+        collectionRows.visibility = View.GONE
+        collectionRowAdapter.submitList(emptyList())
+        inlineSelectors.forEach { it.visibility = if (inlineActive) View.GONE else View.VISIBLE }
+    }
+
+    private fun openCollection(title: String, folders: List<StremioCollectionFolder>,
+                               selected: StremioCollectionFolder, forceGrid: Boolean = false) {
+        val previous = collectionLevel
+        if (previous == null) {
+            collectionCatalogMore = hasNext
+            collectionCatalogScroll = grid.layoutManager?.onSaveInstanceState()
+        } else {
+            saveCollectionScroll(previous)
+            collectionParents.add(previous)
+        }
+        stopCollectionRequest()
+        val level = CollectionLevel(title, folders.toMutableList(), selected.id, forceGrid)
+        collectionLevel = level
+        val state = pages(selected)
+        collectionBack.isEnabled = true
+        grid.adapter = adapter
+        items.clear()
+        adapter.submitList(emptyList())
+        chosen = true
+        hasNext = true
+        val detail = state.detail
+        if (detail != null && (previous != null || !collectionCatalogMore)) {
+            level.configured = true
+            level.rows = detail.rows && !forceGrid
+            level.showAll = detail.showAll
+            showCollectionContent(restore = true)
+            if (items.isEmpty() && hasNext) requestCollectionContent()
+        } else {
+            renderCollectionHeader()
+            requestCollectionContent()
+        }
+    }
+
+    private fun backCollection() {
+        if (collectionLevel == null) return
+        stopCollectionRequest()
+        if (collectionParents.isNotEmpty()) {
+            collectionLevel = collectionParents.removeAt(collectionParents.lastIndex)
+            showCollectionContent(restore = true)
+            if (items.isEmpty() && hasNext) requestCollectionContent()
+            return
+        }
+        if (initialCatalogFolder) {
+            dismiss()
+            return
+        }
+        clearCollectionMode()
+        items.clear()
+        hasNext = collectionCatalogMore
+        showCollectionCatalog()
+        collectionCatalogScroll?.let { grid.layoutManager?.onRestoreInstanceState(it) }
+        initialProgress(false)
+        updateCatalogResultState()
+    }
+
+    private fun selectCollectionFolder(id: String?) {
+        val level = collectionLevel ?: return
+        if (level.selected == id || level.rows) return
+        saveCollectionScroll(level)
+        stopCollectionRequest()
+        level.selected = id
+        level.folders.firstOrNull { it.id == id }?.let(::pages)
+        showCollectionContent(restore = true)
+        if (items.isEmpty() && hasNext) requestCollectionContent()
+    }
+
+    private fun selectCollectionSource(index: Int) {
+        val level = collectionLevel ?: return
+        val state = selectedFolderPages() ?: return
+        if (state.selectedSource == index) return
+        saveCollectionScroll(level)
+        stopCollectionRequest()
+        state.selectedSource = index
+        showCollectionContent(restore = true)
+        if (items.isEmpty() && hasNext) requestCollectionContent()
+    }
+
+    private fun renderCollectionHeader() {
+        val level = collectionLevel ?: return
+        val focusedText = (collectionHeader.findFocus() as? TextView)?.text?.toString()
+        inlineSelectors.forEach { it.visibility = View.GONE }
+        collectionHeader.visibility = if (inlineActive) View.GONE else View.VISIBLE
+        collectionHeader.removeAllViews()
+        collectionHeader.addView(TextView(activity).apply {
+            text = level.title
+            setTextAppearance(R.style.WatchHeaderText)
+            applyStremioCNativeFont(bold = true, header = true)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        })
+        fun tabs(entries: List<Triple<String, Boolean, () -> Unit>>) {
+            if (entries.isEmpty()) return
+            val strip = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(8), 0, dp(8), 0)
+            }
+            var selectedView: View? = null
+            for ((title, selected, action) in entries) {
+                val tab = button(title).apply {
+                    applyStremioCNativeFont(bold = selected)
+                    isSelected = selected
+                    backgroundTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+                    val color = activity.colorFromAttribute(if (selected) R.attr.colorPrimary else R.attr.textColor)
+                    setTextColor(color)
+                    strokeColor = ColorStateList.valueOf(color)
+                    strokeWidth = if (selected) dp(1) else 0
+                    setOnClickListener { action() }
+                }
+                strip.addView(tab, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+                if (selected) selectedView = tab
+            }
+            val scroll = HorizontalScrollView(activity).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(strip)
+            }
+            collectionHeader.addView(scroll, LinearLayout.LayoutParams(-1, -2))
+            selectedView?.let { tab ->
+                scroll.post {
+                    if (tab.isAttachedToWindow) {
+                        scroll.scrollTo(tab.left, 0)
+                        if (isLayout(TV) && focusedText != null &&
+                            (tab as? TextView)?.text?.toString() == focusedText) tab.requestFocus()
+                    }
+                }
+            }
+        }
+        if (!level.rows) {
+            tabs(buildList {
+                if (level.configured && level.showAll)
+                    add(Triple("All", level.selected == null, { selectCollectionFolder(null) }))
+                level.folders.forEach { folder ->
+                    add(Triple(folder.title, level.selected == folder.id, { selectCollectionFolder(folder.id) }))
+                }
+            })
+            val state = selectedFolderPages()
+            val detail = state?.detail
+            if (state != null && detail != null) {
+                if (state.titles.size > 1) tabs(buildList {
+                    if (detail.showAll) add(Triple("All", state.selectedSource < 0, { selectCollectionSource(-1) }))
+                    state.titles.forEachIndexed { index, title ->
+                        add(Triple(title, state.selectedSource == index, { selectCollectionSource(index) }))
+                    }
+                })
+                tabs(detail.folders.map { folder ->
+                    Triple(folder.title, false, { openCollection(detail.title, detail.folders, folder) })
+                })
+            }
+        }
+    }
+
+    private fun allFolderPages(level: CollectionLevel): List<CollectionFolderPages> {
+        val result = mutableListOf<CollectionFolderPages>()
+        val visited = mutableSetOf<String>()
+        fun visit(folder: StremioCollectionFolder) {
+            if (!visited.add(folder.id)) return
+            val state = pages(folder)
+            result.add(state)
+            state.detail?.folders?.forEach(::visit)
+        }
+        level.folders.forEach(::visit)
+        return result
+    }
+
+    private fun showCollectionContent(restore: Boolean = false, header: Boolean = true) {
+        val level = collectionLevel ?: return
+        if (header) renderCollectionHeader()
+        val state = selectedFolderPages()
+        val active = if (level.rows) level.folders.map(::pages)
+            else if (level.selected == null) allFolderPages(level) else listOfNotNull(state)
+        val error = if (!level.rows && level.selected == null)
+            active.firstOrNull { it.hasNext() }?.error == true else active.any { it.error }
+        val displayed = if (level.rows) active.firstOrNull { it.items().isNotEmpty() }?.items().orEmpty()
+            else if (level.selected == null) {
+                val first = active.indexOfFirst { it.hasNext() }
+                (if (first < 0) active else active.take(first + 1)).flatMap { it.items() }
+                    .distinctBy(::collectionItemKey)
+            } else state?.items(state.selectedSource).orEmpty()
+        items.clear()
+        items.addAll(displayed)
+        hasNext = if (level.rows) active.any { !it.started || it.error }
+            else if (state != null) state.hasNext(state.selectedSource)
+            else active.any { it.hasNext() }
+        val needMore = !level.rows && items.isEmpty() && hasNext
+        retry.text = if (needMore && !error) "Load more" else "Retry"
+        retry.visibility = if ((error || needMore) && !inlineActive) View.VISIBLE else View.GONE
+        val ticket = generation
+        val sequence = pageLoadSequence
+        fun submitted() {
+            if (closed || ticket != generation || sequence != pageLoadSequence || collectionLevel !== level) return
+            initialProgress(false)
+            pageProgress(false)
+            updateCatalogResultState()
+            if (inlineActive || retry.visibility == View.VISIBLE) return
+            if (!level.rows) autoFillIfShort(ticket)
+            else if (hasNext) collectionRows.post {
+                if (closed || ticket != generation || loading || !hasNext || inlineActive) return@post
+                if (collectionRows.isLayoutRequested || collectionRows.childCount == 0)
+                    collectionRows.doOnNextLayout {
+                        if (!closed && ticket == generation && !loading && hasNext &&
+                            !collectionRows.canScrollVertically(1)) requestCollectionContent()
+                    }
+                else if (!collectionRows.canScrollVertically(1)) requestCollectionContent()
+            }
+        }
+        if (level.rows) {
+            thumbnailRatios.watch(collectionRows, true)
+            val rows = level.folders.mapNotNull { folder ->
+                val page = pages(folder)
+                if (!page.started && !page.error) return@mapNotNull null
+                HomeViewModel.ExpandableHomepageList(
+                    HomePageList(rowTitle(level, folder), page.items().toList()), 1, page.hasNext()
+                )
+            }
+            collectionRowAdapter.submitList(rows) {
+                if (restore && collectionLevel === level)
+                    level.rowScroll?.let { collectionRows.layoutManager?.onRestoreInstanceState(it) }
+                submitted()
+            }
+        } else {
+            if (grid.adapter !== adapter) grid.adapter = adapter
+            val key = collectionScrollKey(level)
+            adapter.submitList(items.toList()) {
+                if (restore && collectionLevel === level && collectionScrollKey(level) == key) {
+                    val saved = level.scroll[key]
+                    if (saved != null) grid.layoutManager?.onRestoreInstanceState(saved)
+                    else grid.scrollToPosition(0)
+                    if (isLayout(TV)) level.focus[key]?.let { url ->
+                        grid.doOnNextLayout {
+                            if (!closed && !inlineActive && collectionLevel === level &&
+                                collectionScrollKey(level) == key && dialog.isShowing && !detailHandoff.isActive) {
+                                val position = items.indexOfFirst { it.url == url }
+                                if (position >= 0) grid.layoutManager?.findViewByPosition(position)?.requestFocus()
+                            }
+                        }
+                    }
+                }
+                submitted()
+            }
+        }
+        updateCatalogResultState()
+    }
+
+    private fun requestCollectionContent(rowId: String? = null) {
+        val level = collectionLevel ?: return
+        val source = provider ?: return
+        if (closed || loading || inlineActive || rowId != null && !level.rows) return
+        val ticket = generation
+        pageLoadSequence++
+        loading = true
+        retry.visibility = View.GONE
+        if (items.isEmpty()) initialProgress(true)
+        else if (!level.rows) pageProgress(true)
+        job = scope.launch {
+            var listSubmitted = false
+            try {
+                if (!level.configured) {
+                    val state = selectedFolderPages() ?: return@launch
+                    state.prepare(source, collectionLimit)
+                    val detail = requireNotNull(state.detail)
+                    level.rows = detail.rows && !level.forceGrid
+                    level.showAll = detail.showAll
+                    // Retain the catalog cursor separately from media pagination.
+                    if (collectionParents.isEmpty() && collectionCatalogMore) {
+                        val selectedCatalog = catalog ?: return@launch
+                        while (collectionCatalogMore) {
+                            val (folders, count) = withContext(Dispatchers.IO) {
+                                source.browseCollectionFolders(selectedCatalog, genre, offset)
+                            }
+                            val known = collectionFolders.mapTo(mutableSetOf()) { it.id }
+                            val fresh = folders.filter { known.add(it.id) }
+                            collectionFolders.addAll(fresh)
+                            level.folders.addAll(fresh)
+                            offset += count
+                            collectionCatalogMore = selectedCatalog.supportsExtra("skip") &&
+                                count > 0 && fresh.isNotEmpty()
+                        }
+                    }
+                    level.configured = true
+                    renderCollectionHeader()
+                }
+                if (level.rows) {
+                    val active = level.folders.map(::pages).filter {
+                        if (rowId != null) it.summary.id == rowId && it.hasNext()
+                        else !it.started || it.error
+                    }.take(4)
+                    coroutineScope {
+                        active.map { state -> async {
+                            var attempts = 0
+                            do {
+                                state.next(source, collectionLimit)
+                            } while (state.items().isEmpty() && state.hasNext() && !state.error &&
+                                ++attempts < maxAutoFillPages)
+                            if (ticket == generation && !closed) showCollectionContent(header = false)
+                        } }.awaitAll()
+                    }
+                } else {
+                    val state = selectedFolderPages()
+                    if (state != null) {
+                        val prepared = state.detail != null
+                        state.prepare(source, collectionLimit)
+                        if (!prepared) renderCollectionHeader()
+                        var attempts = 0
+                        do {
+                            state.next(source, collectionLimit, state.selectedSource)
+                        } while (state.items(state.selectedSource).isEmpty() &&
+                            state.hasNext(state.selectedSource) && !state.error && ++attempts < maxAutoFillPages)
+                    } else {
+                        // All is lazy: follow folder order and never query every folder on tab entry.
+                        var attempts = 0
+                        do {
+                            val next = allFolderPages(level).firstOrNull { it.hasNext() } ?: break
+                            next.next(source, collectionLimit)
+                            if (next.error || next.items().isNotEmpty()) break
+                        } while (++attempts < maxAutoFillPages)
+                    }
+                }
+                if (ticket == generation && !closed) {
+                    showCollectionContent(header = false)
+                    listSubmitted = true
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                if (ticket == generation && !closed) {
+                    retry.text = "Retry"
+                    retry.visibility = View.VISIBLE
+                }
+            } finally {
+                if (ticket == generation && !closed) {
+                    loading = false
+                    if (!listSubmitted) {
+                        initialProgress(false)
+                        pageProgress(false)
+                    }
+                    updateCatalogResultState()
+                }
+            }
+        }
+    }
+
 }
 
-internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String, val genre: String? = null)
+internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String, val genre: String? = null, val folderId: String? = null)
 internal data class CatalogHomeSnapshot(
     val target: CatalogShortcutTarget,
     val items: List<SearchResponse>,
