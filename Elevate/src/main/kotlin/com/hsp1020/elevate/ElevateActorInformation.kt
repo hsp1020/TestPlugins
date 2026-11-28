@@ -82,7 +82,9 @@ internal data class ElevateActorPersonRef(
     val id: Int?,
     val name: String,
     val photo: String?,
-    val preferCrew: Boolean
+    val preferCrew: Boolean,
+    val source: ElevateActorSource = ElevateActorSource.TMDB,
+    val voiceId: Int? = null
 )
 
 internal object ElevateActorInformation {
@@ -157,8 +159,9 @@ internal object ElevateActorInformation {
         return JSONObject(response.text)
     }
 
-    private suspend fun cached(personId: Int, endpoint: String, lang: String, apiKey: String): JSONObject {
-        val cacheKey = personId.toString() + "|" + endpoint + "|" + lang + "|" + apiKey
+    private suspend fun cached(personId: Int, endpoint: String, lang: String, apiKey: String,
+        source: ElevateActorSource = ElevateActorSource.TMDB): JSONObject {
+        val cacheKey = source.name + "|" + personId + "|" + endpoint + "|" + lang + "|" + apiKey
         val hit = synchronized(cache) {
             val entry = cache[cacheKey]
             if (entry != null && System.currentTimeMillis() - entry.time < TTL) {
@@ -178,7 +181,11 @@ internal object ElevateActorInformation {
         }
         val task = synchronized(flights) {
             flights[cacheKey] ?: sharedScope.async(start = CoroutineStart.LAZY) {
-                val result = request(personId, endpoint, lang, apiKey)
+                val result = when {
+                    source == ElevateActorSource.TMDB -> request(personId, endpoint, lang, apiKey)
+                    endpoint.isEmpty() -> ElevateAniListActors.profile(personId, source)
+                    else -> ElevateAniListActors.credits(personId, source, endpoint.substringAfterLast(':').toInt())
+                }
                 val bytes = result.toString().toByteArray(Charsets.UTF_8)
                 if (bytes.size.toLong() <= MAX_CACHE_BYTES) {
                     synchronized(cache) {
@@ -214,9 +221,11 @@ internal object ElevateActorInformation {
         val title: String,
         val poster: String?,
         val date: String?,
-        val popularity: Double
+        val popularity: Double,
+        val anilist: Boolean = false,
+        val role: String? = null
     )
-    private fun credits(json: JSONObject, preferCrew: Boolean): List<Credit> {
+    private fun credits(json: JSONObject, preferCrew: Boolean, anilist: Boolean = false): List<Credit> {
         val primary = json.optJSONArray(if (preferCrew) "crew" else "cast") ?: JSONArray()
         val fallback = json.optJSONArray(if (preferCrew) "cast" else "crew") ?: JSONArray()
         val selected = if (primary.length() > 0) primary else fallback
@@ -229,12 +238,19 @@ internal object ElevateActorInformation {
             val title = value.optString(if (media == "movie") "title" else "name")
                 .ifBlank { value.optString(if (media == "movie") "original_title" else "original_name") }
             if (title.isBlank()) continue
-            val poster = value.optString("poster_path").takeIf { it.startsWith("/") }
+            val poster = value.optString("poster_path").takeIf {
+                if (anilist) it.startsWith("https://") else it.startsWith("/")
+            }
             val date = value.optString(if (media == "movie") "release_date" else "first_air_date")
-                .takeIf { it.length == 10 && it[4] == '-' && it[7] == '-' }
-            val credit = Credit(id, media, title, poster, date, value.optDouble("popularity", 0.0))
+                .takeIf { if (anilist) it.matches(Regex("[0-9]{4}(-[0-9]{2}){0,2}"))
+                    else it.length == 10 && it[4] == '-' && it[7] == '-' }
+            val credit = Credit(id, media, title, poster, date, value.optDouble("popularity", 0.0),
+                anilist, value.optString("credit_role").takeIf { it.isNotBlank() && it != "null" })
             val k = media + ":" + id
-            if (unique[k] == null || credit.popularity > unique[k]!!.popularity) unique[k] = credit
+            val previous = unique[k]
+            if (previous == null || credit.popularity > previous.popularity) unique[k] = credit
+            else if (anilist && credit.role != null) unique[k] = previous.copy(
+                role = listOfNotNull(previous.role, credit.role).distinct().joinToString(", "))
         }
         return unique.values.toList()
     }
@@ -295,6 +311,7 @@ internal object ElevateActorInformation {
         private var scroll: ScrollView? = null
         private var bioExpanded = false
         private val creditScroll = mutableMapOf<String, Int>()
+        private var aniCreditPage = 1
         private var closed = false
         private val resumeObserver = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) maybeRestore()
@@ -328,6 +345,7 @@ internal object ElevateActorInformation {
             focusedCreditKey = null
             bioExpanded = false
             creditScroll.clear()
+            aniCreditPage = 1
             show(null, person, page.url)
         }
 
@@ -346,6 +364,8 @@ internal object ElevateActorInformation {
                 put("name", actor.name)
                 put("photo", actor.photo)
                 put("crew", actor.preferCrew)
+                put("actorSource", actor.source.name)
+                put("aniCreditPage", aniCreditPage)
                 put("scroll", scroll?.scrollY ?: 0)
                 put("creditScroll", JSONObject(creditScroll.toMap()))
                 put("creditFocus", focusedCreditKey)
@@ -368,8 +388,11 @@ internal object ElevateActorInformation {
                 obj.optInt("id").takeIf { it > 0 },
                 obj.optString("name"),
                 obj.optString("photo").takeIf { it.isNotBlank() && it != "null" },
-                obj.optBoolean("crew")
+                obj.optBoolean("crew"),
+                runCatching { ElevateActorSource.valueOf(obj.optString("actorSource")) }
+                    .getOrDefault(ElevateActorSource.TMDB)
             )
+            aniCreditPage = obj.optInt("aniCreditPage", 1).coerceAtLeast(1)
             bioExpanded = obj.optBoolean("expanded")
             focusedCreditKey = obj.optString("creditFocus").takeIf {
                 it.isNotBlank() && it != "null"
@@ -423,7 +446,7 @@ internal object ElevateActorInformation {
             val nativePrefetched = HashSet<String>()
             val customPrefetched = HashSet<String>()
             fun nativePosterUrl(credit: Credit): String? =
-                credit.poster?.takeIf { it.startsWith("/") }
+                if (credit.anilist) credit.poster else credit.poster?.takeIf { it.startsWith("/") }
                     ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
             fun requestNativePoster(url: String): Deferred<coil3.Image?> =
                 nativePosterFlights[url] ?: nativePosterScope.async(Dispatchers.IO) {
@@ -470,7 +493,7 @@ internal object ElevateActorInformation {
                       catch (_: Exception) { /* Keep native placeholder on failure. */ }
 
                     // Custom Posters is independent of the Actor Information toggle.
-                    if (dialog !== windowDialog || !image.isAttachedToWindow ||
+                    if (credit.anilist || dialog !== windowDialog || !image.isAttachedToWindow ||
                         !ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS))
                         return@launch
                     val config = LibraryPosterPrefs.get(activity)
@@ -760,13 +783,14 @@ internal object ElevateActorInformation {
             scroller.viewTreeObserver.addOnScrollChangedListener(scrollerListener)
             scrollListeners.add(scroller to scrollerListener)
 
+            val anilist = actor.source != ElevateActorSource.TMDB
             if (actor.id == null) {
-                biography.text = "TMDB person ID unavailable for this actor."
+                biography.text = "Person ID unavailable for this actor."
                 revealBody()
                 return
             }
             val (key, language) = configuration(fragment.requireContext())
-            if (key.isBlank()) {
+            if (!anilist && key.isBlank()) {
                 biography.text = "CloudStream TMDB API key is unavailable."
                 revealBody()
                 return
@@ -800,9 +824,9 @@ internal object ElevateActorInformation {
                 requestJob = scope.launch {
                     val profile = async(Dispatchers.IO) {
                         try {
-                            val first = cached(actor.id, "", language, key)
+                            val first = cached(actor.id, "", language, if (anilist) "" else key, actor.source)
                             val bio = first.optString("biography")
-                            if (bio.isBlank() && !language.startsWith("en", true)) {
+                            if (!anilist && bio.isBlank() && !language.startsWith("en", true)) {
                                 val english = runCatching { cached(actor.id, "", "en-US", key) }.getOrNull()
                                 if (english != null && english.optString("biography").isNotBlank())
                                     first.put("biography", english.optString("biography"))
@@ -812,7 +836,21 @@ internal object ElevateActorInformation {
                         catch (e: Exception) { Result.failure<JSONObject>(e) }
                     }
                     val work = async(Dispatchers.IO) {
-                        try { Result.success(cached(actor.id, "/combined_credits", language, key)) }
+                        try {
+                            if (!anilist) Result.success(cached(actor.id, "/combined_credits", language, key))
+                            else {
+                                val merged = JSONArray()
+                                var more = false
+                                for (page in 1..aniCreditPage) {
+                                    val chunk = cached(actor.id, "/combined_credits:$page", "", "", actor.source)
+                                    val items = chunk.optJSONArray("cast") ?: JSONArray()
+                                    for (n in 0 until items.length()) merged.put(items.get(n))
+                                    more = chunk.optBoolean("hasNextPage")
+                                    if (!more) break
+                                }
+                                Result.success(JSONObject().put("cast", merged).put("hasNextPage", more))
+                            }
+                        }
                         catch (e: CancellationException) { throw e }
                         catch (e: Exception) { Result.failure<JSONObject>(e) }
                     }
@@ -823,14 +861,20 @@ internal object ElevateActorInformation {
                         val birth = info.optString("birthday").takeIf { it.isNotBlank() && it != "null" }
                         val death = info.optString("deathday").takeIf { it.isNotBlank() && it != "null" }
                         val place = info.optString("place_of_birth").takeIf { it.isNotBlank() && it != "null" }
-                        val known = info.optString("known_for_department").takeIf { it.isNotBlank() }
+                        val known = info.optString("known_for_department").takeIf { it.isNotBlank() && it != "null" }
                         creditsInsertAt = if (known != null) 2 else 1
                         listOfNotNull(known?.let { "Known for: " + it },
-                            birth?.let { "Born: " + it + ageText(it, death) },
+                            birth?.let { "Born: " + it + if (anilist) "" else ageText(it, death) },
                             death?.let { "Died: " + it },
                             place).forEach { details.addView(fact(it)) }
+                        if (anilist) listOf("age" to "Age", "blood_type" to "Blood type",
+                            "years_active" to "Years active").forEach { (field, label) ->
+                            info.optString(field).takeIf { it.isNotBlank() && it != "null" }
+                                ?.let { details.addView(fact("$label: $it")) }
+                        }
                         profileLoaded = true
-                        val about = info.optString("biography").ifBlank { "No biography available." }
+                        val about = info.optString("biography").takeIf { it.isNotBlank() && it != "null" }
+                            ?: "No biography available."
                         biography.text = about
                         biographyReady = true
                         updateBiographyToggle()
@@ -852,14 +896,14 @@ internal object ElevateActorInformation {
                     if (dialog !== windowDialog || generation != ticket) return@launch
                     filmArea.removeAllViews()
                     workResult.onSuccess {
-                        val all = credits(it, actor.preferCrew)
+                        val all = credits(it, actor.preferCrew, anilist)
                         if (all.isNotEmpty()) {
 
                             val counted = all.distinctBy(Credit::id)
                             val firstYear = counted.mapNotNull { credit ->
                                 credit.date?.take(4)?.toIntOrNull()
                             }.minOrNull()
-                            val summary = "${counted.size} ${if (counted.size == 1) "title" else "titles"}" +
+                            val summary = "${counted.size}${if (anilist && it.optBoolean("hasNextPage")) "+" else ""} ${if (counted.size == 1) "title" else "titles"}" +
                                 (firstYear?.let { " · since $it" } ?: "")
                             details.addView(fact(summary), creditsInsertAt)
                         }
@@ -874,7 +918,7 @@ internal object ElevateActorInformation {
                         fun preparePosters(entries: List<Credit>, shown: Int) {
                             val end = (shown + 32).coerceAtMost(entries.size)
                             prefetchNative(entries, end)
-                            if (!ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS))
+                            if (anilist || !ElevateFeaturePrefs.enabled(activity, ElevateFeature.LIBRARY_POSTERS))
                                 return
                             val config = LibraryPosterPrefs.get(activity)
                             if (!config.ready) return
@@ -967,6 +1011,12 @@ internal object ElevateActorInformation {
                                             (if (credit.media == "movie") " · Movie" else " · Series"), 11f).apply {
                                             setPadding(0, dp(6), 0, 0)
                                         }, LinearLayout.LayoutParams(posterWidth, -2))
+                                        credit.role?.let { role ->
+                                            card.addView(label(role, 11f).apply {
+                                                maxLines = 2
+                                                setPadding(0, dp(4), 0, 0)
+                                            }, LinearLayout.LayoutParams(posterWidth, -2))
+                                        }
                                         row.addView(card, LinearLayout.LayoutParams(dp(124), -2))
                                     }
                                 }
@@ -1009,6 +1059,18 @@ internal object ElevateActorInformation {
                         }
                         // Native poster requests for initial cards precede offscreen preloads.
                         preloadSections.forEach { it() }
+                        if (anilist && it.optBoolean("hasNextPage")) {
+                            filmArea.addView(label("Load more", 15f, true).apply {
+                                isClickable = true
+                                isFocusable = true
+                                foreground = elevateActorOutlinedForeground(this)
+                                setOnClickListener {
+                                    aniCreditPage++
+                                    save()
+                                    begin()
+                                }
+                            })
+                        }
                     }.onFailure { error ->
                         showError(filmArea, "Credits unavailable: " +
                             (error.message ?: "Network error")) { begin() }
@@ -1041,7 +1103,16 @@ internal object ElevateActorInformation {
                 try {
                     // Only these verified providers accept a TMDB ID in their load URL.
                     val providerClass = provider?.javaClass?.name
-                    val route = when (providerClass) {
+                    val route = if (credit.anilist) {
+                        if (providerClass == "com.hsp1020.StremioC") {
+                            val addon = provider?.mainUrl?.takeIf { it.isNotBlank() }
+                            addon?.let {
+                                JSONObject().put("id", "anilist:${credit.id}")
+                                    .put("type", if (movie) "movie" else "series")
+                                    .put("addonUrl", it).toString()
+                            }
+                        } else null
+                    } else when (providerClass) {
                         "com.hsp1020.StremioC" -> {
                             val addon = provider?.mainUrl?.takeIf { it.isNotBlank() }
                             if (addon != null) JSONObject().put("id", "tmdb:${credit.id}")
@@ -1076,9 +1147,11 @@ internal object ElevateActorInformation {
                     if (provider != null && route != null) {
                         val result = provider.newMovieSearchResponse(
                             credit.title, route,
-                            if (movie) TvType.Movie else TvType.TvSeries, fix = false
+                            if (credit.anilist) {
+                                if (movie) TvType.AnimeMovie else TvType.Anime
+                            } else if (movie) TvType.Movie else TvType.TvSeries, fix = false
                         ) {
-                            posterUrl = credit.poster?.takeIf { it.startsWith("/") }
+                            posterUrl = if (credit.anilist) credit.poster else credit.poster?.takeIf { it.startsWith("/") }
                                 ?.let { "https://image.tmdb.org/t/p/w600_and_h900_bestv2$it" }
                         }
                         val covered = detailHandoff?.begin() == true

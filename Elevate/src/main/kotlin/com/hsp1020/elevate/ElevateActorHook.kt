@@ -104,13 +104,20 @@ internal class ElevateActorHook(
                     return it.result
                 }
             anilistFlights[id] ?: io.async(start = CoroutineStart.LAZY) {
-                val cast = try {
-                    AccountManager.aniListApi.load(null, id)?.actors
+                val rows = try {
+                    id.toIntOrNull()?.let { ElevateAniListActors.cast(it) }.orEmpty()
                 } catch (cancelled: CancellationException) { throw cancelled }
-                  catch (e: Exception) {
-                    null
+                  catch (_: Exception) { emptyList() }
+                val found = if (rows.isNotEmpty() && rows.any { it.second.source == ElevateActorSource.ANILIST_CHARACTER }) {
+                    CastResult(rows.map { it.first }, rows.map { it.second })
+                } else {
+                    val cast = try { AccountManager.aniListApi.load(null, id)?.actors }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { null }
+                    if (cast.isNullOrEmpty()) rows.takeIf { it.isNotEmpty() }?.let {
+                        CastResult(it.map { row -> row.first }, it.map { row -> row.second })
+                    } else CastResult(rows.map { it.first } + cast, null)
                 }
-                val found = cast?.takeIf { it.isNotEmpty() }?.let { CastResult(it, null) }
                 if (found != null) synchronized(anilistCache) {
                     anilistCache[id] = Cached(System.currentTimeMillis(), found)
                     if (anilistCache.size > 64) anilistCache.remove(anilistCache.keys.first())
@@ -361,6 +368,39 @@ internal class ElevateActorHook(
             fragment.view?.findViewById(R.id.result_cast_text)
         private val controller = ElevateActorInformation.controllerFor(fragment)
         private val cards = WeakHashMap<View, Pair<ActorData, ElevateActorPersonRef>>()
+        private val animeNames = WeakHashMap<View, Boolean>()
+
+        private fun resetAnimeNames(card: View) {
+            if (animeNames.remove(card) == null) return
+            for (id in listOf(R.id.actor_name, R.id.voice_actor_name)) {
+                card.findViewById<View>(id)?.apply {
+                    setOnClickListener(null)
+                    isClickable = false
+                    isFocusable = false
+                }
+            }
+        }
+
+        private fun bindAnimeNames(card: View, actor: ActorData, adapter: ActorAdaptor) {
+            resetAnimeNames(card)
+            if (actor.voiceActor == null) return
+            animeNames[card] = true
+            for (id in listOf(R.id.actor_name, R.id.voice_actor_name)) {
+                card.findViewById<View>(id)?.apply {
+                    isFocusable = true
+                    setOnClickListener {
+                        if (!active || !ElevateFeaturePrefs.enabled(appContext, ElevateFeature.ACTOR_INFORMATION)) return@setOnClickListener
+                        val pos = list.getChildAdapterPosition(card)
+                        if (pos == RecyclerView.NO_POSITION || adapter.getItemOrNull(pos) !== actor) return@setOnClickListener
+                        val holder = list.findViewHolderForAdapterPosition(pos) as? ViewHolderState<*> ?: return@setOnClickListener
+                        adapter.inverted[actor] = adapter.inverted[actor] != true
+                        @Suppress("UNCHECKED_CAST")
+                        adapter.onUpdateContent(holder as ViewHolderState<Any>, actor, pos)
+                        attachClicks()
+                    }
+                }
+            }
+        }
         private val press = DecelerateInterpolator()
         private var longPressed = false
         private val touch = View.OnTouchListener { card, event ->
@@ -616,13 +656,15 @@ internal class ElevateActorHook(
                 val pos = list.getChildAdapterPosition(card)
                 if (pos == RecyclerView.NO_POSITION) continue
                 card.setOnLongClickListener(searchLongPress)
-                // AniList: leave native click and cast/voice-actor inversion untouched.
-                val person = refs?.getOrNull(pos) ?: continue
+                val person = refs?.getOrNull(pos)
+                if (person == null || person.source == ElevateActorSource.TMDB) resetAnimeNames(card)
+                if (person == null) continue
                 val actor = actors?.getOrNull(pos) ?: continue
                 if (person.id == null || adapter.getItemOrNull(pos) !== actor) {
                     continue
                 }
                 cards[card] = actor to person
+                if (person.source != ElevateActorSource.TMDB) bindAnimeNames(card, actor, adapter)
                 card.setOnTouchListener(touch)
                 val click = object : View.OnClickListener {
                     override fun onClick(view: View) {
@@ -648,9 +690,16 @@ internal class ElevateActorHook(
                             view.setOnLongClickListener(searchLongPress)
                             view.setOnTouchListener(touch)
                         }
+                        val voice = actor.voiceActor
+                        val selected = if (person.source == ElevateActorSource.ANILIST_CHARACTER &&
+                            adapter.inverted[actor] == true && voice != null && person.voiceId != null &&
+                            !voice.image.isNullOrBlank()) {
+                            ElevateActorPersonRef(person.voiceId, voice.name, voice.image, false,
+                                ElevateActorSource.ANILIST_STAFF)
+                        } else person
                         val running = view.findViewById<View>(
                             R.id.voice_actor_image_holder2)?.animation
-                        if (running == null || running.hasEnded()) controller.click(person, view)
+                        if (running == null || running.hasEnded()) controller.click(selected, view)
                         else {
                             pendingAnimation = running
                             running.setAnimationListener(object :
@@ -664,7 +713,7 @@ internal class ElevateActorHook(
                                     if (fragment.isAdded && view.isAttachedToWindow &&
                                         list.getChildAdapterPosition(view) == pos &&
                                         adapter.getItemOrNull(pos) === actor)
-                                        controller.click(person, view)
+                                        controller.click(selected, view)
                                 }
                             })
                         }
@@ -691,6 +740,7 @@ internal class ElevateActorHook(
             pendingAnimation?.setAnimationListener(null)
             pendingAnimation = null
             list.childrenToReset()
+            animeNames.keys.toList().forEach(::resetAnimeNames)
             loadJob?.cancel()
             model.page.removeObserver(observer)
             model.selectedSeasonIndex.removeObserver(seasonIndexObserver)
