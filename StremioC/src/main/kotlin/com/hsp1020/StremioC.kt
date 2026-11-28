@@ -2496,14 +2496,18 @@ open class StremioC(
         }
     }
 
-    internal suspend fun browseCatalogs(): List<Catalog> {
-        if (!isAddonEnabled()) return emptyList()
+    internal suspend fun browseManifest(): Manifest? {
+        if (!isAddonEnabled()) return null
         val prefs = CloudStreamApp.context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
         val raw = prefs?.let { stremioReadManifest(it, mainUrl) }
-        val manifest = if (!raw.isNullOrBlank()) {
+        return if (!raw.isNullOrBlank()) {
             parseMainPageManifestSingleFlight(raw, stremioManifestUrl(mainUrl), raw.toUniqueKey())
         } else getManifest()
-        return manifest?.catalogs?.filter { !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
+    }
+
+    internal suspend fun browseCatalogs(): List<Catalog> {
+        if (!isAddonEnabled()) return emptyList()
+        return browseManifest()?.catalogs?.filter { !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
             ?: throw IllegalStateException("No cached or available manifest")
     }
 
@@ -4892,7 +4896,7 @@ open class StremioC(
         @JsonProperty("embeddedStreamTitle") val embeddedStreamTitle: String? = null
     )
 
-    data class Manifest(val catalogs: List<Catalog>)
+    data class Manifest(val catalogs: List<Catalog>, val id: String? = null)
 
     data class Extra(
         @JsonProperty("name") val name: String?, 

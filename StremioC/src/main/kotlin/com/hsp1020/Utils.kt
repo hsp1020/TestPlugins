@@ -231,7 +231,41 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { _ -> }
+    private val collectionHome = StremioCollectionHome(prefs)
+    private val ratioScreens = mutableMapOf<Fragment, StremioThumbnailRatios>()
+    private val ratioPopups = mutableMapOf<RecyclerView, StremioThumbnailRatios>()
+    private var ratioFocusTree: ViewTreeObserver? = null
+    private val ratioFocus = ViewTreeObserver.OnWindowFocusChangeListener {
+        main.post { discoverRatioPopups() }
+    }
+    private fun discoverRatioPopups() {
+        if (host == null) return
+        val windows = if (Build.VERSION.SDK_INT >= 29) android.view.inspector.WindowInspector.getGlobalWindowViews()
+        else runCatching {
+            val type = Class.forName("android.view.WindowManagerGlobal")
+            val manager = type.getMethod("getInstance").invoke(null)
+            @Suppress("UNCHECKED_CAST")
+            type.getDeclaredField("mViews").apply { isAccessible = true }.get(manager) as List<View>
+        }.getOrDefault(emptyList())
+        val active = windows.mapNotNull { it.findViewById<RecyclerView>(R.id.home_expanded_recycler) }
+            .filter { it.isAttachedToWindow }.toSet()
+        ratioPopups.keys.toList().filter { it !in active }.forEach { ratioPopups.remove(it)?.close() }
+        active.forEach { list ->
+            if (list !in ratioPopups) ratioPopups[list] =
+                StremioThumbnailRatios(list.resources.displayMetrics.density).also { it.watch(list) }
+        }
+    }
+    private fun clearRatioScreens() {
+        ratioFocusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(ratioFocus)
+        ratioFocusTree = null
+        ratioScreens.values.forEach { it.close() }
+        ratioScreens.clear()
+        ratioPopups.values.forEach { it.close() }
+        ratioPopups.clear()
+    }
+    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview) { master ->
+        collectionHome.sync(host, master)
+    }
     private var homeRoot: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
 
@@ -346,6 +380,7 @@ internal class RatingPlotImageHook(
                 homeRoot = null
                 homeEntries.detach()
             }
+            ratioScreens.remove(f)?.close()
             watchers.remove(f)?.detach()
         }
     }
@@ -360,6 +395,7 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        clearRatioScreens()
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
@@ -373,11 +409,16 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        clearRatioScreens()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
+        ratioFocusTree = activity.window.decorView.viewTreeObserver.also {
+            if (it.isAlive) it.addOnWindowFocusChangeListener(ratioFocus)
+        }
+        main.post { discoverRatioPopups() }
         val homeModel = ViewModelProvider(activity)[HomeViewModel::class.java]
         val homeObserver = Observer<String?> { syncHomeHooks() }
         homeModel.apiName.observe(activity, homeObserver)
@@ -398,6 +439,13 @@ internal class RatingPlotImageHook(
     }
 
     private fun attach(f: Fragment, root: View) {
+        if (f.javaClass.name in setOf(
+                "com.lagradost.cloudstream3.ui.home.HomeFragment",
+                "com.lagradost.cloudstream3.ui.search.SearchFragment",
+                "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+            ) && f !in ratioScreens) {
+            ratioScreens[f] = StremioThumbnailRatios(root.resources.displayMetrics.density).also { it.attach(root) }
+        }
         if (watchers.containsKey(f)) return
         if (f.javaClass.name !in setOf(
                 "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
@@ -527,6 +575,7 @@ internal class RatingPlotImageHook(
         removeHomeProviderObserver = null
         homeRoot = null
         homeEntries.detach()
+        clearRatioScreens()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null

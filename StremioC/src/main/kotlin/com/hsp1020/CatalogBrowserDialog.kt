@@ -711,6 +711,7 @@ internal class CatalogBrowserDialog(
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
     private val grid = AutofitRecyclerView(activity)
+    private val thumbnailRatios = StremioThumbnailRatios(activity.resources.displayMetrics.density)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
@@ -1491,6 +1492,8 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.BOTTOM
         })
         grid.adapter = adapter
+        thumbnailRatios.watch(grid)
+        thumbnailRatios.watch(inlineResults, true)
         grid.addItemDecoration(catalogEndDecoration)
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (pageSkeleton.visibility == View.VISIBLE) grid.post { updatePageSkeleton() }
@@ -1551,6 +1554,7 @@ internal class CatalogBrowserDialog(
             activity.findViewById<View>(R.id.nav_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             detailHandoff.close()
+            thumbnailRatios.close()
             grid.adapter = null
             onDismiss()
             (homeTitleFocus ?: tvOriginFocus)?.takeIf { it.isAttachedToWindow }?.let { focus ->
