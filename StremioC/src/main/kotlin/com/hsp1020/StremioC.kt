@@ -1503,9 +1503,20 @@ open class StremioC(
                 invalidateAddonMetaInRam(storageKey)
                 MetadataDiskCache.invalidate("meta", storageKey)
             }
+            val collectionMeta = url.contains("/meta/collection/")
+            fun traceCollectionMeta(phase: String, body: String?) {
+                if (!collectionMeta) return
+                val layout = body?.let { runCatching {
+                    org.json.JSONObject(it).optJSONObject("meta")?.optJSONObject("collection")?.optString("layout", "(absent)")
+                }.getOrNull() }
+                android.util.Log.i("StremioCollection", "META_CACHE phase=$phase key=${storageKey.hashCode()} layout=$layout")
+            }
             val previous = if (forceRefresh && !skipCache) {
-                cachedAddonMetaInRam(storageKey)
-                    ?: MetadataDiskCache.read("meta", storageKey)?.first
+                val ram = cachedAddonMetaInRam(storageKey)
+                if (ram != null) traceCollectionMeta("previous_ram", ram)
+                val disk = if (ram == null) MetadataDiskCache.read("meta", storageKey)?.first else null
+                if (ram == null) traceCollectionMeta(if (disk == null) "miss" else "previous_disk", disk)
+                ram ?: disk
             } else null
             if (!forceRefresh && !skipCache) {
                 cachedAddonMetaInRam(storageKey)?.let {
@@ -1524,9 +1535,11 @@ open class StremioC(
                         val response = customSession.get(url, headers = if (forceRefresh)
                             mapOf("Cache-Control" to "no-cache") else emptyMap())
                         if (response.code !in 200..299) {
+                            traceCollectionMeta("network_http_${response.code}", null)
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
+                        traceCollectionMeta("network_http_${response.code}", body)
                         if (skipCache || isMetadataSwapAllowed(url.substringBefore("/meta/"))) {
                             // The caller still parses the metadata once for the LoadResponse.
                             // Avoid a second JSON tree and validation allocation just for caching.
@@ -1572,6 +1585,7 @@ open class StremioC(
                 throw cancelled
             } catch (error: Exception) {
                 if (forceRefresh && previous != null) {
+                    traceCollectionMeta("fallback_${error.javaClass.simpleName}", previous)
                     previous
                 } else throw error
             }
@@ -2519,9 +2533,13 @@ open class StremioC(
         collectionExportSnapshot?.takeIf { it.first == epoch }?.let { return@withLock it.second }
         val result = try {
             val response = customSession.get(buildUrl("/aiometadata-collections.json"), timeout = 5L)
+            android.util.Log.i("StremioCollection", "EXPORT_HTTP status=${response.code} epoch=$epoch")
             if (response.code in 200..299) CollectionExport.parse(response.text) else CollectionExport.EMPTY
         } catch (e: CancellationException) { throw e }
-        catch (_: Exception) { CollectionExport.EMPTY }
+        catch (e: Exception) {
+            android.util.Log.w("StremioCollection", "EXPORT_FAILED type=${e.javaClass.simpleName} epoch=$epoch")
+            CollectionExport.EMPTY
+        }
         collectionExportSnapshot = epoch to result
         result
     }
@@ -2548,11 +2566,19 @@ open class StremioC(
         }.distinctBy { it.id } to metas.size
     }
 
+    internal suspend fun refreshCollectionPresentation(folders: List<StremioCollectionFolder>): List<StremioCollectionFolder> =
+        if (folders.any { it.id.startsWith("aiom.collection:") }) {
+            val export = collectionExport()
+            folders.map(export::apply)
+        } else folders
+
     internal suspend fun browseCollectionDetail(id: String): StremioCollectionFolder {
         require(isAddonEnabled()) { "Addon disabled" }
-        val raw = fetchAddonMetaText(buildUrl("/meta/collection/${id.urlEncodeLocal()}.json"))
+        val raw = fetchAddonMetaText(buildUrl("/meta/collection/${id.urlEncodeLocal()}.json"), forceRefresh = true)
         val folder = parseStremioCollectionMeta(raw, id)
-        return if (id.startsWith("aiom.collection:")) collectionExport().apply(folder) else folder
+        val resolved = if (id.startsWith("aiom.collection:")) collectionExport().apply(folder) else folder
+        android.util.Log.i("StremioCollection", "META_MODE folder=${id.hashCode()} apiRows=${folder.rows} apiShowAll=${folder.showAll} export=${resolved.presentation.viewMode} finalRows=${resolved.rows} finalShowAll=${resolved.showAll}")
+        return resolved
     }
 
     internal suspend fun browseCatalogs(): List<Catalog> {

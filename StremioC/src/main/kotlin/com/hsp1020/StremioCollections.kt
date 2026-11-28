@@ -21,6 +21,7 @@ import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.isBottomLayout
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
@@ -40,7 +41,8 @@ internal data class StremioCollectionFolder(
     val merge: String = "sequential", val shuffle: Boolean = false,
     val hideTitle: Boolean = false, val emoji: String? = null,
     val backdrop: String? = null, val logo: String? = null,
-    val presentation: CollectionPresentation = CollectionPresentation()
+    val presentation: CollectionPresentation = CollectionPresentation(),
+    val catalogCount: Int? = null
 )
 private fun JSONObject.string(key: String): String? =
     optString(key, "").trim().takeIf { it.isNotEmpty() && it != "null" }
@@ -49,14 +51,17 @@ private fun JSONArray.objects(): List<JSONObject> =
 
 internal data class CollectionPresentation(
     val hideTitle: Boolean = false, val pinToTop: Boolean = false,
-    val followLayout: Boolean = false, val backdrop: String? = null,
-    val afterId: String? = null, val afterType: String? = null
+    val viewMode: String? = null, val backdrop: String? = null,
+    val afterId: String? = null, val afterType: String? = null,
+    val showAll: Boolean? = null
 )
 
 internal class CollectionExport private constructor(
     private val collections: Map<String, CollectionPresentation>,
-    private val folders: Map<String, Pair<Boolean, String?>>
+    private val folders: Map<String, FolderPresentation>
 ) {
+    private data class FolderPresentation(val hideTitle: Boolean, val emoji: String?, val catalogCount: Int)
+
     fun apply(folder: StremioCollectionFolder): StremioCollectionFolder {
         val key = folder.id.removePrefix("aiom.collection:")
         if (key == folder.id) return folder
@@ -65,7 +70,14 @@ internal class CollectionExport private constructor(
             it.copy(backdrop = it.backdrop ?: folder.presentation.backdrop)
         } ?: folder.presentation
         return folder.copy(
-            hideTitle = style?.first ?: folder.hideTitle, emoji = style?.second ?: folder.emoji,
+            hideTitle = style?.hideTitle ?: folder.hideTitle, emoji = style?.emoji ?: folder.emoji,
+            rows = when (presentation.viewMode) {
+                "ROWS" -> true
+                "TABBED_GRID", "FOLLOW_LAYOUT" -> false
+                else -> folder.rows
+            },
+            showAll = presentation.showAll ?: folder.showAll,
+            catalogCount = style?.catalogCount ?: folder.catalogCount,
             presentation = presentation, folders = folder.folders.map(::apply)
         )
     }
@@ -76,11 +88,14 @@ internal class CollectionExport private constructor(
             val json = JSONObject(raw)
             require(json.string("exportType") == "aiometadataCollections" && json.optInt("exportVersion") == 1)
             val collections = mutableMapOf<String, CollectionPresentation>()
-            val folders = mutableMapOf<String, Pair<Boolean, String?>>()
+            val folders = mutableMapOf<String, FolderPresentation>()
+            fun countSources(folder: JSONObject): Int = (folder.optJSONArray("sources")?.length() ?: 0) +
+                folder.optJSONArray("folders")?.objects().orEmpty().sumOf(::countSources)
             fun visit(collectionId: String, entries: JSONArray?) {
                 entries?.objects()?.forEach { folder ->
                     val id = folder.string("id") ?: return@forEach
-                    folders["$collectionId:$id"] = folder.optBoolean("hideTitle") to folder.string("coverEmoji")
+                    folders["$collectionId:$id"] = FolderPresentation(
+                        folder.optBoolean("hideTitle"), folder.string("coverEmoji"), countSources(folder))
                     visit(collectionId, folder.optJSONArray("folders"))
                 }
             }
@@ -89,9 +104,12 @@ internal class CollectionExport private constructor(
                 val id = entry.string("id") ?: return@forEach
                 collections[id] = CollectionPresentation(
                     entry.optBoolean("hideTitle"), entry.optBoolean("pinToTop"),
-                    entry.string("viewMode") == "FOLLOW_LAYOUT", entry.string("backdropImageUrl"),
-                    entry.optJSONObject("after")?.string("id"), entry.optJSONObject("after")?.string("type")
+                    entry.string("viewMode")?.takeIf { it == "ROWS" || it == "TABBED_GRID" || it == "FOLLOW_LAYOUT" },
+                    entry.string("backdropImageUrl"),
+                    entry.optJSONObject("after")?.string("id"), entry.optJSONObject("after")?.string("type"),
+                    if (entry.has("showAllTab")) entry.optBoolean("showAllTab", true) else null
                 )
+                android.util.Log.i("StremioCollection", "EXPORT_MODE collection=${id.hashCode()} mode=${collections[id]?.viewMode} showAll=${collections[id]?.showAll}")
                 visit(id, entry.optJSONArray("folders"))
             }
             return CollectionExport(collections, folders)
@@ -130,7 +148,8 @@ internal fun parseStremioCollectionMeta(raw: String, id: String): StremioCollect
             detail.string("layout").equals("rows", true), detail.optBoolean("showAll", true),
             detail.string("merge") ?: "sequential", detail.optBoolean("shuffle"),
              hideTitle = value.optBoolean("hideTitle"), emoji = value.string("coverEmoji"),
-             backdrop = value.string("background"), logo = value.string("logo"))
+             backdrop = value.string("background"), logo = value.string("logo"),
+             catalogCount = if ((detail.optJSONArray("items")?.length() ?: 0) > 0) null else sources.size)
     }
     return requireNotNull(folder(meta))
 }
@@ -243,6 +262,117 @@ internal class FolderCardAdapter(
         holder.image.setImageDrawable(null)
         holder.root.setOnClickListener(null)
         if (holder.card !== holder.root) holder.card.setOnClickListener(null)
+    }
+}
+
+/** Compact folder rows: artwork and labels only, until a folder is selected. */
+internal class CollectionPreviewAdapter(
+    private val folders: List<StremioCollectionFolder>,
+    private val select: (StremioCollectionFolder) -> Unit
+) : RecyclerView.Adapter<CollectionPreviewAdapter.Holder>() {
+    class Holder(val row: LinearLayout, val cover: ImageView, val emoji: TextView,
+                 val title: TextView, val count: TextView) : RecyclerView.ViewHolder(row) {
+        var bound: StremioCollectionFolder? = null
+    }
+
+    override fun getItemCount() = folders.size
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+        val ctx = parent.context
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            isFocusable = true
+            isClickable = true
+            setPadding(ctx.collectionDp(8), ctx.collectionDp(8), ctx.collectionDp(8), ctx.collectionDp(8))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = ctx.collectionDp(6).toFloat()
+                setColor(ctx.colorFromAttribute(R.attr.primaryGrayBackground))
+            }
+            foreground = themedPressedForeground(this)
+            layoutParams = RecyclerView.LayoutParams(-1, -2).apply {
+                setMargins(ctx.collectionDp(8), ctx.collectionDp(3), ctx.collectionDp(8), ctx.collectionDp(3))
+            }
+        }
+        val art = android.widget.FrameLayout(ctx).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = ctx.collectionDp(5).toFloat()
+                setColor(ctx.colorFromAttribute(R.attr.primaryBlackBackground))
+            }
+            clipToOutline = true
+        }
+        val cover = ImageView(ctx).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val emoji = TextView(ctx).apply {
+            gravity = android.view.Gravity.CENTER
+            textSize = 24f
+            visibility = View.GONE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        art.addView(cover, android.widget.FrameLayout.LayoutParams(-1, -1))
+        art.addView(emoji, android.widget.FrameLayout.LayoutParams(-1, -1))
+        row.addView(art, LinearLayout.LayoutParams(ctx.collectionDp(88), ctx.collectionDp(50)))
+        val labels = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(ctx.collectionDp(12), 0, 0, 0)
+        }
+        val title = TextView(ctx).apply {
+            applyStremioCNativeFont()
+            setTextColor(ctx.colorFromAttribute(R.attr.textColor))
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val count = TextView(ctx).apply {
+            applyStremioCNativeFont()
+            textSize = 12f
+            setTextColor(ctx.colorFromAttribute(R.attr.textColor))
+            alpha = 0.65f
+        }
+        labels.addView(title)
+        labels.addView(count)
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        return Holder(row, cover, emoji, title, count)
+    }
+
+    override fun onBindViewHolder(holder: Holder, position: Int) {
+        val folder = folders[position]
+        holder.bound = folder
+        val ctx = holder.row.context
+        val width = ctx.collectionDp(88)
+        val height = when (folder.shape.lowercase()) {
+            "landscape" -> stremioPosterHeight(width, 16, 9)
+            "square" -> width
+            else -> stremioPosterHeight(width, 2, 3)
+        }
+        val art = holder.cover.parent as View
+        resizeStremioCard(art, width, height, (holder.row.parent as? RecyclerView)?.isComputingLayout == true)
+        holder.title.text = folder.title
+        holder.title.visibility = if (folder.hideTitle) View.GONE else View.VISIBLE
+        holder.count.text = folder.catalogCount?.let { "$it catalog" + if (it == 1) "" else "s" }.orEmpty()
+        holder.count.visibility = if (folder.catalogCount == null) View.GONE else View.VISIBLE
+        holder.row.contentDescription = listOf(folder.title, holder.count.text).filter { it.isNotBlank() }.joinToString(", ")
+        holder.cover.dispose()
+        holder.cover.setImageDrawable(null)
+        holder.emoji.text = folder.emoji.orEmpty()
+        val hasEmoji = !folder.emoji.isNullOrBlank()
+        holder.emoji.visibility = if (folder.cover.isNullOrBlank() && hasEmoji) View.VISIBLE else View.GONE
+        val url = folder.cover?.takeIf { it.isNotBlank() }
+        if (url != null) holder.cover.loadImage(url) {
+            listener(onError = { _, _ ->
+                if (holder.bound === folder && hasEmoji) holder.emoji.visibility = View.VISIBLE
+            })
+        } else if (!hasEmoji) holder.cover.loadImage(R.drawable.default_cover)
+        holder.row.setOnClickListener { select(folder) }
+    }
+
+    override fun onViewRecycled(holder: Holder) {
+        holder.bound = null
+        holder.cover.dispose()
+        holder.cover.setImageDrawable(null)
+        holder.emoji.visibility = View.GONE
+        holder.row.setOnClickListener(null)
     }
 }
 
