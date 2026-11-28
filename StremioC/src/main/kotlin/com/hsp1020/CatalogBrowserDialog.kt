@@ -946,8 +946,8 @@ internal class CatalogBrowserDialog(
         inlineResults.visibility = View.GONE
         inlineLoading.visibility = View.GONE
         inlineEmpty.visibility = View.GONE
-        inlineSelectors.forEach { it.visibility = if (collectionLevel == null) View.VISIBLE else View.GONE }
-        collectionHeader.visibility = if (collectionLevel == null) View.GONE else View.VISIBLE
+        updateCollectionSelectors()
+        collectionHeader.visibility = if (collectionLevel?.configured == true) View.VISIBLE else View.GONE
         grid.visibility = if (initialSkeleton || collectionLevel?.rows == true) View.INVISIBLE else View.VISIBLE
         collectionRows.visibility = if (!initialSkeleton && collectionLevel?.rows == true) View.VISIBLE else View.GONE
         retry.visibility = inlineRetryVisibility
@@ -1502,6 +1502,7 @@ internal class CatalogBrowserDialog(
                 selectorRow("Catalog", catalogSelector, catalogArrow),
                 selectorRow("Genre", genreSelector, genreArrow)
             )
+            updateCollectionSelectors()
             inlineSelectors.forEach { selector ->
                 addView(selector, LinearLayout.LayoutParams(-1, dp(44)).apply {
                     marginStart = dp(10)
@@ -1838,6 +1839,10 @@ internal class CatalogBrowserDialog(
         genre = null
         val entries = catalogs.filter { it.catalog.type == type }
         val requested = pendingCatalog?.takeIf { it.type == type }
+        if (requested == null && pendingFolderId != null) {
+            pendingFolderId = null
+            updateCollectionSelectors()
+        }
         val target = requested?.let { request ->
             entries.firstOrNull { entry ->
                 entry.catalog.id == request.catalogId &&
@@ -1856,6 +1861,8 @@ internal class CatalogBrowserDialog(
         }
         pendingCatalog = null
         if (requested != null && target == null) {
+            pendingFolderId = null
+            updateCollectionSelectors()
             pendingGenre = null
             Toast.makeText(activity, "Requested catalog is not available.", Toast.LENGTH_SHORT).show()
         }
@@ -1871,6 +1878,8 @@ internal class CatalogBrowserDialog(
         genre = null
         val blocked = next.catalog.browseBlockReason()
         if (blocked != null) {
+            pendingFolderId = null
+            updateCollectionSelectors()
             genreSelector.choices("Genre", emptyList(), -1) {}
             Toast.makeText(activity, blocked, Toast.LENGTH_LONG).show()
             return
@@ -1894,6 +1903,8 @@ internal class CatalogBrowserDialog(
             requestPage()
         }
         if (initialGenre != null && genreIndex < 0) {
+            pendingFolderId = null
+            updateCollectionSelectors()
             Toast.makeText(activity, "Requested genre is not available.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -1901,8 +1912,24 @@ internal class CatalogBrowserDialog(
         chosen = true
         hasNext = true
         if (next.catalog.type.equals("collection", true)) {
+            val home = pendingHome?.takeIf { snapshot ->
+                snapshot.folders.isNotEmpty() && snapshot.nextSkip > 0 &&
+                    snapshot.target.type == next.catalog.type && snapshot.target.catalogId == next.catalog.id &&
+                    snapshot.target.genre == genre &&
+                    stremioManifestUrl(snapshot.target.addonUrl.fixSourceUrl()) ==
+                    stremioManifestUrl(next.url.fixSourceUrl())
+            }
             pendingHome = null
-            requestPage()
+            if (home != null) {
+                collectionFolders.addAll(home.folders)
+                offset = home.nextSkip
+                hasNext = home.hasNext && next.catalog.supportsExtra("skip")
+                displayCollectionPage()
+                if (collectionLevel == null) {
+                    initialProgress(false)
+                    updateCatalogResultState()
+                }
+            } else requestPage()
             return
         }
         val liveSnapshot = liveHomeSnapshot(next)
@@ -2141,17 +2168,7 @@ internal class CatalogBrowserDialog(
                 collectionFolders.addAll(fresh)
                 offset += count
                 hasNext = selected.supportsExtra("skip") && count > 0 && fresh.isNotEmpty()
-                val scroll = grid.layoutManager?.onSaveInstanceState()
-                showCollectionCatalog()
-                scroll?.let { grid.layoutManager?.onRestoreInstanceState(it) }
-                val initial = pendingFolderId?.let { id -> collectionFolders.firstOrNull { it.id == id } }
-                if (initial != null) {
-                    pendingFolderId = null
-                    loading = false
-                    openCollection(selected.name ?: selected.id.orEmpty(), collectionFolders.toList(), initial)
-                } else if (pendingFolderId != null && hasNext) {
-                    grid.post { if (!closed && ticket == generation) requestPage() }
-                } else pendingFolderId = null
+                displayCollectionPage()
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
                 if (ticket == generation && !closed) retry.visibility = View.VISIBLE
@@ -2165,6 +2182,26 @@ internal class CatalogBrowserDialog(
         }
     }
 
+
+    private fun displayCollectionPage() {
+        val initial = pendingFolderId?.let { id -> collectionFolders.firstOrNull { it.id == id } }
+        if (initial != null) {
+            pendingFolderId = null
+            loading = false
+            openCollection(catalog?.name ?: catalog?.id.orEmpty(), collectionFolders.toList(), initial)
+        } else {
+            val scroll = grid.layoutManager?.onSaveInstanceState()
+            showCollectionCatalog()
+            scroll?.let { grid.layoutManager?.onRestoreInstanceState(it) }
+            if (pendingFolderId != null && hasNext) {
+                val ticket = generation
+                grid.post { if (!closed && ticket == generation) requestPage() }
+            } else {
+                pendingFolderId = null
+                updateCollectionSelectors()
+            }
+        }
+    }
 
     private fun showCollectionCatalog() {
         grid.adapter = FolderCardAdapter(collectionFolders.toList(), grid) { folder, _ ->
@@ -2203,6 +2240,11 @@ internal class CatalogBrowserDialog(
         autoFillCount = 0
     }
 
+    private fun updateCollectionSelectors() {
+        val visible = !inlineActive && pendingFolderId == null && collectionLevel == null
+        inlineSelectors.forEach { it.visibility = if (visible) View.VISIBLE else View.GONE }
+    }
+
     private fun clearCollectionMode() {
         if (collectionLevel == null) return
         collectionLevel = null
@@ -2211,10 +2253,12 @@ internal class CatalogBrowserDialog(
         collectionBack.isEnabled = false
         collectionHeader.visibility = View.GONE
         collectionHeader.removeAllViews()
+        renderedCollectionLevel = null
+        collectionTabKeys.clear()
         retry.text = "Retry"
         collectionRows.visibility = View.GONE
         collectionRowAdapter.submitList(emptyList())
-        inlineSelectors.forEach { it.visibility = if (inlineActive) View.GONE else View.VISIBLE }
+        updateCollectionSelectors()
     }
 
     private fun openCollection(title: String, folders: List<StremioCollectionFolder>,
@@ -2294,76 +2338,107 @@ internal class CatalogBrowserDialog(
         if (items.isEmpty() && hasNext) requestCollectionContent()
     }
 
+    private var renderedCollectionLevel: CollectionLevel? = null
+    private val collectionTabKeys = mutableMapOf<Int, List<Pair<String, String>>>()
+
+    private data class CollectionTab(
+        val key: String, val title: String, val selected: Boolean, val action: () -> Unit
+    )
+
     private fun renderCollectionHeader() {
         val level = collectionLevel ?: return
-        val focusedText = (collectionHeader.findFocus() as? TextView)?.text?.toString()
-        inlineSelectors.forEach { it.visibility = View.GONE }
-        collectionHeader.visibility = if (inlineActive) View.GONE else View.VISIBLE
-        collectionHeader.removeAllViews()
-        collectionHeader.addView(TextView(activity).apply {
-            text = level.title
-            setTextAppearance(R.style.WatchHeaderText)
-            applyStremioCNativeFont(bold = true, header = true)
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-        })
-        fun tabs(entries: List<Triple<String, Boolean, () -> Unit>>) {
-            if (entries.isEmpty()) return
-            val strip = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(dp(8), 0, dp(8), 0)
-            }
-            var selectedView: View? = null
-            for ((title, selected, action) in entries) {
-                val tab = button(title).apply {
-                    applyStremioCNativeFont(bold = selected)
-                    isSelected = selected
-                    backgroundTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.primaryGrayBackground))
-                    val color = activity.colorFromAttribute(if (selected) R.attr.colorPrimary else R.attr.textColor)
-                    setTextColor(color)
-                    strokeColor = ColorStateList.valueOf(color)
-                    strokeWidth = if (selected) dp(1) else 0
-                    setOnClickListener { action() }
-                }
-                strip.addView(tab, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
-                if (selected) selectedView = tab
-            }
-            val scroll = HorizontalScrollView(activity).apply {
-                isHorizontalScrollBarEnabled = false
-                addView(strip)
-            }
-            collectionHeader.addView(scroll, LinearLayout.LayoutParams(-1, -2))
-            selectedView?.let { tab ->
-                scroll.post {
-                    if (tab.isAttachedToWindow) {
-                        scroll.scrollTo(tab.left, 0)
-                        if (isLayout(TV) && focusedText != null &&
-                            (tab as? TextView)?.text?.toString() == focusedText) tab.requestFocus()
-                    }
-                }
-            }
-        }
-        if (!level.rows) {
-            tabs(buildList {
-                if (level.configured && level.showAll)
-                    add(Triple("All", level.selected == null, { selectCollectionFolder(null) }))
-                level.folders.forEach { folder ->
-                    add(Triple(folder.title, level.selected == folder.id, { selectCollectionFolder(folder.id) }))
-                }
+        updateCollectionSelectors()
+        // Layout and Show All are known only after the first folder metadata arrives.
+        // Don't show a provisional tab strip that would need to be rebuilt a moment later.
+        collectionHeader.visibility = if (inlineActive || !level.configured) View.GONE else View.VISIBLE
+        if (!level.configured) return
+        if (renderedCollectionLevel !== level) {
+            renderedCollectionLevel = level
+            collectionTabKeys.clear()
+            collectionHeader.removeAllViews()
+            collectionHeader.addView(TextView(activity).apply {
+                text = level.title
+                setTextAppearance(R.style.WatchHeaderText)
+                applyStremioCNativeFont(bold = true, header = true)
+                setPadding(dp(12), dp(6), dp(12), dp(6))
             })
-            val state = selectedFolderPages()
-            val detail = state?.detail
-            if (state != null && detail != null) {
-                if (state.titles.size > 1) tabs(buildList {
-                    if (detail.showAll) add(Triple("All", state.selectedSource < 0, { selectCollectionSource(-1) }))
-                    state.titles.forEachIndexed { index, title ->
-                        add(Triple(title, state.selectedSource == index, { selectCollectionSource(index) }))
-                    }
-                })
-                tabs(detail.folders.map { folder ->
-                    Triple(folder.title, false, { openCollection(detail.title, detail.folders, folder) })
-                })
+            repeat(3) {
+                collectionHeader.addView(HorizontalScrollView(activity).apply {
+                    isHorizontalScrollBarEnabled = false
+                    visibility = View.GONE
+                    addView(LinearLayout(activity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        setPadding(dp(8), 0, dp(8), 0)
+                    })
+                }, LinearLayout.LayoutParams(-1, -2))
             }
         }
+        fun tabs(slot: Int, entries: List<CollectionTab>) {
+            val scroll = collectionHeader.getChildAt(slot + 1) as HorizontalScrollView
+            val strip = scroll.getChildAt(0) as LinearLayout
+            val keys = entries.map { it.key to it.title }
+            val rebuild = collectionTabKeys[slot] != keys
+            if (rebuild) {
+                collectionTabKeys[slot] = keys
+                strip.removeAllViews()
+                entries.forEach { entry ->
+                    val tab = button(entry.title).apply {
+                        applyStremioCNativeFont(bold = false)
+                        val normal = typeface
+                        applyStremioCNativeFont(bold = true)
+                        tag = normal to typeface
+                        backgroundTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+                        val spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                        measure(spec, spec)
+                    }
+                    strip.addView(tab, LinearLayout.LayoutParams(tab.measuredWidth, -2).apply { marginEnd = dp(4) })
+                }
+            }
+            scroll.visibility = if (entries.isEmpty()) View.GONE else View.VISIBLE
+            var selectedView: View? = null
+            entries.forEachIndexed { index, entry ->
+                val tab = strip.getChildAt(index) as MaterialButton
+                tab.setOnClickListener { entry.action() }
+                if (rebuild || tab.isSelected != entry.selected) {
+                    tab.isSelected = entry.selected
+                    val fonts = tab.tag as? Pair<*, *>
+                    (if (entry.selected) fonts?.second else fonts?.first)?.let { font ->
+                        tab.typeface = font as android.graphics.Typeface
+                    }
+                    val color = activity.colorFromAttribute(if (entry.selected) R.attr.colorPrimary else R.attr.textColor)
+                    tab.setTextColor(color)
+                    tab.strokeColor = ColorStateList.valueOf(color)
+                    tab.strokeWidth = if (entry.selected) dp(1) else 0
+                }
+                if (entry.selected) selectedView = tab
+            }
+            // Only place the initial selection on a new row; ordinary tab clicks never scroll it.
+            if (rebuild) selectedView?.let { tab ->
+                scroll.doOnNextLayout {
+                    if (renderedCollectionLevel === level && tab.parent === strip)
+                        scroll.scrollTo(tab.left, 0)
+                }
+            }
+        }
+        tabs(0, if (level.rows) emptyList() else buildList {
+            if (level.showAll) add(CollectionTab("all", "All", level.selected == null) { selectCollectionFolder(null) })
+            level.folders.forEach { folder ->
+                add(CollectionTab("folder:" + folder.id, folder.title, level.selected == folder.id) {
+                    selectCollectionFolder(folder.id)
+                })
+            }
+        })
+        val state = selectedFolderPages()
+        val detail = state?.detail
+        tabs(1, if (level.rows || state == null || detail == null || state.titles.size <= 1) emptyList() else buildList {
+            if (detail.showAll) add(CollectionTab("all", "All", state.selectedSource < 0) { selectCollectionSource(-1) })
+            state.titles.forEachIndexed { index, title ->
+                add(CollectionTab("source:" + index, title, state.selectedSource == index) { selectCollectionSource(index) })
+            }
+        })
+        tabs(2, if (level.rows || detail == null) emptyList() else detail.folders.map { folder ->
+            CollectionTab(folder.id, folder.title, false) { openCollection(detail.title, detail.folders, folder) }
+        })
     }
 
     private fun allFolderPages(level: CollectionLevel): List<CollectionFolderPages> {
@@ -2562,7 +2637,8 @@ internal data class CatalogHomeSnapshot(
     val target: CatalogShortcutTarget,
     val items: List<SearchResponse>,
     val nextSkip: Int,
-    val hasNext: Boolean
+    val hasNext: Boolean,
+    val folders: List<StremioCollectionFolder> = emptyList()
 )
 
 

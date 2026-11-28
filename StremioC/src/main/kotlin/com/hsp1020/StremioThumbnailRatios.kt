@@ -19,6 +19,24 @@ import kotlin.math.roundToInt
 internal fun stremioPosterHeight(width: Int, imageWidth: Int, imageHeight: Int): Int =
     (width.toFloat() * imageHeight / imageWidth).roundToInt().coerceAtLeast(1)
 
+/** Change layout parameters only when necessary. Binding/detaching during a layout
+ * already has a measure pass; force measurement locally instead of requesting another pass. */
+internal fun resizeStremioCard(view: View, width: Int = view.layoutParams.width,
+                               height: Int = view.layoutParams.height, duringLayout: Boolean = false) {
+    val params = view.layoutParams
+    if (params.width == width && params.height == height) return
+    params.width = width
+    params.height = height
+    if (duringLayout) {
+        view.forceLayout()
+        var parent = view.parent as? View
+        while (parent != null && parent !is RecyclerView) {
+            parent.forceLayout()
+            parent = parent.parent as? View
+        }
+    } else view.layoutParams = params
+}
+
 /** Only StremioC results; uses the already completed Coil request. */
 internal class StremioThumbnailRatios(private val density: Float) {
     private val watchers = IdentityHashMap<RecyclerView, Watcher>()
@@ -90,7 +108,9 @@ internal class StremioThumbnailRatios(private val density: Float) {
             override fun onItemRangeMoved(from: Int, to: Int, count: Int) = schedule()
         }
         private val children = object : RecyclerView.OnChildAttachStateChangeListener {
-            override fun onChildViewAttachedToWindow(view: View) { apply(view) }
+            override fun onChildViewAttachedToWindow(view: View) {
+                if (list.isComputingLayout) schedule() else apply(view)
+            }
             override fun onChildViewDetachedFromWindow(view: View) {
                 if (parent) {
                     view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let {
@@ -142,6 +162,8 @@ internal class StremioThumbnailRatios(private val density: Float) {
             for (i in 0 until list.childCount) apply(list.getChildAt(i))
         }
         private fun apply(view: View) {
+            if (closed) return
+            if (list.isComputingLayout) { schedule(); return }
             if (parent) {
                 view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
                     ?.let { watch(it, false) }
@@ -198,16 +220,12 @@ internal class StremioThumbnailRatios(private val density: Float) {
                 (if (list is AutofitRecyclerView) state.image.layoutParams.height
                  else state.card.layoutParams.height) == height) return
             if (list is AutofitRecyclerView) {
-                state.card.layoutParams = state.card.layoutParams.apply { this.width = width }
-                state.image.layoutParams = state.image.layoutParams.apply { this.height = height }
+                resizeStremioCard(state.card, width = width)
+                resizeStremioCard(state.image, height = height)
             } else {
-                state.card.layoutParams = state.card.layoutParams.apply {
-                    this.width = width
-                    this.height = height
-                }
-                if (state.title.parent !== state.card) {
-                    state.title.layoutParams = state.title.layoutParams.apply { this.width = width }
-                }
+                resizeStremioCard(state.card, width, height)
+                if (state.title.parent !== state.card)
+                    resizeStremioCard(state.title, width = width)
             }
             state.applied = true
         }
@@ -217,15 +235,10 @@ internal class StremioThumbnailRatios(private val density: Float) {
         }
         private fun restoreSize(state: CardState) {
             if (!state.applied) return
-            state.card.layoutParams = state.card.layoutParams.apply {
-                width = state.originalWidth; height = state.originalHeight
-            }
-            state.image.layoutParams = state.image.layoutParams.apply {
-                height = state.originalImageHeight
-            }
-            state.title.layoutParams = state.title.layoutParams.apply {
-                width = state.originalTitleWidth
-            }
+            val computing = list.isComputingLayout
+            resizeStremioCard(state.card, state.originalWidth, state.originalHeight, computing)
+            resizeStremioCard(state.image, height = state.originalImageHeight, duringLayout = computing)
+            resizeStremioCard(state.title, width = state.originalTitleWidth, duringLayout = computing)
             state.applied = false
         }
         private fun restore(view: View) {

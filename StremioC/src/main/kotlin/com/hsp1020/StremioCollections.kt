@@ -88,6 +88,7 @@ internal class FolderCardAdapter(
         val image: ImageView = root.findViewById(R.id.imageView)
         val label: TextView = root.findViewById(R.id.imageText)
         var boundFolder: StremioCollectionFolder? = null
+        var parentList: RecyclerView? = null
     }
     override fun getItemCount() = folders.size
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
@@ -98,6 +99,7 @@ internal class FolderCardAdapter(
             if (ctx.isBottomLayout()) R.layout.search_result_grid_expanded else R.layout.search_result_grid
         }
         return Holder(android.view.LayoutInflater.from(ctx).inflate(layout, parent, false)).apply {
+            parentList = parent as? RecyclerView
             root.isFocusable = true
             root.isClickable = true
             if (card !== root) card.isFocusable = false
@@ -116,13 +118,10 @@ internal class FolderCardAdapter(
             ?: (if (wide) HomeChildItemAdapter.maxPosterSize else HomeChildItemAdapter.minPosterSize)
                 .takeIf { it > 0 } ?: ctx.collectionDp(if (wide) 180 else 114)
         fun size(width: Int, height: Int) {
-            holder.card.layoutParams = holder.card.layoutParams.apply {
-                this.width = width
-                this.height = height
-            }
-            if (holder.label.parent !== holder.card && holder.card !== holder.root) {
-                holder.label.layoutParams = holder.label.layoutParams.apply { this.width = width }
-            }
+            val computing = holder.parentList?.isComputingLayout == true
+            resizeStremioCard(holder.card, width, height, computing)
+            if (holder.label.parent !== holder.card && holder.card !== holder.root)
+                resizeStremioCard(holder.label, width = width, duringLayout = computing)
         }
         val landscape = folder.shape.equals("landscape", true)
         val width = cardWidth(landscape)
@@ -142,7 +141,16 @@ internal class FolderCardAdapter(
                 if (holder.boundFolder !== folder || request.data.toString() != url) return@success
                 val w = result.image.width
                 val h = result.image.height
-                if (w > 0 && h > 0) size(cardWidth(w > h), stremioPosterHeight(cardWidth(w > h), w, h))
+                if (w > 0 && h > 0) {
+                    val applySize = {
+                        if (holder.boundFolder === folder) {
+                            val width = cardWidth(w > h)
+                            size(width, stremioPosterHeight(width, w, h))
+                        }
+                    }
+                    if (holder.parentList?.isComputingLayout == true) holder.parentList?.post { applySize() }
+                    else applySize()
+                }
             })
         }
         holder.root.setOnClickListener { select(folder, holder.root) }
@@ -167,7 +175,7 @@ internal class StremioCollectionHome(
     private var provider: StremioC? = null
     private var scope: CoroutineScope? = null
     private var job: Job? = null
-    private var loaded: List<Pair<StremioC.Catalog, List<StremioCollectionFolder>>>? = null
+    private var loaded: List<Pair<StremioC.Catalog, Pair<List<StremioCollectionFolder>, Int>>>? = null
 
     fun sync(activity: FragmentActivity?, master: RecyclerView?, selected: StremioC?) {
         if (activity == null || selected == null || !selected.hasMainPage) {
@@ -223,9 +231,9 @@ internal class StremioCollectionHome(
                         val genre = catalog.homeGenre() ?: if (catalog.requiresExtra("genre"))
                             catalog.browseGenres().firstOrNull() else null
                         try {
-                            catalog to semaphore.withPermit { selected.browseCollectionFolders(catalog, genre).first }
+                            catalog to semaphore.withPermit { selected.browseCollectionFolders(catalog, genre) }
                         } catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { catalog to emptyList() }
+                        catch (_: Exception) { catalog to (emptyList<StremioCollectionFolder>() to 0) }
                     } }.awaitAll()
                 }
             }
@@ -250,11 +258,14 @@ internal class StremioCollectionHome(
         if (!target.isAttachedToWindow || section != null) return
         val panel = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            loaded.orEmpty().filter { it.second.isNotEmpty() }.forEach { (catalog, folders) ->
+            loaded.orEmpty().filter { it.second.first.isNotEmpty() }.forEach { (catalog, page) ->
+                val (folders, count) = page
                 val catalogId = catalog.id ?: return@forEach
                 val genre = catalog.homeGenre() ?: if (catalog.requiresExtra("genre"))
                     catalog.browseGenres().firstOrNull() else null
                 val shortcut = CatalogShortcutTarget(source.mainUrl, "collection", catalogId, genre)
+                val snapshot = CatalogHomeSnapshot(shortcut, emptyList(), count,
+                    catalog.supportsExtra("skip") && count > 0 && folders.isNotEmpty(), folders)
                 val rowLayout = when {
                     isLayout(TV) -> R.layout.homepage_parent_tv
                     isLayout(EMULATOR) -> R.layout.homepage_parent_emulator
@@ -268,12 +279,13 @@ internal class StremioCollectionHome(
                         isFocusable = true
                         foreground = themedPressedForeground(this)
                     }
-                    setOnClickListener { openCatalog(shortcut, null) }
+                    setOnClickListener { openCatalog(shortcut, snapshot) }
                 }
                 row.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.apply {
                     layoutManager = LinearLayoutManager(activity, RecyclerView.HORIZONTAL, false)
                     adapter = FolderCardAdapter(folders) { folder, _ ->
-                        openCatalog(shortcut.copy(folderId = folder.id), null)
+                        val target = shortcut.copy(folderId = folder.id)
+                        openCatalog(target, snapshot.copy(target = target))
                     }
                 }
                 addView(row)
