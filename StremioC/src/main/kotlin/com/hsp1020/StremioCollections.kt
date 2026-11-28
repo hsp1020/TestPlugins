@@ -244,7 +244,7 @@ internal class FolderCardAdapter(
                 text = folder.catalogCount?.let { "$it catalog" + if (it == 1) "" else "s" }.orEmpty()
                 visibility = if (folder.catalogCount == null) View.GONE else View.VISIBLE
             }
-            holder.card.contentDescription = listOf(folder.title, holder.count?.text.orEmpty()).filter { it.isNotBlank() }.joinToString(", ")
+            holder.card.contentDescription = listOf(folder.title, holder.count?.text?.toString().orEmpty()).filter { it.isNotBlank() }.joinToString(", ")
         }
         if (!folder.emoji.isNullOrBlank() && holder.emoji == null) {
             (holder.art as? android.widget.FrameLayout)?.let { frame ->
