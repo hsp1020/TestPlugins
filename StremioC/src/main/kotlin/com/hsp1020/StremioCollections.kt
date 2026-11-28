@@ -194,7 +194,7 @@ internal class FolderCardAdapter(
                 (art.layoutParams as android.widget.FrameLayout.LayoutParams).gravity = android.view.Gravity.CENTER_VERTICAL
                 label.applyStremioCNativeFont(bold = true)
                 count?.apply {
-                    setTextAppearance(R.style.WatchHeaderText)
+                    setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, TextView(ctx).textSize)
                     applyStremioCNativeFont(bold = true, header = true)
                 }
                 root.findViewById<View>(R.id.imageTextProvider)?.visibility = View.GONE
