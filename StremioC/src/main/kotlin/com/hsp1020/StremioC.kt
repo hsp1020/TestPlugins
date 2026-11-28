@@ -5023,8 +5023,8 @@ open class StremioC(
         } else null
 
         fun supportsHome(): Boolean {
-            if (showInHome == false) return false
             if (type.equals("collection", true)) return !id.isNullOrBlank() && browseBlockReason() == null
+            if (showInHome == false) return false
             val required = extra.orEmpty().filter { it.isRequired == true }.mapNotNull { it.name } +
                 extraRequired.orEmpty()
             return !id.isNullOrBlank() && required.all { it == "genre" || it == "skip" } &&
