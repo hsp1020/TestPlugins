@@ -210,19 +210,17 @@ internal class StremioThumbnailRatios(private val density: Float) {
             val w = loaded.image.width
             val h = loaded.image.height
             if (w <= 8 || h <= 8) return
-            val width: Int
-            val height: Int
-            if (list is AutofitRecyclerView) {
-                width = (list.itemWidth - dp(4)).takeIf { it > 0 } ?: return
-                height = stremioPosterHeight(width, w, h)
-            } else {
-                // A horizontal catalog keeps its native row height even with mixed poster shapes.
-                val horizontal = (adapter as? HomeChildItemAdapter)?.isHorizontal == true
-                height = (if (horizontal) HomeChildItemAdapter.minPosterSize
-                    else HomeChildItemAdapter.maxPosterSize).takeIf { it > 0 }
-                    ?: dp(if (horizontal) 114 else 180)
-                width = stremioPosterHeight(height, h, w)
-            }
+            val landscape = w.toFloat() / h > 1.15f
+            val width = if (list is AutofitRecyclerView) {
+                (list.itemWidth - dp(4)).takeIf { it > 0 } ?: return
+            } else (if (landscape) HomeChildItemAdapter.maxPosterSize
+                else HomeChildItemAdapter.minPosterSize).takeIf { it > 0 }
+                ?: dp(if (landscape) 180 else 114)
+            val height = if (list is AutofitRecyclerView) {
+                (width / (if (landscape) 1.8f else 0.68f)).roundToInt().coerceAtLeast(1)
+            } else (if (landscape) HomeChildItemAdapter.minPosterSize
+                else HomeChildItemAdapter.maxPosterSize).takeIf { it > 0 }
+                ?: dp(if (landscape) 114 else 180)
             if (state.applied && state.card.layoutParams.width == width &&
                 (if (list is AutofitRecyclerView) state.image.layoutParams.height
                  else state.card.layoutParams.height) == height) return

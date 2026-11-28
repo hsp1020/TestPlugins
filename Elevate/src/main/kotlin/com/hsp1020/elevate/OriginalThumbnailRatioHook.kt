@@ -256,8 +256,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val position = recycler.getChildViewHolder(view).bindingAdapterPosition
                 val item = if (position == RecyclerView.NO_POSITION) null
                     else adapter.getItemOrNull(position) as? SearchResponse
-                // StremioC owns its search carousel sizing, including dynamically named addons.
-                if (role == Role.SEARCH_ROW && item != null &&
+                // StremioC owns its catalog/search sizing; leave continue watching independent.
+                if (role != Role.RESUME && item != null &&
                     (item.apiName == "StremioC" || com.lagradost.cloudstream3.APIHolder.getApiFromNameNull(item.apiName)
                         ?.javaClass?.name == "com.hsp1020.StremioC")) return restore(view)
                 // YouTube's own hook owns expanded catalog sizing; keep search ratios unchanged.
