@@ -2184,9 +2184,6 @@ internal class CatalogBrowserDialog(
 
     private fun displayCollectionPage() {
         val initial = pendingFolderId?.let { id -> collectionFolders.firstOrNull { it.id == id } }
-            ?: collectionFolders.firstOrNull()?.takeIf {
-                pendingFolderId == null && (it.rows || catalog?.id?.startsWith("aiom.collection.") == true)
-            }
         if (initial != null) {
             pendingFolderId = null
             loading = false

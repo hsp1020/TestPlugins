@@ -193,7 +193,10 @@ internal class FolderCardAdapter(
                 card.foreground = tvOutlinedForeground(card, card.foreground)
                 (art.layoutParams as android.widget.FrameLayout.LayoutParams).gravity = android.view.Gravity.CENTER_VERTICAL
                 label.applyStremioCNativeFont(bold = true)
-                count?.applyStremioCNativeFont(bold = true)
+                count?.apply {
+                    setTextAppearance(R.style.WatchHeaderText)
+                    applyStremioCNativeFont(bold = true, header = true)
+                }
                 root.findViewById<View>(R.id.imageTextProvider)?.visibility = View.GONE
             } else label.applyStremioCNativeFont()
             label.visibility = View.VISIBLE
